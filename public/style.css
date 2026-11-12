@@ -1,0 +1,892 @@
+/* A ledger page: dates in the margin, entries to the right of a ruled red line. */
+
+@font-face {
+  font-family: "Barlow Condensed";
+  font-weight: 700;
+  font-display: swap;
+  src: url("/fonts/display-700.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Barlow Condensed";
+  font-weight: 800;
+  font-display: swap;
+  src: url("/fonts/display-800.woff2") format("woff2");
+}
+
+/* One monospace face for everything except headings, shipped with the app: reading text, dates, stamps, buttons. */
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-weight: 400;
+  font-display: swap;
+  src: url("/fonts/mono-400.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-weight: 400;
+  font-style: italic;
+  font-display: swap;
+  src: url("/fonts/mono-400-italic.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-weight: 600;
+  font-display: swap;
+  src: url("/fonts/mono-600.woff2") format("woff2");
+}
+
+:root {
+  --paper: #f5f0e6;
+  --paper-deep: #ebe4d6;
+  --ink: #1d1a16;
+  --ink-soft: #6b6457;
+  --rule: #d8cfbd;
+  --red: #c2311c;
+  --green: #2f6b4a;
+  --mono: "IBM Plex Mono", "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+  /* Headings: heavy condensed capitals, like lettering on a ledger's spine, over typewritten entries. */
+  --display: "Barlow Condensed", "Arial Narrow", Impact, sans-serif;
+  --gutter: 8.5rem;
+  --measure: 44rem;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--paper);
+  color: var(--ink);
+  font: 0.9rem/1.7 var(--mono);
+  -webkit-font-smoothing: antialiased;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+:focus-visible {
+  outline: 2px solid var(--red);
+  outline-offset: 2px;
+}
+
+::selection {
+  background: var(--ink);
+  color: var(--paper);
+}
+
+a {
+  color: inherit;
+  text-decoration-color: var(--red);
+  text-underline-offset: 0.15em;
+}
+
+/* ---- masthead ---------------------------------------------------------- */
+
+.masthead {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.9rem 1.5rem;
+  border-bottom: 1px solid var(--rule);
+}
+
+.brand {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+}
+
+.wordmark {
+  font: 800 1.7rem/1 var(--display);
+  letter-spacing: 0.01em;
+  text-transform: uppercase;
+  text-decoration: none;
+}
+
+.wordmark:hover {
+  color: var(--red);
+}
+
+.tagline {
+  font: 0.7rem var(--mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 1.25rem;
+}
+
+.link {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: 0.75rem var(--mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  color: var(--ink-soft);
+}
+
+.link:hover {
+  color: var(--ink);
+}
+
+/* The clock, drawn as a rubber date stamp. */
+.stamp {
+  padding: 0.3rem 0.6rem;
+  border: 1.5px solid var(--red);
+  border-radius: 3px;
+  background: none;
+  color: var(--red);
+  font: 600 0.72rem var(--mono);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  transform: rotate(-1.5deg);
+  transition: transform 0.15s ease;
+}
+
+.stamp:hover {
+  transform: rotate(0deg);
+}
+
+.stamp.simulated {
+  background: var(--red);
+  color: var(--paper);
+}
+
+.popover {
+  position: absolute;
+  top: calc(100% + 0.5rem);
+  right: 1.5rem;
+  z-index: 3;
+  width: min(21.5rem, calc(100vw - 2rem));
+  padding: 1rem;
+  border: 1px solid var(--ink);
+  background: var(--paper);
+  box-shadow: 4px 4px 0 var(--ink);
+  font-size: 0.9rem;
+}
+
+.popover p {
+  margin: 0 0 0.75rem;
+  color: var(--ink-soft);
+  line-height: 1.45;
+}
+
+/* A hand-drawn calendar, because the browser's own picker ignores the page's type and colours. */
+.cal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 0.4rem;
+  border-bottom: 1px solid var(--ink);
+  font: 600 0.72rem var(--mono);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.cal-head button {
+  width: 1.8rem;
+  height: 1.8rem;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink-soft);
+  font: 0.95rem var(--mono);
+}
+
+.cal-head button:hover {
+  color: var(--red);
+}
+
+.cal-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  margin-top: 0.4rem;
+  font: 0.78rem var(--mono);
+}
+
+.cal-grid span {
+  padding: 0.3rem 0;
+  text-align: center;
+  font-size: 0.62rem;
+  letter-spacing: 0.08em;
+  color: var(--ink-soft);
+}
+
+.cal-grid button {
+  position: relative;
+  aspect-ratio: 1;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+}
+
+.cal-grid button:hover {
+  box-shadow: inset 0 0 0 1px var(--ink);
+}
+
+/* The real present, so it is easy to see how far the clock has been moved. */
+.cal-grid button.today {
+  color: var(--red);
+}
+
+.cal-grid button.today::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: 0.2rem;
+  width: 0.25rem;
+  height: 0.25rem;
+  border-radius: 50%;
+  background: currentColor;
+  transform: translateX(-50%);
+}
+
+.cal-grid button.selected {
+  background: var(--ink);
+  color: var(--paper);
+}
+
+.cal-time {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin-top: 0.7rem;
+  padding-top: 0.7rem;
+  border-top: 1px solid var(--rule);
+  font: 0.72rem var(--mono);
+}
+
+.cal-time .label {
+  margin-right: 0.2rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+
+/* One half of the time: a two-digit field with a pair of step arrows beside it. */
+.spin {
+  display: grid;
+  grid-template: 1fr 1fr / auto auto;
+  align-items: stretch;
+  border: 1px solid var(--ink);
+}
+
+.spin:focus-within {
+  box-shadow: 2px 2px 0 var(--ink);
+}
+
+.spin input {
+  grid-row: 1 / 3;
+  width: 2.5rem;
+  padding: 0.25rem 0;
+  border: 0;
+  border-radius: 0;
+  outline: none;
+  background: none;
+  font: 600 1.05rem var(--mono);
+  text-align: center;
+}
+
+.spin button {
+  width: 1.3rem;
+  padding: 0;
+  border: 0;
+  border-left: 1px solid var(--ink);
+  background: none;
+  color: var(--ink-soft);
+  font-size: 0.45rem;
+  line-height: 1;
+  touch-action: manipulation;
+}
+
+.spin button + button {
+  border-top: 1px solid var(--ink);
+}
+
+.spin button:hover {
+  background: var(--ink);
+  color: var(--paper);
+}
+
+.cal-time .colon {
+  font: 600 1.05rem var(--mono);
+}
+
+#clock-summary {
+  margin-left: auto;
+  white-space: nowrap;
+  color: var(--red);
+}
+
+.cal-presets {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 0.3rem;
+  margin-top: 0.6rem;
+}
+
+.cal-presets button {
+  padding: 0.3rem 0;
+  border: 1px solid var(--rule);
+  background: none;
+  font: 0.7rem var(--mono);
+  color: var(--ink-soft);
+}
+
+.cal-presets button:hover {
+  border-color: var(--ink);
+  color: var(--ink);
+}
+
+.cal-presets button.selected {
+  border-color: var(--ink);
+  background: var(--ink);
+  color: var(--paper);
+}
+
+.popover .row {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.9rem;
+}
+
+.popover .row button {
+  padding: 0.4rem 0.8rem;
+  border: 1px solid var(--ink);
+  background: var(--ink);
+  color: var(--paper);
+  font: 0.72rem var(--mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.popover .row button.quiet {
+  background: none;
+  color: var(--ink);
+}
+
+/* ---- thread ------------------------------------------------------------ */
+
+.thread {
+  flex: 1;
+  overflow-y: auto;
+  /* The margin line of the ledger page. */
+  background: linear-gradient(var(--red), var(--red)) calc(var(--gutter) + 3rem) 0 / 1px 100% no-repeat;
+  background-attachment: local;
+}
+
+.entry {
+  display: grid;
+  grid-template-columns: var(--gutter) minmax(0, var(--measure));
+  column-gap: 3rem;
+  padding: 1.75rem 1.5rem;
+  border-bottom: 1px solid var(--rule);
+  animation: settle 0.3s ease both;
+}
+
+@keyframes settle {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+.gutter {
+  padding-top: 0.35rem;
+  text-align: right;
+  font: 0.72rem/1.5 var(--mono);
+  letter-spacing: 0.04em;
+  color: var(--ink-soft);
+}
+
+.gutter time {
+  display: block;
+  font-size: 0.95rem;
+  color: var(--red);
+}
+
+.question {
+  margin: 0 0 0.75rem;
+  /* Mixed case on purpose: these are the user's own words, and capitals would change how they read. */
+  font: 700 1.55rem/1.2 var(--display);
+  white-space: pre-wrap;
+}
+
+/* What the agent did before answering: dates understood, searches run. */
+.trace {
+  margin: 0 0 0.9rem;
+  padding: 0;
+  list-style: none;
+  font: 0.74rem/1.7 var(--mono);
+  color: var(--ink-soft);
+}
+
+.trace li {
+  display: flex;
+  gap: 0.6rem;
+}
+
+.trace .kind {
+  flex: none;
+  width: 3.6rem;
+  color: var(--ink);
+}
+
+.trace .state {
+  flex: none;
+  margin-left: auto;
+  padding-left: 1rem;
+  white-space: nowrap;
+}
+
+.trace .running .state::after {
+  content: "…";
+  animation: blink 1s steps(2) infinite;
+}
+
+.trace .failed .state {
+  color: var(--red);
+}
+
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+.answer:empty::before {
+  content: "";
+  display: inline-block;
+  width: 0.55em;
+  height: 1.05em;
+  vertical-align: text-bottom;
+  background: var(--ink);
+  animation: blink 1s steps(2) infinite;
+}
+
+.answer > :first-child {
+  margin-top: 0;
+}
+
+.answer > :last-child {
+  margin-bottom: 0;
+}
+
+.answer h1,
+.answer h2,
+.answer h3 {
+  margin: 1.4em 0 0.4em;
+  font-size: 1.1rem;
+  line-height: 1.3;
+}
+
+.answer ul,
+.answer ol {
+  padding-left: 1.3rem;
+}
+
+.answer li + li {
+  margin-top: 0.25em;
+}
+
+.answer code {
+  padding: 0.05em 0.3em;
+  background: var(--paper-deep);
+  font: 0.85em var(--mono);
+}
+
+.answer pre {
+  overflow-x: auto;
+  padding: 0.8rem 1rem;
+  background: var(--paper-deep);
+}
+
+.answer pre code {
+  padding: 0;
+  background: none;
+}
+
+.answer table {
+  display: block;
+  overflow-x: auto;
+  margin: 1em 0;
+  border-collapse: collapse;
+  font-size: 0.93rem;
+  line-height: 1.4;
+}
+
+.answer th,
+.answer td {
+  padding: 0.45rem 0.9rem 0.45rem 0;
+  border-bottom: 1px solid var(--rule);
+  text-align: left;
+  vertical-align: top;
+}
+
+.answer th {
+  border-bottom-color: var(--ink);
+  font: 0.68rem var(--mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.cite {
+  margin-left: 0.1em;
+  font: 0.68em var(--mono);
+  vertical-align: 0.35em;
+  color: var(--red);
+  text-decoration: none;
+}
+
+.cite:hover {
+  text-decoration: underline;
+}
+
+.sources {
+  margin: 1.1rem 0 0;
+  padding: 0.7rem 0 0;
+  border-top: 1px solid var(--rule);
+  list-style: none;
+  font: 0.74rem/1.7 var(--mono);
+  color: var(--ink-soft);
+}
+
+.sources li {
+  display: flex;
+  gap: 0.6rem;
+}
+
+.sources .n {
+  flex: none;
+  width: 1.4rem;
+  color: var(--red);
+}
+
+.sources a {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-decoration: none;
+}
+
+.sources a:hover {
+  color: var(--ink);
+}
+
+.sources .host {
+  color: var(--ink);
+}
+
+.timings {
+  margin-top: 0.7rem;
+  font: 0.7rem var(--mono);
+  letter-spacing: 0.03em;
+  color: var(--ink-soft);
+}
+
+.failure {
+  color: var(--red);
+  font: 0.85rem var(--mono);
+}
+
+/* ---- empty state ------------------------------------------------------- */
+
+.empty {
+  padding: 4.5rem 1.5rem 2rem calc(var(--gutter) + 4.5rem);
+}
+
+/* The headline may run wider than the reading column; the text under it may not. */
+.empty p,
+.starters {
+  max-width: var(--measure);
+}
+
+.empty h1 {
+  margin: 0;
+  font: 800 clamp(2.6rem, 6.5vw, 4.6rem) / 0.95 var(--display);
+  letter-spacing: -0.005em;
+  text-transform: uppercase;
+  text-wrap: balance;
+}
+
+.empty p {
+  margin: 1rem 0 2rem;
+  color: var(--ink-soft);
+}
+
+.starters {
+  display: grid;
+  gap: 0;
+  border-top: 1px solid var(--rule);
+}
+
+.starters button {
+  padding: 0.7rem 0;
+  border: 0;
+  border-bottom: 1px solid var(--rule);
+  background: none;
+  text-align: left;
+  transition: padding 0.15s ease, color 0.15s ease;
+}
+
+.starters button:hover {
+  padding-left: 0.6rem;
+  color: var(--red);
+}
+
+/* ---- composer ---------------------------------------------------------- */
+
+.composer {
+  padding: 0.9rem 1.5rem 1.2rem calc(var(--gutter) + 4.5rem);
+  border-top: 1px solid var(--ink);
+  background: var(--paper);
+}
+
+.field {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.75rem;
+  max-width: var(--measure);
+}
+
+.composer textarea {
+  flex: 1;
+  max-height: 12rem;
+  overflow-y: auto;
+  scrollbar-width: none;
+  padding: 0.5rem 0;
+  border: 0;
+  border-bottom: 1px solid var(--rule);
+  outline: none;
+  resize: none;
+  background: none;
+  line-height: 1.5;
+}
+
+.composer textarea:focus {
+  border-bottom-color: var(--ink);
+}
+
+.composer textarea::placeholder {
+  font-style: italic;
+  color: var(--ink-soft);
+}
+
+.composer button {
+  padding: 0.5rem 1.1rem;
+  border: 1px solid var(--ink);
+  background: var(--ink);
+  color: var(--paper);
+  font: 0.72rem var(--mono);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.composer button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.notice {
+  max-width: var(--measure);
+  margin-bottom: 0.7rem;
+  padding: 0.6rem 0.8rem;
+  border: 1px solid var(--red);
+  color: var(--red);
+  font: 0.78rem/1.5 var(--mono);
+}
+
+/* ---- ledger drawer ----------------------------------------------------- */
+
+.ledger {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 4;
+  width: min(27rem, 100vw);
+  overflow-y: auto;
+  padding: 1.1rem 1.4rem 2rem;
+  border-left: 1px solid var(--ink);
+  background: var(--paper);
+  box-shadow: -6px 0 0 rgb(29 26 22 / 6%);
+  animation: slide 0.2s ease both;
+}
+
+@keyframes slide {
+  from {
+    transform: translateX(1.5rem);
+    opacity: 0;
+  }
+}
+
+.ledger-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.ledger h2 {
+  margin: 0;
+  font: 800 1.7rem/1 var(--display);
+  letter-spacing: 0.01em;
+  text-transform: uppercase;
+}
+
+.ledger-note {
+  margin: 0.3rem 0 1.2rem;
+  font-size: 0.9rem;
+  line-height: 1.45;
+  color: var(--ink-soft);
+}
+
+.ledger h3 {
+  margin: 1.5rem 0 0.5rem;
+  padding-bottom: 0.3rem;
+  border-bottom: 1px solid var(--ink);
+  font: 600 0.7rem var(--mono);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--red);
+}
+
+.ledger-item {
+  padding: 0.6rem 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.ledger-item .when {
+  font: 0.7rem var(--mono);
+  color: var(--ink-soft);
+}
+
+.ledger-item .asked {
+  margin: 0.1rem 0 0;
+  font: 700 1.1rem/1.25 var(--display);
+}
+
+.claims {
+  margin: 0.5rem 0 0;
+  padding: 0;
+  list-style: none;
+  font: 0.72rem/1.6 var(--mono);
+}
+
+.claims li {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.claims .what {
+  color: var(--ink-soft);
+}
+
+.claims .value {
+  flex: none;
+  max-width: 55%;
+  text-align: right;
+}
+
+.claims .changed .value {
+  color: var(--red);
+}
+
+.claims .unchanged .value {
+  color: var(--green);
+}
+
+.claims .was {
+  display: block;
+  color: var(--ink-soft);
+  text-decoration: line-through;
+}
+
+.ledger-empty {
+  color: var(--ink-soft);
+  font-style: italic;
+}
+
+/* ---- small screens ----------------------------------------------------- */
+
+@media (max-width: 760px) {
+  :root {
+    --gutter: 0rem;
+  }
+
+  .tagline {
+    display: none;
+  }
+
+  .thread {
+    background: none;
+  }
+
+  .entry {
+    grid-template-columns: minmax(0, 1fr);
+    padding: 1.25rem 1rem;
+  }
+
+  .gutter {
+    display: flex;
+    gap: 0.6rem;
+    align-items: baseline;
+    padding: 0 0 0.3rem;
+    text-align: left;
+  }
+
+  .empty,
+  .composer {
+    padding-left: 1rem;
+    padding-right: 1rem;
+  }
+
+  .masthead {
+    flex-wrap: wrap;
+    padding: 0.7rem 1rem;
+  }
+
+  .popover {
+    right: 1rem;
+  }
+
+  .controls {
+    gap: 0.8rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation: none !important;
+    transition: none !important;
+  }
+}

@@ -1,0 +1,112 @@
+/**
+ * The write side of memory. After an answer has been sent, one background
+ * model call turns the exchange into what recall needs later: a summary,
+ * topic words, and the checkable claims the answer made.
+ *
+ * It runs after the response is finished, so it costs the user no latency. If
+ * it fails, nothing is lost: the question and answer are already stored and
+ * recall falls back to their text.
+ */
+import type { Llm } from "../llm.ts";
+import type { Claim, Enrichment, MemoryStore, NewClaim, Source } from "./store.ts";
+
+export interface EnrichInput {
+  question: string;
+  answer: string;
+  sources: Source[];
+  /** Claims from past conversations that were shown to the model on this turn. */
+  priorClaims: Claim[];
+}
+
+const MAX_CLAIMS = 20;
+const MAX_TOPICS = 8;
+
+const SYSTEM = `You maintain the memory of a chat assistant. You are given one exchange: the user's question, the assistant's answer, and the numbered sources the answer cited. Return a JSON object with exactly these keys:
+
+"summary": one sentence saying what the user asked and the gist of the answer.
+
+"topics": 3 to ${MAX_TOPICS} short lowercase phrases the user might use weeks later to refer back to this conversation. Include the broader category as well as the specifics, e.g. ["postgres hosting", "managed database", "pricing", "neon", "supabase"].
+
+"claims": the checkable facts the answer stated that could change over time: prices, plan limits, versions, release dates, availability, rankings. No opinions, advice or definitions. At most ${MAX_CLAIMS}. Each claim is an object:
+  "entity": the product, company or thing, e.g. "Neon"
+  "attribute": what about it, e.g. "Launch plan price"
+  "value": the value as stated, with units, e.g. "$19/month"
+  "kind": one of "price", "limit", "release", "fact"
+  "source": the number of the cited source that supports it, or null
+  "prior_id": if this claim re-checks one of the PRIOR CLAIMS listed, that claim's id number; otherwise null
+  "verdict": "unchanged" or "changed" when prior_id is set; otherwise "new"
+
+If the answer states nothing checkable, return "claims": [].`;
+
+export async function buildEnrichment(llm: Llm, input: EnrichInput): Promise<Enrichment> {
+  // Small talk has nothing to extract; its question text is already searchable.
+  if (!input.sources.length && input.answer.length < 500) {
+    return { summary: input.question.slice(0, 200), topics: [], claims: [] };
+  }
+
+  const sources = input.sources.map((s) => `[${s.n}] ${s.title} — ${s.url}`).join("\n") || "(none)";
+  const prior =
+    input.priorClaims.map((c) => `id ${c.id}: ${c.entity} · ${c.attribute}: ${c.value}`).join("\n") || "(none)";
+  const raw = await llm.json({
+    system: SYSTEM,
+    user: `QUESTION\n${input.question}\n\nANSWER\n${input.answer}\n\nSOURCES\n${sources}\n\nPRIOR CLAIMS\n${prior}`,
+  });
+  return validate(raw, input);
+}
+
+const text = (value: unknown) => (typeof value === "string" ? value.trim() : "");
+
+/** The model's JSON is untrusted input: keep what is well-formed, drop the rest. */
+function validate(raw: unknown, input: EnrichInput): Enrichment {
+  const data = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const urlByNumber = new Map(input.sources.map((s) => [s.n, s.url]));
+  const priorById = new Map(input.priorClaims.map((c) => [c.id, c]));
+
+  const claims: NewClaim[] = [];
+  for (const item of Array.isArray(data.claims) ? data.claims.slice(0, MAX_CLAIMS) : []) {
+    const c = (item && typeof item === "object" ? item : {}) as Record<string, unknown>;
+    const entity = text(c.entity);
+    const attribute = text(c.attribute);
+    const value = text(c.value);
+    if (!entity || !attribute || !value) continue;
+
+    const prior = typeof c.prior_id === "number" ? priorById.get(c.prior_id) : undefined;
+    claims.push({
+      entity,
+      attribute,
+      value,
+      kind: text(c.kind) || "fact",
+      sourceUrl: (typeof c.source === "number" && urlByNumber.get(c.source)) || null,
+      priorClaimId: prior?.id ?? null,
+      verdict: !prior ? "new" : c.verdict === "unchanged" ? "unchanged" : "changed",
+    });
+  }
+
+  return {
+    summary: text(data.summary) || input.question.slice(0, 200),
+    topics: (Array.isArray(data.topics) ? data.topics : []).map(text).filter(Boolean).slice(0, MAX_TOPICS),
+    claims,
+  };
+}
+
+/** Runs enrichment off the request path and lets tests wait for it. */
+export class Enricher {
+  private pending = new Set<Promise<void>>();
+
+  constructor(
+    private llm: Llm,
+    private store: MemoryStore,
+  ) {}
+
+  schedule(episodeId: number, input: EnrichInput): void {
+    const job = buildEnrichment(this.llm, input)
+      .then((enrichment) => this.store.enrich(episodeId, enrichment))
+      .catch((error) => console.warn(`[memory] could not enrich episode ${episodeId}: ${error?.message ?? error}`))
+      .finally(() => this.pending.delete(job));
+    this.pending.add(job);
+  }
+
+  async idle(): Promise<void> {
+    while (this.pending.size) await Promise.all(this.pending);
+  }
+}

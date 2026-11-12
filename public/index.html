@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>asof</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header class="masthead">
+      <div class="brand">
+        <a class="wordmark" href="/" aria-label="asof, home">asof</a>
+        <span class="tagline">answers, as of a date</span>
+      </div>
+      <div class="controls">
+        <button id="stamp" class="stamp" type="button" aria-haspopup="dialog" aria-expanded="false" title="Change the agent's clock"></button>
+        <button id="open-ledger" class="link" type="button">Ledger</button>
+        <button id="new-chat" class="link" type="button">New chat</button>
+      </div>
+
+      <form id="clock" class="popover" hidden novalidate>
+        <p>Move the agent's clock to ask on one day and follow up on another.</p>
+        <div class="cal-head">
+          <button id="cal-prev" type="button" aria-label="Previous month">←</button>
+          <span id="cal-title" aria-live="polite"></span>
+          <button id="cal-next" type="button" aria-label="Next month">→</button>
+        </div>
+        <div id="cal-grid" class="cal-grid"></div>
+        <div class="cal-time">
+          <span class="label">At</span>
+          <div class="spin" data-unit="hour">
+            <input id="clock-hour" inputmode="numeric" maxlength="2" autocomplete="off" aria-label="Hour, 0 to 23" />
+            <button type="button" data-step="1" aria-label="Later hour">▲</button>
+            <button type="button" data-step="-1" aria-label="Earlier hour">▼</button>
+          </div>
+          <span class="colon">:</span>
+          <div class="spin" data-unit="minute">
+            <input id="clock-minute" inputmode="numeric" maxlength="2" autocomplete="off" aria-label="Minute" />
+            <button type="button" data-step="1" aria-label="Five minutes later">▲</button>
+            <button type="button" data-step="-1" aria-label="Five minutes earlier">▼</button>
+          </div>
+          <span id="clock-summary"></span>
+        </div>
+        <div class="cal-presets" aria-label="Common times">
+          <button type="button" data-time="09:00">09:00</button>
+          <button type="button" data-time="12:00">12:00</button>
+          <button type="button" data-time="15:00">15:00</button>
+          <button type="button" data-time="18:00">18:00</button>
+          <button type="button" data-time="21:00">21:00</button>
+        </div>
+        <div class="row">
+          <button type="submit">Travel</button>
+          <button id="clock-reset" type="button" class="quiet">Return to now</button>
+        </div>
+      </form>
+    </header>
+
+    <main id="thread" class="thread" aria-live="polite">
+      <section id="empty" class="empty">
+        <h1>Ask something.<br />I keep what I said, and when.</h1>
+        <p>Then ask me later whether it is still true.</p>
+        <div class="starters">
+          <button type="button">Shortlist 5 CRM tools for a 20-person sales team</button>
+          <button type="button">Compare managed Postgres hosting prices for a small SaaS</button>
+          <button type="button">What did I ask you yesterday? Is your answer still correct?</button>
+        </div>
+      </section>
+    </main>
+
+    <form id="composer" class="composer">
+      <div id="notice" class="notice" hidden></div>
+      <div class="field">
+        <textarea id="input" rows="1" placeholder="Ask anything" aria-label="Message" autofocus></textarea>
+        <button id="send" type="submit">Send</button>
+      </div>
+    </form>
+
+    <aside id="ledger" class="ledger" hidden aria-label="Memory ledger">
+      <div class="ledger-head">
+        <h2>Ledger</h2>
+        <button id="close-ledger" class="link" type="button">Close</button>
+      </div>
+      <p class="ledger-note">Every conversation, with the checkable claims it made and the day it made them.</p>
+      <div id="ledger-body"></div>
+    </aside>
+
+    <script src="/vendor/marked.js"></script>
+    <script src="/vendor/purify.js"></script>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
