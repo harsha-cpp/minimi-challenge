@@ -9,6 +9,7 @@
  * with everything already in front of it. A message that needs no search costs
  * exactly one model call.
  */
+import { createHash } from "node:crypto";
 import { pinTurnTime, type Clock } from "../clock.ts";
 import type { ChatMessage, Llm, ToolCall } from "../llm.ts";
 import type { Enricher } from "../memory/enrich.ts";
@@ -83,11 +84,13 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
     const sources: Source[] = [];
     const numberByUrl = new Map<string, number>();
     const numberFor = (hit: SearchHit): number => {
-      let n = numberByUrl.get(hit.url);
+      const contentHash = createHash("sha256").update(hit.text).digest("hex");
+      const key = JSON.stringify([hit.url, contentHash, hit.snapshotAsOf]);
+      let n = numberByUrl.get(key);
       if (!n) {
         n = sources.length + 1;
-        numberByUrl.set(hit.url, n);
-        sources.push({ n, url: hit.url, title: hit.title, publishedDate: hit.publishedDate });
+        numberByUrl.set(key, n);
+        sources.push({ ...hit, n, contentHash });
       }
       return n;
     };
