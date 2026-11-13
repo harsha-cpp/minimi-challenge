@@ -17,7 +17,7 @@ import { type RecallResult, recall, renderMemory } from "../memory/recall.ts";
 import type { MemoryStore, Source } from "../memory/store.ts";
 import type { SearchHit, SearchProvider, SearchQuery } from "../search.ts";
 import { withConcurrency } from "../search.ts";
-import { preparePrompt } from "./prepare.ts";
+import { prepareHistory, preparePrompt } from "./prepare.ts";
 import { EvidenceWindow } from "./evidence.ts";
 import { formatInstant } from "../time/zone.ts";
 import { SYSTEM_PROMPT, WEB_SEARCH_TOOL, buildContext } from "./prompt.ts";
@@ -71,8 +71,8 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
   const search = withConcurrency(deps.search, 4);
   try {
     const now = clock.now();
-    const history = store.sessionHistory(sessionId, HISTORY_TURNS, now.getTime());
-    const recalled = recall(store, message, now, tz, new Set(history.map((e) => e.id)));
+    const history = prepareHistory(store.sessionHistory(sessionId, HISTORY_TURNS, now.getTime()), tz);
+    const recalled = recall(store, message, now, tz, history.ids);
     emit({ type: "recall", notes: recallNotes(recalled), ms: Math.round(recalled.ms) });
 
     const time = pinTurnTime(clock, tz);
