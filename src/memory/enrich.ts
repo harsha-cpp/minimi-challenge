@@ -96,6 +96,8 @@ function validate(raw: unknown, input: EnrichInput): Enrichment {
 /** Runs enrichment off the request path and lets tests wait for it. */
 export class Enricher {
   private pending = new Set<Promise<void>>();
+  private active = 0;
+  private waiting: Array<() => void> = [];
 
   constructor(
     private llm: Llm,
@@ -103,10 +105,23 @@ export class Enricher {
   ) {}
 
   schedule(episodeId: number, input: EnrichInput): void {
-    const job = buildEnrichment(this.llm, input)
+    // Bound background model traffic so rapid turns do not compete with streaming answers.
+    if (this.pending.size >= 128) {
+      console.warn(`[memory] enrichment queue full for episode ${episodeId}; raw exchange retained`);
+      return;
+    }
+    const acquire = this.active < 2
+      ? (this.active++, Promise.resolve())
+      : new Promise<void>(resolve => this.waiting.push(resolve));
+    const job = acquire.then(() => buildEnrichment(this.llm, input))
       .then((enrichment) => this.store.enrich(episodeId, enrichment))
       .catch((error) => console.warn(`[memory] could not enrich episode ${episodeId}: ${error?.message ?? error}`))
-      .finally(() => this.pending.delete(job));
+      .finally(() => {
+        this.pending.delete(job);
+        const next = this.waiting.shift();
+        if (next) next();
+        else this.active--;
+      });
     this.pending.add(job);
   }
 
