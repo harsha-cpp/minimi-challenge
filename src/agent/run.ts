@@ -9,13 +9,15 @@
  * with everything already in front of it. A message that needs no search costs
  * exactly one model call.
  */
-import type { Clock } from "../clock.ts";
+import { pinTurnTime, type Clock } from "../clock.ts";
 import type { ChatMessage, Llm, ToolCall } from "../llm.ts";
 import type { Enricher } from "../memory/enrich.ts";
 import { type RecallResult, recall, renderMemory } from "../memory/recall.ts";
 import type { MemoryStore, Source } from "../memory/store.ts";
 import type { SearchHit, SearchProvider, SearchQuery } from "../search.ts";
 import { withConcurrency } from "../search.ts";
+import { preparePrompt } from "./prepare.ts";
+import { EvidenceWindow } from "./evidence.ts";
 import { formatInstant } from "../time/zone.ts";
 import { SYSTEM_PROMPT, WEB_SEARCH_TOOL, buildContext } from "./prompt.ts";
 
@@ -72,16 +74,10 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
     const recalled = recall(store, message, now, tz, new Set(history.map((e) => e.id)));
     emit({ type: "recall", notes: recallNotes(recalled), ms: Math.round(recalled.ms) });
 
-    const messages: ChatMessage[] = [{ role: "system", content: SYSTEM_PROMPT }];
-    for (const past of history) {
-      // The timestamp lets "what did I ask earlier today?" be answered from the chat itself.
-      messages.push({ role: "user", content: `[${formatInstant(past.askedAt, tz)}] ${past.question}` });
-      messages.push({ role: "assistant", content: past.answer.slice(0, HISTORY_ANSWER_CHARS) });
-    }
-    messages.push({
-      role: "user",
-      content: `${buildContext(now, tz, renderMemory(recalled, tz), clock.simulated)}\n\n${message}`,
-    });
+    const time = pinTurnTime(clock, tz);
+    const prompt = preparePrompt({message, time, history, memory:renderMemory(recalled,tz)});
+    const messages: ChatMessage[] = prompt.messages;
+    const evidence = new EvidenceWindow();
 
     // Sources are numbered once per turn, so [3] means the same page in every search result and in the answer.
     const sources: Source[] = [];
@@ -150,7 +146,7 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
       turn.toolCalls.forEach((call, i) => {
         const result = results[i]!;
         const content =
-          typeof result === "string" ? result : formatHits(result.query, result.hits.map((hit) => ({ n: numberFor(hit), hit })));
+          typeof result === "string" ? evidence.error(result) : evidence.render(result.query, result.hits, numberFor);
         messages.push({ role: "tool", tool_call_id: call.id, content });
       });
       emit({ type: "sources", sources });

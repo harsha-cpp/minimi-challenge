@@ -63,7 +63,8 @@ test("a message that needs no search is one model call and no searches", async (
   assert.equal(done.type === "done" && done.timings.modelCalls, 1);
   assert.equal(done.type === "done" && done.timings.searches, 0);
   assert.equal(store.count(), 1);
-  assert.match(lastUserMessage(requests[0]!.messages), /^<context>\nNow: Wed 11 Nov 2026, 10:00 \(Asia\/Kolkata\)\n<\/context>\n\nhi$/);
+  assert.equal(lastUserMessage(requests[0]!.messages), "hi");
+  assert.match(requests[0]!.messages[1]!.content as string, /2026-11-11T04:30:00.000Z/);
 });
 
 test("searches in one round run in parallel and share one numbering", async () => {
@@ -174,7 +175,8 @@ test("a week later: the old claim is recalled, re-checked, and the new claim lin
   );
 
   // The model saw the dated conversation and the exact claim to re-check.
-  const context = lastUserMessage(second.requests[0]!.messages);
+  const memory = second.requests[0]!.messages.find(m => m.role === "user" && m.content.startsWith("UNTRUSTED MEMORY RECORDS"))!;
+  const context = JSON.parse((memory.content as string).slice((memory.content as string).indexOf("\n") + 1)) as string;
   assert.match(context, /"Last Tuesday" → Tue 3 Nov 2026\. \(It could also mean Tue 10 Nov 2026, but there are no conversations then\.\)/);
   assert.match(context, new RegExp(`\\(C${original!.id}\\) Neon · Launch plan price: \\$19/month`));
   // The memory step was told about the prior claim so it could link to it.
@@ -193,7 +195,7 @@ test("earlier turns of the same chat are sent with their timestamps", async () =
   await ask("first question");
   await ask("second question");
   const sent = requests[1]!.messages;
-  assert.deepEqual(sent.slice(1, 3), [
+  assert.deepEqual(sent.slice(2, 4), [
     { role: "user", content: "[Wed 11 Nov 2026, 10:00] first question" },
     { role: "assistant", content: "one" },
   ]);
