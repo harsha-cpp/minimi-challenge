@@ -1,3 +1,5 @@
+import { citedNumbers } from "./citations.ts";
+export { citedNumbers } from "./citations.ts";
 /**
  * One turn of the agent, start to finish:
  *
@@ -207,15 +209,6 @@ function formatHits(query: SearchQuery, hits: Array<{ n: number; hit: SearchHit 
     return `[${n}] ${hit.title}\n${hit.url}${date}\n${hit.text}`;
   });
   return `Results for "${query.query}"${filter}:\n\n${body.join("\n\n")}`;
-}
-
-/** Source numbers an answer cites, from "[2]" and "[2, 5]" forms. */
-export function citedNumbers(answer: string): number[] {
-  const numbers = new Set<number>();
-  for (const match of answer.matchAll(/\[(\d+(?:\s*,\s*\d+)*)\]/g)) {
-    for (const n of match[1]!.split(",")) numbers.add(Number(n));
-  }
-  return [...numbers].sort((a, b) => a - b);
 }
 
 /** What the interface shows while the model is starting: which dates were understood and what was found. */

@@ -29,6 +29,7 @@ if (config.llm && config.exaApiKey) {
 const root = fileURLToPath(new URL("..", import.meta.url));
 const STATIC: Record<string, [file: string, type: string]> = {
   "/": ["public/index.html", "text/html; charset=utf-8"],
+  "/citations.js": ["public/citations.js", "text/javascript; charset=utf-8"],
   "/app.js": ["public/app.js", "text/javascript; charset=utf-8"],
   "/style.css": ["public/style.css", "text/css; charset=utf-8"],
   "/vendor/marked.js": ["node_modules/marked/lib/marked.umd.js", "text/javascript; charset=utf-8"],

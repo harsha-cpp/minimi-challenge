@@ -1,3 +1,4 @@
+import { citationTextNodes } from "./citations.js";
 // The whole interface: no framework and no build step, so `npm run dev` has nothing to compile.
 
 const $ = (id) => document.getElementById(id);
@@ -227,12 +228,7 @@ DOMPurify.addHook("afterSanitizeAttributes", (node) => {
 function renderAnswer(container, markdown, sources) {
   container.innerHTML = DOMPurify.sanitize(marked.parse(markdown, { gfm: true }));
   const byNumber = new Map(sources.map((s) => [s.n, s]));
-  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
-  const textNodes = [];
-  while (walker.nextNode()) {
-    if (!walker.currentNode.parentElement.closest("code, pre, a")) textNodes.push(walker.currentNode);
-  }
-  for (const node of textNodes) {
+  for (const node of citationTextNodes(container)) {
     const parts = node.textContent.split(/(\[\d+(?:\s*,\s*\d+)*\])/);
     if (parts.length === 1) continue;
     const fragment = document.createDocumentFragment();
