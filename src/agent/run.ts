@@ -15,6 +15,7 @@ import type { Enricher } from "../memory/enrich.ts";
 import { type RecallResult, recall, renderMemory } from "../memory/recall.ts";
 import type { MemoryStore, Source } from "../memory/store.ts";
 import type { SearchHit, SearchProvider, SearchQuery } from "../search.ts";
+import { withConcurrency } from "../search.ts";
 import { formatInstant } from "../time/zone.ts";
 import { SYSTEM_PROMPT, WEB_SEARCH_TOOL, buildContext } from "./prompt.ts";
 
@@ -64,6 +65,7 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
   const { llm, store, clock } = deps;
   const { sessionId, message, tz, signal } = input;
 
+  const search = withConcurrency(deps.search, 4);
   try {
     const now = clock.now();
     const history = store.sessionHistory(sessionId, HISTORY_TURNS);
@@ -101,7 +103,7 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
       const base = { type: "search", id: call.id, query: query.query, publishedAfter: query.publishedAfter } as const;
       emit({ ...base, state: "running" });
       try {
-        const hits = await deps.search.search(query, signal);
+        const hits = await search.search(query, signal);
         emit({ ...base, state: "done", results: hits.length, ms: Math.round(performance.now() - began) });
         return { query, hits };
       } catch (error) {
