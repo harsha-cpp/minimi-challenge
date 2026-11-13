@@ -27,7 +27,7 @@ export function turnPolicy(message: string, simulated: boolean): TurnPolicy {
     || (suppliedText && /^summari[sz]e\b/i.test(task));
   const externalFacts = /\b(?:research|look up|search|fact[- ]?check|verify|accurate|real (?:events|data|prices)|(?:current|latest|today'?s|real.time)\s+(?:\w+\s+){0,3}(?:prices?|pricing|costs?|versions?|news|releases?))\b/i.test(instructions)
     || /\b(?:and|also|then)\s+(?:research|search|look up|verify|fact[- ]?check)\b/i.test(message);
-  const nonFactual: "creative" | "transform" | null = null;
+  const nonFactual = !externalFacts && (creative ? "creative" : transform ? "transform" : null);
   const recall = /\b(?:what|which)\b.{0,60}\b(?:ask|asked|discuss|discussed|decide|decided|tell|told)\b/i.test(message);
   const recallOnly = recall && !verify && !/\b(still|correct|accurate|latest|current|currently)\b/i.test(message) && !/\b(and|also)\b.*\b(now|today|price|pricing|cost|version|changed)\b/i.test(message);
   const intent = conversation ? "conversation" : nonFactual || (verify ? "verify" : recallOnly ? "recall" : "lookup");
