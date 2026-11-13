@@ -71,7 +71,7 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
   const search = withConcurrency(deps.search, 4);
   try {
     const now = clock.now();
-    const history = store.sessionHistory(sessionId, HISTORY_TURNS);
+    const history = store.sessionHistory(sessionId, HISTORY_TURNS, now.getTime());
     const recalled = recall(store, message, now, tz, new Set(history.map((e) => e.id)));
     emit({ type: "recall", notes: recallNotes(recalled), ms: Math.round(recalled.ms) });
 

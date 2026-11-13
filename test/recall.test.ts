@@ -115,3 +115,21 @@ test("only a bounded number of conversations are expanded in full", () => {
   assert.equal(details.filter((d) => d === "full").length, 6);
   assert.equal(details.filter((d) => d === "pointer").length, 4);
 });
+
+test("rewinding time excludes future topic matches, same-day conversations and nearest suggestions", () => {
+  const store = new MemoryStore(":memory:");
+  const save = (at: string, question: string) => store.saveEpisode({ sessionId: "s", askedAt: Date.parse(at), tz: "UTC", question, answer: "a", sources: [] });
+  const past = save("2020-11-03T09:00Z", "old topic");
+  const future = save("2020-11-03T11:00Z", "secret future pricing");
+  save("2020-11-05T11:00Z", "secret future pricing later");
+  const now = new Date("2020-11-03T10:00Z");
+  assert.deepEqual(store.sessionHistory("s", 8, now.getTime()).map(e => e.id), [past]);
+  assert.equal(store.count(now.getTime()), 1);
+  const sameDay = recall(store, "What did I ask today?", now, "UTC");
+  assert.deepEqual(sameDay.refs[0]!.hits[0]!.episodes.map(e => e.episode.id), [past]);
+  const topic = recall(store, "secret future pricing", now, "UTC");
+  assert.equal(topic.related.length, 0);
+  const empty = recall(store, "What did I ask on 2 November?", now, "UTC");
+  assert.ok(empty.refs.flatMap(r => r.nearest).every(e => e.id !== future && e.askedAt <= now.getTime()));
+  store.close();
+});

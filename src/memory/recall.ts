@@ -104,7 +104,7 @@ export function recall(
   const refs = temporal.map((ref): RefResult => {
     const readings = ref.candidates.map((range) => {
       const { startMs, endMs } = instantRange(range.start, range.end, tz);
-      return { range, episodes: store.episodesBetween(startMs, endMs) };
+      return { range, episodes: store.episodesBetween(startMs, endMs, now.getTime()) };
     });
     let withEpisodes = readings.filter((r) => r.episodes.length);
     if (withEpisodes.length > 1) {
@@ -117,7 +117,7 @@ export function recall(
     if (!withEpisodes.length) {
       const first = ref.candidates[0]!;
       const { startMs, endMs } = instantRange(first.start, first.end, tz);
-      nearest = store.neighbours(startMs, endMs);
+      nearest = store.neighbours(startMs, endMs, now.getTime());
     }
 
     return {
@@ -133,7 +133,7 @@ export function recall(
     const needed = Math.min(2, terms.length);
     const ids = [...coverage.entries()].filter(([id, n]) => n >= needed && !inChat.has(id)).map(([id]) => id);
     const episodes = store
-      .episodesById(ids)
+      .episodesById(ids, now.getTime())
       .sort((a, b) => coverage.get(b.id)! - coverage.get(a.id)! || b.askedAt - a.askedAt)
       .slice(0, RELATED_LIMIT);
     related = present(episodes);
