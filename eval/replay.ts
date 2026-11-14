@@ -20,7 +20,7 @@ import { loadConfig } from "../src/config.ts";
 import { createLlm } from "../src/llm.ts";
 import { Enricher } from "../src/memory/enrich.ts";
 import { MemoryStore } from "../src/memory/store.ts";
-import { createExaSearch, withCache } from "../src/search.ts";
+import { createExaSearch, withCache, withConcurrency } from "../src/search.ts";
 
 const TZ = "Asia/Kolkata";
 const DB = "data/eval.db";
@@ -36,7 +36,7 @@ const store = new MemoryStore(DB);
 const clock = new SystemClock();
 const llm = createLlm(config.llm);
 const enricher = new Enricher(llm, store);
-const deps = { llm, store, clock, enricher, search: withCache(createExaSearch(config.exaApiKey)) };
+const deps = { llm, store, clock, enricher, search: withCache(withConcurrency(createExaSearch(config.exaApiKey))) };
 
 interface Outcome {
   notes: string[];
