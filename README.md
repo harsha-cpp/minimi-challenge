@@ -25,6 +25,11 @@ npm run dev            # http://localhost:3000
 
 The optional variables are described in `.env.example`.
 
+The UI preview can ask one optional multiple-choice question before open-ended
+research, then apply your choice to the original request. You can also type a
+detail or skip. Clear factual requests go straight to an answer. See
+[optional clarifications](docs/clarifications.md) for the resume flow and limits.
+
 Traveling to a date starts an **era simulation**. Exa researches the live web,
 including modern accounts of historical events, while the answer takes the
 selected date's perspective. Event dates determine what has happened; the source

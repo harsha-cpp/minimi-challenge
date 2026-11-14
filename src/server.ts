@@ -14,18 +14,21 @@ import { MemoryStore } from "./memory/store.ts";
 import { createExaSearch, withCache, withConcurrency } from "./search.ts";
 import { validTimeZone } from "./time/zone.ts";
 import { parseInstant } from "./time/instant.ts";
+import { QuestionStore, QuestionConflict } from "./memory/questions.ts";
+import { parseSelection, type ClarificationAnswer } from "./agent/clarification.ts";
 
 const config = loadConfig();
 const clock = new SystemClock();
 if (config.startAt) clock.travelTo(config.startAt);
 const store = new MemoryStore(config.dbPath);
+const questions = new QuestionStore(config.dbPath);
 
 // Without keys the server still starts, and the page says which ones are missing.
 let deps: Deps | null = null;
 if (config.llm && config.exaApiKey) {
   const llm = createLlm(config.llm);
   const exa = withCache(withConcurrency(createExaSearch(config.exaApiKey)));
-  deps = { llm, store, clock, search: exa, enricher: new Enricher(llm, store),
+  deps = { llm, store, clock, search: exa, enricher: new Enricher(llm, store), questions,
     verifier: createLlm({ ...config.llm, fastModel: config.llm.model }) };
 }
 
@@ -50,7 +53,7 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
 }
 
 class RequestError extends Error {
-  constructor(message: string, readonly status: number) { super(message); }
+  constructor(message: string, readonly status: number, readonly code?: string) { super(message); }
 }
 
 async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
@@ -76,14 +79,15 @@ function state() {
     missing: config.missing,
     episodes: store.count(clock.now().getTime()),
     simulation: { mode: "era", research: "live-web", review: "event-time-and-sources" },
+    features: { clarifications: true },
   };
 }
 
 async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const body = await readJson(req);
-  const message = typeof body.message === "string" ? body.message.trim() : "";
+  let message = typeof body.message === "string" ? body.message.trim() : "";
   const sessionId = typeof body.sessionId === "string" ? body.sessionId.slice(0, 64) : "";
-  if (!message || message.length > 8000 || !sessionId) {
+  if ((!body.clarification && (!message || message.length > 8000)) || !sessionId) {
     return sendJson(res, 400, { error: "Expected { sessionId, message } with a message of 1 to 8000 characters." });
   }
   let asOf: Date | undefined;
@@ -93,11 +97,27 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
     asOf = parsed;
   }
 
+  let resumed: ReturnType<QuestionStore["begin"]> | undefined;
+  let clarification: ClarificationAnswer | undefined;
+  if (body.clarification !== undefined) {
+    const raw = body.clarification as Record<string, unknown> | null;
+    if (!raw || typeof raw !== "object" || Array.isArray(raw) || Object.keys(raw).some(key => !["id", "selection"].includes(key))
+      || typeof raw.id !== "string" || !/^[a-f0-9-]{36}$/i.test(raw.id)) throw new RequestError("Invalid clarification reference.", 400);
+    const selection = parseSelection(raw.selection);
+    if (!selection) throw new RequestError("Choose an option, enter a detail of at most 1000 characters, or skip.", 400);
+    try { resumed = questions.begin(raw.id, sessionId, selection); }
+    catch (error) { if (error instanceof QuestionConflict) throw new RequestError(error.message, 409, error.code); throw error; }
+    message = resumed.card.message;
+    clarification = resumed.selection!;
+    asOf = resumed.card.time.simulated ? new Date(resumed.card.time.effectiveAt) : undefined;
+  }
+
   res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
   const emit = (event: AgentEvent) => res.write(`data: ${JSON.stringify(event)}\n\n`);
 
   if (!deps) {
     emit({ type: "error", message: `Missing configuration: ${config.missing.join(", ")}. Copy .env.example to .env, fill it in and restart.` });
+    if (resumed) questions.release(resumed.card.id);
     return void res.end();
   }
 
@@ -107,9 +127,24 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
     if (!res.writableEnded) abort.abort();
   });
 
-  const tz = validTimeZone(typeof body.tz === "string" ? body.tz : undefined);
-  await runTurn(deps, { sessionId, message, tz, asOf, signal: abort.signal }, emit);
-  res.end();
+  const tz = resumed?.card.time.tz ?? validTimeZone(typeof body.tz === "string" ? body.tz : undefined);
+  try {
+    if (resumed?.episodeId != null) {
+      const episode = store.episode(resumed.episodeId);
+      if (!episode) throw new Error("Saved answer is unavailable.");
+      const sources = store.sourcesFor(episode.id);
+      emit({ type: "sources", sources }); emit({ type: "text", delta: episode.answer });
+      emit({ type: "done", episodeId: episode.id, cited: sources.map(source => source.n), timings: { recallMs: 0, firstTokenMs: 0, totalMs: 0, searches: 0, modelCalls: 0 } });
+      return;
+    }
+    // Keep the original question's mode even if the shared preview clock was changed while waiting.
+    const requestDeps = resumed ? { ...deps, clock: resumed.card.time.simulated
+      ? { now: () => new Date(resumed!.card.time.effectiveAt), simulated: true } : new SystemClock() } : deps;
+    await runTurn(requestDeps, { sessionId, message, tz, asOf, clarification, signal: abort.signal }, event => {
+      if (resumed && event.type === "done") questions.finish(resumed.card.id, event.episodeId);
+      emit(event);
+    });
+  } finally { if (resumed) questions.release(resumed.card.id); res.end(); }
 }
 
 async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -120,6 +155,8 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     return void res.writeHead(200, { "content-type": type, "cache-control": "no-cache" }).end(await readFile(root + file));
   }
   if (req.method === "GET" && path === "/api/state") return sendJson(res, 200, state());
+  const pendingMatch = /^\/api\/sessions\/([a-zA-Z0-9_-]{1,64})\/clarification$/.exec(path);
+  if (req.method === "GET" && pendingMatch) return sendJson(res, 200, { card: questions.pending(pendingMatch[1]!) });
   const sessionMatch = /^\/api\/sessions\/([a-zA-Z0-9_-]{1,64})$/.exec(path);
   if (req.method === "GET" && sessionMatch) {
     const episodes = store.sessionHistory(sessionMatch[1]!, 100, clock.now().getTime())
@@ -160,7 +197,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
 
 const server = createServer((req, res) => {
   handle(req, res).catch((error) => {
-    if (error instanceof RequestError && !res.headersSent) return sendJson(res, error.status, { error: error.message });
+    if (error instanceof RequestError && !res.headersSent) return sendJson(res, error.status, { error: error.message, ...(error.code ? { code: error.code } : {}) });
     console.error(error);
     if (!res.headersSent) sendJson(res, 500, { error: "Internal error" });
     else res.end();

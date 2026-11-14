@@ -4,3 +4,9 @@ data/
 .DS_Store
 research_notes/
 reports/
+
+.context/
+*.log
+*.db
+*.db-shm
+*.db-wal
