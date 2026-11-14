@@ -74,12 +74,12 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
 
   const search = withConcurrency(deps.search, 4);
   try {
-    const now = clock.now();
+    const now = input.asOf ?? clock.now();
     const history = prepareHistory(store.sessionHistory(sessionId, HISTORY_TURNS, now.getTime()), tz);
     const recalled = recall(store, message, now, tz, history.ids);
     emit({ type: "recall", notes: recallNotes(recalled), ms: Math.round(recalled.ms) });
 
-    const time = pinTurnTime(clock, tz);
+    const time = pinTurnTime(clock, tz, input.asOf);
     const prompt = preparePrompt({message, time, history, memory:renderMemory(recalled,tz)});
     const messages: ChatMessage[] = prompt.messages;
     const evidence = new EvidenceWindow();
@@ -100,7 +100,7 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
     };
 
     const runSearch = async (call: ToolCall): Promise<{ query: SearchQuery; hits: SearchHit[] } | string> => {
-      const query = parseSearchCall(call, clock.simulated ? now : undefined);
+      const query = parseSearchCall(call, time.simulated ? now : undefined);
       if (typeof query === "string") return query;
       const began = performance.now();
       const base = { type: "search", id: call.id, query: query.query, publishedAfter: query.publishedAfter } as const;

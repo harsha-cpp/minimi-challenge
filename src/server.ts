@@ -11,8 +11,9 @@ import { loadConfig } from "./config.ts";
 import { createLlm } from "./llm.ts";
 import { Enricher } from "./memory/enrich.ts";
 import { MemoryStore } from "./memory/store.ts";
-import { createExaSearch, withCache } from "./search.ts";
+import { createExaSearch, withCache, withConcurrency } from "./search.ts";
 import { validTimeZone } from "./time/zone.ts";
+import { parseInstant } from "./time/instant.ts";
 
 const config = loadConfig();
 const clock = new SystemClock();
@@ -23,14 +24,16 @@ const store = new MemoryStore(config.dbPath);
 let deps: Deps | null = null;
 if (config.llm && config.exaApiKey) {
   const llm = createLlm(config.llm);
-  deps = { llm, store, clock, search: withCache(createExaSearch(config.exaApiKey)), enricher: new Enricher(llm, store) };
+  const exa = withCache(withConcurrency(createExaSearch(config.exaApiKey)));
+  deps = { llm, store, clock, search: exa, enricher: new Enricher(llm, store),
+    verifier: createLlm({ ...config.llm, fastModel: config.llm.model }) };
 }
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const STATIC: Record<string, [file: string, type: string]> = {
   "/": ["public/index.html", "text/html; charset=utf-8"],
-  "/citations.js": ["public/citations.js", "text/javascript; charset=utf-8"],
   "/app.js": ["public/app.js", "text/javascript; charset=utf-8"],
+  "/citations.js": ["public/citations.js", "text/javascript; charset=utf-8"],
   "/style.css": ["public/style.css", "text/css; charset=utf-8"],
   "/vendor/marked.js": ["node_modules/marked/lib/marked.umd.js", "text/javascript; charset=utf-8"],
   "/vendor/purify.js": ["node_modules/dompurify/dist/purify.min.js", "text/javascript; charset=utf-8"],
@@ -46,16 +49,23 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
 }
 
+class RequestError extends Error {
+  constructor(message: string, readonly status: number) { super(message); }
+}
+
 async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of req) {
     size += chunk.length;
-    if (size > 100_000) throw new Error("Request body too large");
+    if (size > 100_000) throw new RequestError("Request body too large", 413);
     chunks.push(chunk);
   }
-  const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
-  return parsed && typeof parsed === "object" ? parsed : {};
+  let parsed: unknown;
+  try { parsed = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}"); }
+  catch { throw new RequestError("Expected a JSON object", 400); }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new RequestError("Expected a JSON object", 400);
+  return parsed as Record<string, unknown>;
 }
 
 function state() {
@@ -64,7 +74,8 @@ function state() {
     simulated: clock.simulated,
     model: config.llm?.model ?? null,
     missing: config.missing,
-    episodes: store.count(),
+    episodes: store.count(clock.now().getTime()),
+    simulation: { mode: "era", research: "live-web", review: "event-time-and-sources" },
   };
 }
 
@@ -74,6 +85,12 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
   const sessionId = typeof body.sessionId === "string" ? body.sessionId.slice(0, 64) : "";
   if (!message || message.length > 8000 || !sessionId) {
     return sendJson(res, 400, { error: "Expected { sessionId, message } with a message of 1 to 8000 characters." });
+  }
+  let asOf: Date | undefined;
+  if (body.asOf !== undefined) {
+    const parsed = parseInstant(body.asOf);
+    if (!parsed) return sendJson(res, 400, { error: "asOf must be a real ISO timestamp with a timezone." });
+    asOf = parsed;
   }
 
   res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
@@ -91,7 +108,7 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
   });
 
   const tz = validTimeZone(typeof body.tz === "string" ? body.tz : undefined);
-  await runTurn(deps, { sessionId, message, tz, signal: abort.signal }, emit);
+  await runTurn(deps, { sessionId, message, tz, asOf, signal: abort.signal }, emit);
   res.end();
 }
 
@@ -104,16 +121,28 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   }
   if (req.method === "GET" && path === "/api/state") return sendJson(res, 200, state());
   if (req.method === "GET" && path === "/api/memory") {
-    const episodes = store.recent(100).map((e) => ({ ...e, answer: undefined, claims: store.claimsFor(e.id) }));
+    const episodes = store.recent(100, clock.now().getTime()).map((e) => {
+      const verifiedStatements = store.verifiedStatementsFor(e.id);
+      const simulation = (e.execution?.simulation as { mode?: string } | undefined)?.mode === "era";
+      return { ...e, answer: simulation ? e.answer : undefined, claims: store.claimsFor(e.id), verifiedStatements,
+        sources: verifiedStatements.length || simulation ? store.sourcesFor(e.id).map(({ n, url, title, archive, temporal }) => ({ n, url, title, archive, temporal })) : [] };
+    });
     return sendJson(res, 200, { episodes });
+  }
+  const episodeMatch = /^\/api\/episodes\/(\d+)$/.exec(path);
+  if (req.method === "GET" && episodeMatch) {
+    const id = Number(episodeMatch[1]);
+    const episode = store.episode(id);
+    if (!episode || episode.askedAt > clock.now().getTime()) return sendJson(res, 404, { error: "Episode not found" });
+    return sendJson(res, 200, { episode, claims: store.claimsFor(id), sources: store.sourcesFor(id), verifiedStatements: store.verifiedStatementsFor(id) });
   }
   if (req.method === "POST" && path === "/api/clock") {
     // Body: { now: ISO string } to travel, { now: null } to return to the present.
     const { now } = await readJson(req);
     if (now === null) clock.reset();
     else {
-      const target = new Date(String(now));
-      if (Number.isNaN(target.getTime())) return sendJson(res, 400, { error: "Invalid date." });
+      const target = parseInstant(now);
+      if (!target) return sendJson(res, 400, { error: "Invalid date." });
       clock.travelTo(target);
     }
     return sendJson(res, 200, state());
@@ -125,6 +154,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
 
 const server = createServer((req, res) => {
   handle(req, res).catch((error) => {
+    if (error instanceof RequestError && !res.headersSent) return sendJson(res, error.status, { error: error.message });
     console.error(error);
     if (!res.headersSent) sendJson(res, 500, { error: "Internal error" });
     else res.end();
