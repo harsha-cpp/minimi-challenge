@@ -143,7 +143,7 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
         emit({ type: "retract" });
         firstTokenMs = null;
       }
-      messages.push({ role: "assistant", content: turn.text || null, tool_calls: turn.toolCalls });
+      messages.push({ role: "assistant", content: turn.text || null, tool_calls: turn.toolCalls, ...(turn.responseOutput ? {responseOutput:turn.responseOutput} : {}) });
 
       // All of a round's searches run at once; the round takes as long as its slowest search.
       const results = await Promise.all(turn.toolCalls.map(runSearch));

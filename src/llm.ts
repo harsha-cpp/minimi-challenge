@@ -2,16 +2,20 @@
  * The model, behind the two calls the agent needs: a streamed chat turn that
  * may request tool calls, and a one-shot JSON answer for the memory step.
  *
- * It speaks OpenAI-style Chat Completions because that is the one dialect
- * nearly every host accepts (OpenAI, Azure Foundry, Fireworks, Groq,
- * OpenRouter), so a reviewer can point it at whichever key they already have
- * by changing three env vars.
+ * Responses mode supports Azure Foundry reasoning models and preserves their
+ * output items across tool rounds. Chat Completions remains available for other
+ * compatible hosts. The agent still uses the same streamed-turn and JSON ports.
  */
 import OpenAI from "openai";
+import type { ResponseOutputItem } from "openai/resources/responses/responses";
+import { createResponsesLlm } from "./llm/responses.ts";
+
+/** Output types used by this function-tool loop, retained only within one turn. */
+export type ModelOutputItem = Extract<ResponseOutputItem, { type: "message" | "function_call" | "reasoning" }>;
 
 export type ChatMessage =
   | { role: "system" | "user"; content: string }
-  | { role: "assistant"; content: string | null; tool_calls?: ToolCall[] }
+  | { role: "assistant"; content: string | null; tool_calls?: ToolCall[]; responseOutput?: ModelOutputItem[] }
   | { role: "tool"; tool_call_id: string; content: string };
 
 export interface ToolCall {
@@ -35,7 +39,7 @@ export interface StreamRequest {
 }
 
 export interface Llm {
-  stream(request: StreamRequest): Promise<{ text: string; toolCalls: ToolCall[] }>;
+  stream(request: StreamRequest): Promise<{ text: string; toolCalls: ToolCall[]; responseOutput?: ModelOutputItem[] }>;
   json(request: { system: string; user: string; signal?: AbortSignal }): Promise<unknown>;
 }
 
@@ -45,10 +49,20 @@ export interface LlmConfig {
   model: string;
   fastModel?: string;
   reasoningEffort?: string;
+  apiMode?: "chat_completions" | "responses";
 }
 
-export function createLlm(config: LlmConfig): Llm {
-  const client = new OpenAI({ apiKey: config.apiKey, baseURL: config.baseUrl || undefined, maxRetries: 1 });
+export interface LlmUsage {
+  model: string;
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  reasoningTokens: number;
+}
+
+export function createLlm(config: LlmConfig, options: { fetch?: typeof fetch; onUsage?: (usage: LlmUsage) => void } = {}): Llm {
+  const client = new OpenAI({ apiKey: config.apiKey, baseURL: config.baseUrl || undefined, maxRetries: 1, ...(options.fetch ? { fetch: options.fetch } : {}) });
+  if (config.apiMode === "responses") return createResponsesLlm(client, config, options.onUsage);
   // Only sent when configured: hosts that do not know the parameter reject it.
   const effort = config.reasoningEffort ? { reasoning_effort: config.reasoningEffort as "low" } : {};
 
