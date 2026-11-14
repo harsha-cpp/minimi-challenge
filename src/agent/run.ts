@@ -90,7 +90,7 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
     const time = pinTurnTime(clock, tz, input.asOf);
     const now = new Date(time.effectiveAt);
     const simulated = time.simulated;
-    buffered = false;
+    buffered = turnPolicy(message, simulated).requireSimulationReview;
     const prior = store.sessionHistory(sessionId, HISTORY_TURNS, now.getTime());
     const history = prepareHistory(prior.map(withoutLegacyFailure), tz);
     const recalled = recall(store, message, now, tz, history.ids);
