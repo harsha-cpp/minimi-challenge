@@ -10,13 +10,23 @@ const el = (tag, className, text) => {
 };
 
 const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-// A page load is a chat. Memory lives on the server and spans all of them.
-const sessionId = crypto.randomUUID();
+const isMacPlatform = /Mac|iPhone|iPad|iPod/.test(navigator.platform)
+  || navigator.userAgentData?.platform === "macOS";
+const composeShortcut = isMacPlatform
+  ? { label: "⌘E", aria: "Meta+E", title: "Command+E to focus" }
+  : { label: "Ctrl+E", aria: "Control+E", title: "Control+E to focus" };
+// Preview storage is local to this origin and never touches the original app.
+function savedSession() { try { return localStorage.getItem("asof.preview.session.v2"); } catch { return null; } }
+let sessionId = savedSession() || crypto.randomUUID();
+function rememberSession() { try { localStorage.setItem("asof.preview.session.v2", sessionId); } catch {} }
+rememberSession();
 let inFlight = null;
 // The agent's clock can differ from this machine's; keep the difference and tick locally.
 let clockOffset = 0;
 let simulated = false;
 let clockSaving = false;
+let clarificationsEnabled = false;
+let pendingView = null;
 
 const agentNow = () => new Date(Date.now() + clockOffset);
 const dayLabel = (date) => date.toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short", year: "numeric" });
@@ -28,12 +38,14 @@ const seconds = (ms) => (ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)} s`)
 function applyState(state) {
   clockOffset = new Date(state.now).getTime() - Date.now();
   simulated = state.simulated;
+  clarificationsEnabled = Boolean(state.features?.clarifications);
   const notice = $("notice");
   notice.hidden = state.missing.length === 0;
   notice.textContent = state.missing.length
     ? `Not configured: ${state.missing.join(", ")}. Copy .env.example to .env, fill it in and restart.`
     : "";
   drawStamp();
+  updateEra();
 }
 
 function drawStamp() {
@@ -66,8 +78,10 @@ async function setClock(now) {
     if (!response.ok) throw new Error(state.error || "The date could not be changed. Please try again.");
     applyState(state);
     toggleClock(false);
+    return true;
   } catch (error) {
     showClockError(`Could not change the date. ${error instanceof TypeError ? "Check your connection and try again." : error.message}`);
+    return false;
   } finally {
     clockSaving = false;
     $("clock").removeAttribute("aria-busy");
@@ -289,7 +303,8 @@ function toggleClock(open) {
     drawCalendar();
     showCalendarView("days");
     drawTime();
-  }
+    $("cal-grid").querySelector("[aria-pressed=true]")?.focus({ preventScroll: true });
+  } else { $("stamp").focus({ preventScroll: true }); }
 }
 
 $("stamp").addEventListener("click", () => toggleClock($("clock").hidden));
@@ -321,311 +336,470 @@ $("clock").addEventListener("submit", (event) => {
 });
 $("clock-reset").addEventListener("click", () => setClock(null));
 
-// ---- rendering an answer --------------------------------------------------
+// ---- reading, evidence and saved conversations ----------------------------
 
-DOMPurify.addHook("afterSanitizeAttributes", (node) => {
-  if (node.tagName === "A") {
-    node.setAttribute("target", "_blank");
-    node.setAttribute("rel", "noopener noreferrer");
-  }
-});
+const emptyTemplate = $("empty").cloneNode(true);
+const entries = [];
+let lastEra = null;
+let ledgerEpisodes = [];
+let ledgerYearOnly = false;
+let toastTimer;
+let sourceRequest = 0;
 
-/** Markdown to safe HTML, with [n] turned into links to the numbered sources. */
-function sourceHref(source) {
-  return source.archive?.captureUrl
-    ?? (source.temporal?.provenanceKind === "archive" ? source.temporal.provenanceUrl : source.url);
+function notify(message) {
+  clearTimeout(toastTimer);
+  $("toast").textContent = message;
+  $("toast").hidden = false;
+  toastTimer = setTimeout(() => { $("toast").hidden = true; }, 3500);
 }
 
-// Old ledger records remain intact; obsolete retrieval failures are not useful instructions.
+function updateEra() {
+  const date = agentNow();
+  $("header-now").hidden = !simulated;
+  const composerBar = $("composer-era-bar");
+  composerBar.hidden = !simulated;
+  $("composer-now").hidden = !simulated;
+  if (simulated) {
+    $("composer-era").textContent = `Era simulation · ${dayLabel(date)}`;
+    $("composer-era").classList.add("is-simulated");
+    $("composer-era-note").textContent = "Live research. Historical perspective.";
+  }
+  if ($("edition-year")) {
+    $("edition-year").textContent = date.getFullYear();
+    $("edition-date").textContent = date.toLocaleDateString("en-GB", { day: "numeric", month: "long" });
+    const note = simulated ? "The answer takes this date’s perspective. Later outcomes are still unknown." : "";
+    $("edition-note").textContent = note;
+    $("edition-note").hidden = !note;
+    $("starter-context").textContent = simulated ? `Questions for ${date.getFullYear()}` : "Research, remember, revisit";
+    const questions = simulated
+      ? [date.getFullYear() >= 1947 ? "Is India already independent?" : "Will India gain independence?", "Who is leading India right now?", date.getFullYear() < 2007 ? "Could I buy an iPhone today?" : "Who won the most recent IPL season?"]
+      : ["What changed in AI this week?", "Compare managed Postgres hosting for a small SaaS", "What did we discuss earlier, and is it still correct?"];
+    document.querySelectorAll("[data-starter]").forEach((button, i) => {
+      button.dataset.question = questions[i];
+      button.replaceChildren(el("span", "starter-number", `0${i + 1}`), el("span", "starter-question", questions[i]), el("span", "starter-arrow", "↗"));
+    });
+  }
+}
+
+function showDialog(dialog) {
+  dialog.hidden = false;
+  if (!dialog.open && typeof dialog.showModal === "function") dialog.showModal();
+}
+function closeDialog(dialog) {
+  if (dialog.open && typeof dialog.close === "function") dialog.close();
+  dialog.hidden = true;
+}
+
+function sourceHref(source) {
+  const value = source.archive?.captureUrl ?? (source.temporal?.provenanceKind === "archive" ? source.temporal.provenanceUrl : source.url);
+  try { const url = new URL(value); return /^(https?|http):$/.test(url.protocol) ? url.href : "#"; } catch { return "#"; }
+}
 function displayAnswer(text) {
   return /^\s*I could not verify this as of \S+\.[\s\S]*(?:Exa Snapshot|preserved evidence|cited historical evidence|fully verified answer)/i.test(text)
-    ? "This answer used an older simulation mode. Ask again to research this date."
-    : text;
+    ? "This older answer used a retired simulation mode. Re-check it to research this date again." : text;
 }
-
 function displayError(message) {
   return /Exa Snapshot|snapshot_access_denied|matching preserved evidence/i.test(message)
-    ? "This answer used an older simulation mode. Ask again to research this date."
-    : message;
+    ? "This older answer needs a fresh lookup. You can retry it here." : message;
 }
 
-function renderAnswer(container, markdown, sources) {
+async function openSource(source, context = {}) {
+  const requestId = ++sourceRequest;
+  $("source-number").textContent = `Evidence / ${String(source.n).padStart(2, "0")}`;
+  $("source-title").textContent = source.title;
+  $("source-host").textContent = new URL(source.url).hostname.replace(/^www\./, "");
+  $("source-host").href = sourceHref(source);
+  $("source-original").href = sourceHref(source);
+  $("source-context").textContent = context.at ? `Used in an answer as of ${dayLabel(new Date(context.at))}.` : "Supporting source for this answer.";
+  $("source-dates").replaceChildren();
+  for (const [label, value] of [["Published", source.publishedDate], ["Researched", source.retrievedAt?.slice(0, 10)]]) {
+    if (value) { const cell = el("div"); cell.append(el("span", "eyebrow", label), el("span", "", value)); $("source-dates").append(cell); }
+  }
+  $("source-passage").textContent = source.text || (context.episodeId ? "Loading the saved passage…" : "A passage was not saved with this older entry. Read the original source for the full context.");
+  showDialog($("source-dialog"));
+  if (!source.text && context.episodeId) {
+    try {
+      const response = await fetch(`/api/episodes/${context.episodeId}`);
+      if (!response.ok) throw new Error();
+      const detail = await response.json();
+      const saved = detail.sources.find(item => item.n === source.n);
+      if (!$("source-dialog").hidden && requestId === sourceRequest) {
+        $("source-passage").textContent = saved?.text || "A passage was not saved with this older entry. Read the original source for the full context.";
+      }
+    } catch { if (requestId === sourceRequest) $("source-passage").textContent = "The saved passage could not be loaded. You can still read the original source."; }
+  }
+}
+
+DOMPurify.addHook("afterSanitizeAttributes", node => {
+  if (node.tagName === "A") { node.setAttribute("target", "_blank"); node.setAttribute("rel", "noopener noreferrer"); }
+});
+function renderAnswer(container, markdown, sources, context = {}) {
   container.innerHTML = DOMPurify.sanitize(marked.parse(displayAnswer(markdown), { gfm: true }));
-  const byNumber = new Map(sources.map((s) => [s.n, s]));
+  const byNumber = new Map(sources.map(source => [source.n, source]));
   for (const node of citationTextNodes(container)) {
     const parts = node.textContent.split(/(\[\d+(?:\s*,\s*\d+)*\])/);
     if (parts.length === 1) continue;
     const fragment = document.createDocumentFragment();
     for (const part of parts) {
       const numbers = /^\[[\d,\s]+\]$/.test(part) ? part.slice(1, -1).split(",").map(Number) : [];
-      if (!numbers.length || !numbers.every((n) => byNumber.has(n))) {
-        fragment.append(part);
-        continue;
-      }
+      if (!numbers.length || !numbers.every(n => byNumber.has(n))) { fragment.append(part); continue; }
       for (const n of numbers) {
+        const source = byNumber.get(n);
         const link = el("a", "cite", `[${n}]`);
-        link.href = sourceHref(byNumber.get(n));
-        link.title = byNumber.get(n).title;
-        link.target = "_blank";
-        link.rel = "noopener noreferrer";
+        link.href = sourceHref(source);
+        link.title = `Inspect source ${n}: ${source.title}`;
+        link.setAttribute("aria-haspopup", "dialog");
+        link.addEventListener("click", event => { if (!event.metaKey && !event.ctrlKey && !event.shiftKey) { event.preventDefault(); openSource(source, context); } });
         fragment.append(link);
       }
     }
     node.replaceWith(fragment);
   }
+  for (const table of container.querySelectorAll("table")) {
+    const wrap = el("div", "table-scroll"); wrap.tabIndex = 0; wrap.setAttribute("role", "region"); wrap.setAttribute("aria-label", "Answer table, scroll horizontally if needed");
+    table.replaceWith(wrap); wrap.append(table);
+  }
+}
+function renderSources(list, sources, context = {}) {
+  list.replaceChildren(...sources.map(source => {
+    const item = el("li");
+    const button = el("button", "source-chip"); button.type = "button"; button.setAttribute("aria-haspopup", "dialog");
+    button.append(el("span", "n", String(source.n)), el("span", "host", new URL(source.url).hostname.replace(/^www\./, "")), el("span", "source-chevron", "↗"));
+    button.title = source.title; button.addEventListener("click", () => openSource(source, context)); item.append(button); return item;
+  }));
+  list.hidden = !sources.length;
 }
 
-function renderSources(list, sources) {
-  list.replaceChildren(
-    ...sources.map((s) => {
-      const item = el("li");
-      const link = el("a");
-      link.href = sourceHref(s);
-      link.target = "_blank";
-      link.rel = "noopener noreferrer";
-      link.append(el("span", "host", new URL(s.url).hostname.replace(/^www\./, "")), ` — ${s.title}`);
-      item.append(el("span", "n", String(s.n)), link);
-      if (s.publishedDate) item.append(el("span", "date", `published ${s.publishedDate}`));
-      return item;
-    }),
-  );
-  list.hidden = sources.length === 0;
+function buttonAction(label, action, className = "text-action") {
+  const button = el("button", className, label); button.type = "button"; button.addEventListener("click", action); return button;
 }
-
-// ---- one turn -------------------------------------------------------------
-
-function addEntry(question) {
+function addEntry(question, options = {}) {
   $("empty")?.remove();
-  const now = agentNow();
+  const now = new Date(options.at ?? agentNow());
+  const isEra = options.simulated ?? simulated;
+  const eraKey = `${isEra}:${now.toLocaleDateString("en-CA")}`;
+  if (lastEra && lastEra !== eraKey) {
+    const divider = el("div", "era-divider"); divider.append(el("span", "", isEra ? `Viewpoint changed · ${dayLabel(now)}` : "Returned to the present")); $("thread").append(divider);
+  }
+  lastEra = eraKey;
   const entry = el("article", "entry");
-  const gutter = el("div", "gutter");
-  gutter.append(el("time", "", timeLabel(now)), el("span", "", dayLabel(now)));
+  const gutter = el("div", "gutter"); gutter.append(el("time", "", timeLabel(now)), el("span", "", dayLabel(now)), el("span", "entry-mode", isEra ? "SIMULATION" : "LIVE"));
   const body = el("div", "body");
-  const view = {
-    trace: el("ul", "trace"),
-    answer: el("div", "answer"),
-    sources: el("ol", "sources"),
-    timings: el("div", "timings"),
-  };
-  view.sources.hidden = true;
-  body.append(el("h2", "question", question), view.trace, view.answer, view.sources, view.timings);
-  entry.append(gutter, body);
-  $("thread").append(entry);
-  entry.scrollIntoView({ block: "start", behavior: "smooth" });
+  const view = { entry, at: now.toISOString(), isEra, question, trace: el("ul", "trace"), answer: el("div", "answer"), sources: el("ol", "sources"), timings: el("div", "timings"), status: el("div", "answer-status"), steps: el("ol", "answer-steps"), actions: el("div", "answer-actions"), details: el("details", "answer-details"), text: "", dataSources: [], episodeId: options.episodeId };
+  view.clarification = el("div", "clarification-slot");
+  view.status.setAttribute("role", "status");
+  for (const [i, title] of ["Researching", "Checking era", "Preparing answer"].entries()) view.steps.append(el("li", "", `${String(i + 1).padStart(2, "0")} ${title}`));
+  view.details.append(el("summary", "", "Research details"), view.trace, view.timings);
+  view.sources.hidden = true; view.actions.hidden = true;
+  body.append(el("h2", "question", question), view.clarification, view.steps, view.answer, view.sources, view.status, view.actions, view.details);
+  entry.append(gutter, body); $("thread").append(entry); entries.push(view);
+  if (!options.restored) entry.scrollIntoView({ block: "start", behavior: "smooth" });
   return view;
 }
+function stage(view, index, label) {
+  view.steps.hidden = false;
+  [...view.steps.children].forEach((item, i) => { item.classList.toggle("active", i === index); item.classList.toggle("complete", i < index); });
+  view.status.textContent = label;
+}
+function traceLine(list, kind, label) {
+  const item = el("li"); item.append(el("span", "kind", kind), el("span", "label", label), el("span", "state")); list.append(item); return item;
+}
+function paintView(view) { renderAnswer(view.answer, view.text, view.dataSources, { at: view.at, episodeId: view.episodeId }); }
 
-function traceLine(list, kind, label, state = "", className = "") {
-  const item = el("li", className);
-  item.append(el("span", "kind", kind), el("span", "label", label), el("span", "state", state));
-  list.append(item);
-  return item;
+function choiceSummary(view, answer) {
+  view.clarification.replaceChildren();
+  const summary = el("div", "clarification-summary");
+  summary.append(el("span", "eyebrow", answer.skipped ? "Using reasonable assumptions" : "Your direction"), el("p", "", answer.answer));
+  view.clarification.append(summary);
+}
+function updatePendingComposer() {
+  input.placeholder = pendingView?.card.selection ? "Use saved choice above" : pendingView ? "Your own detail…" : "Ask anything";
+  if (pendingView) {
+    $("compose-context").hidden = false;
+    $("compose-context").textContent = `Clarifying: ${pendingView.question}`;
+  } else $("compose-context").hidden = true;
+}
+function selectionFor(answer) {
+  return answer.skipped ? { skip: true } : answer.optionId ? { optionId: answer.optionId } : { text: answer.answer };
+}
+function showClarification(view, card) {
+  view.clarificationId = card.id;
+  view.card = card;
+  view.awaitingClarification = true;
+  pendingView = view;
+  view.steps.hidden = true; view.actions.hidden = true; view.details.hidden = true;
+  view.clarification.replaceChildren();
+  const section = el("section", "clarification-card");
+  const heading = el("h3", "", card.question); heading.id = `clarification-${card.id}`; heading.tabIndex = -1;
+  section.setAttribute("aria-labelledby", heading.id);
+  section.append(el("span", "eyebrow", "One detail will help"), heading, el("p", "clarification-why", card.why));
+  const options = el("div", "clarification-options"); options.setAttribute("role", "group"); options.setAttribute("aria-label", card.question);
+  for (const option of card.options) {
+    const button = buttonAction("", () => submitClarification(view, { optionId: option.id }), "clarification-option");
+    const content = el("span", "option-content"); content.append(el("strong", "", option.label), el("span", "option-detail", option.detail));
+    button.append(el("span", "option-letter", option.id.toUpperCase()), content, el("span", "option-arrow", "↗")); options.append(button);
+  }
+  section.append(options);
+  const form = el("form", "clarification-custom");
+  const label = el("label", "", "Or add your own detail");
+  const field = el("input"); field.type = "text"; field.maxLength = 1000; field.placeholder = "Tell me what matters to you…"; field.id = `detail-${card.id}`; label.htmlFor = field.id;
+  const row = el("div", "custom-detail-row"); const submit = el("button", "", "Use this detail ↗"); submit.type = "submit"; row.append(field, submit);
+  form.append(label, row); form.addEventListener("submit", event => {
+    event.preventDefault();
+    if (!field.value.trim()) { error.textContent = "Choose an option or add a short detail."; field.focus(); return; }
+    submitClarification(view, { text: field.value.trim() });
+  });
+  const error = el("p", "clarification-error"); error.setAttribute("role", "alert");
+  section.append(form, error, buttonAction("Use your best judgment instead ↗", () => submitClarification(view, { skip: true }), "text-action clarification-skip"));
+  if (view.isEra) section.append(el("p", "clarification-date", `This answer stays set to ${dayLabel(new Date(view.at))}.`));
+  view.clarification.append(section);
+  view.status.textContent = "Waiting for your direction. No research is running.";
+  if (card.selection) {
+    view.submittedSelection = selectionFor(card.selection);
+    choiceSummary(view, card.selection);
+    const resume = buttonAction("Continue with this choice ↗", () => submitClarification(view, view.submittedSelection), "text-action clarification-resume");
+    view.clarification.append(resume);
+    view.status.textContent = "Your choice is saved. Continue above to finish the answer.";
+  }
+  updatePendingComposer();
+}
+function submitClarification(view, selection) {
+  if (inFlight) return;
+  view.awaitingClarification = false; view.submittedSelection = selection; pendingView = null;
+  const option = "optionId" in selection ? view.card.options.find(option => option.id === selection.optionId) : null;
+  const answer = { answer: option ? `${option.label}: ${option.detail}` : "text" in selection ? selection.text : "Use your best judgment and state reasonable assumptions.", skipped: Boolean(selection.skip) };
+  choiceSummary(view, answer); updatePendingComposer();
+  send(view.question, { view, clarification: { id: view.clarificationId, selection } });
+}
+function showActions(view, failed = false) {
+  view.actions.replaceChildren(); view.actions.hidden = false;
+  if (!failed) view.actions.append(buttonAction("Copy answer", async () => {
+    const citations = view.dataSources.filter(source => view.cited?.includes(source.n)).map(source => `[${source.n}] ${source.title} — ${sourceHref(source)}`).join("\n");
+    try { await navigator.clipboard.writeText(`${view.text}${citations ? `\n\nSources\n${citations}` : ""}`); notify("Answer and source links copied."); }
+    catch { notify("Copy is unavailable in this browser. Select the answer text to copy it."); }
+  }));
+  view.actions.append(buttonAction("Edit question", () => { $("input").value = view.question; $("compose-context").textContent = "Editing an earlier question · sends as a new entry"; $("compose-context").hidden = false; fitInput(); $("input").focus(); }));
+  view.actions.append(buttonAction(failed ? "Retry question ↗" : "Ask again", () => { if (inFlight) return notify("Finish or stop the current answer first.");
+    if (failed && view.clarificationId && view.submittedSelection) return send(view.question, { view, clarification: { id: view.clarificationId, selection: view.submittedSelection } });
+    send(view.question); }));
+  if (!failed && view.isEra) view.actions.append(buttonAction("Re-check now ↗", () => recheck(view.question, view.at)));
+}
+function completeEntry(view, timings, cited) {
+  view.cited = cited;
+  view.steps.hidden = true;
+  paintView(view);
+  const sources = view.dataSources.filter(source => cited.includes(source.n));
+  renderSources(view.sources, sources, { at: view.at, episodeId: view.episodeId });
+  view.status.textContent = `${sources.length} source${sources.length === 1 ? "" : "s"}${timings?.totalMs != null ? ` · ${seconds(timings.totalMs)}` : ""} · Saved to Ledger`;
+  view.status.classList.add("is-complete");
+  showActions(view);
 }
 
-async function send(message) {
+async function send(message, options = {}) {
   if (inFlight || !message.trim()) return;
-  const view = addEntry(message.trim());
-  const abort = new AbortController();
-  // Pin this request even if the user changes the clock while it is streaming.
-  const asOf = simulated ? agentNow().toISOString() : undefined;
-  inFlight = abort;
-  setBusy(true);
-
-  let text = "";
-  let sources = [];
-  let frame = 0;
-  const searches = new Map();
-  let verificationLine;
-  // Tokens arrive faster than the eye reads: re-render once per animation frame at most.
-  const paint = () => {
-    frame ||= requestAnimationFrame(() => {
-      frame = 0;
-      renderAnswer(view.answer, text, sources);
-    });
-  };
-
-  const handle = (event) => {
-    if (event.type === "recall") {
-      for (const note of event.notes) traceLine(view.trace, "memory", note);
-    } else if (event.type === "search") {
-      const label = event.publishedAfter ? `${event.query} (after ${event.publishedAfter})` : event.query;
-      const line = searches.get(event.id) ?? traceLine(view.trace, "search", label);
-      searches.set(event.id, line);
-      line.className = event.state;
-      line.querySelector(".state").textContent =
-        event.state === "running"
-          ? ""
-          : event.state === "failed"
-            ? "lookup unsuccessful"
-            : `${event.results} result${event.results === 1 ? "" : "s"} · ${seconds(event.ms)}`;
-      if (event.message) line.title = displayError(event.message);
+  const view = options.view ?? addEntry(message.trim());
+  view.text = ""; view.answer.replaceChildren(); view.actions.hidden = true;
+  view.details.hidden = false;
+  view.status.classList.remove("is-complete", "is-interrupted");
+  const abort = new AbortController(); inFlight = abort; setBusy(true);
+  const asOf = view.isEra ? view.at : undefined;
+  $("compose-context").hidden = true;
+  let frame = 0, completed = false;
+  const searches = new Map(); let reviewLine;
+  stage(view, 0, "Finding the sources behind your answer…");
+  const handle = event => {
+    if (event.type === "clarification") showClarification(view, event.card);
+    else if (event.type === "recall") for (const note of event.notes) traceLine(view.trace, "memory", note);
+    else if (event.type === "search") {
+      const line = searches.get(event.id) ?? traceLine(view.trace, "search", event.query); searches.set(event.id, line); line.className = event.state;
+      line.querySelector(".state").textContent = event.state === "running" ? "searching" : event.state === "failed" ? "lookup unsuccessful" : `${event.results} results · ${seconds(event.ms)}`;
+      if (event.state === "running") stage(view, 0, view.isEra ? "Researching the world at your selected date…" : "Researching current sources…");
     } else if (event.type === "verification") {
-      verificationLine ??= traceLine(view.trace, "verify", "Checking era and sources");
-      verificationLine.className = event.state;
-      verificationLine.querySelector(".state").textContent = event.state === "running" ? "checking" : event.state === "done" ? `checked · ${seconds(event.ms)}` : event.state === "unavailable" ? "review unavailable" : "review incomplete";
-    } else if (event.type === "sources") {
-      sources = event.sources;
-    } else if (event.type === "text") {
-      text += event.delta;
-      paint();
-    } else if (event.type === "retract") {
-      text = "";
-      paint();
-    } else if (event.type === "done") {
-      renderAnswer(view.answer, text, sources);
-      renderSources(view.sources, sources.filter((s) => event.cited.includes(s.n)));
-      const t = event.timings;
-      view.timings.textContent = [
-        `recall ${seconds(t.recallMs)}`,
-        `${t.searches} search${t.searches === 1 ? "" : "es"}`,
-        t.verificationMs ? `verification ${seconds(t.verificationMs)}` : null,
-        t.firstTokenMs === null ? null : `first word ${seconds(t.firstTokenMs)}`,
-        `total ${seconds(t.totalMs)}`,
-      ]
-        .filter(Boolean)
-        .join(" · ");
-    } else if (event.type === "error") {
-      cancelAnimationFrame(frame);
-      frame = 0;
-      view.answer.replaceChildren(el("p", "failure", displayError(event.message)));
-    }
+      reviewLine ??= traceLine(view.trace, "review", "Era and sources");
+      reviewLine.querySelector(".state").textContent = event.state === "running" ? "checking" : event.state === "unavailable" ? "review unavailable" : `complete · ${seconds(event.ms)}`;
+      stage(view, event.state === "running" ? 1 : 2, event.state === "running" ? "Checking dates, source support, and historical perspective…" : "Preparing your answer…");
+    } else if (event.type === "sources") view.dataSources = event.sources;
+    else if (event.type === "text") {
+      stage(view, 2, "Preparing your answer…"); view.text += event.delta;
+      frame ||= requestAnimationFrame(() => { frame = 0; paintView(view); });
+    } else if (event.type === "retract") { view.text = ""; paintView(view); }
+    else if (event.type === "done") {
+      completed = true; view.episodeId = event.episodeId;
+      view.timings.textContent = `Recall ${seconds(event.timings.recallMs)} · ${event.timings.searches} searches · ${event.timings.modelCalls} model calls${event.timings.verificationMs ? ` · review ${seconds(event.timings.verificationMs)}` : ""} · total ${seconds(event.timings.totalMs)}`;
+      completeEntry(view, event.timings, event.cited);
+    } else if (event.type === "error") throw new Error(displayError(event.message));
   };
-
   try {
-    const response = await fetch("/api/chat", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ sessionId, message, tz, asOf }),
-      signal: abort.signal,
-    });
-    if (!response.ok) throw new Error((await response.json()).error ?? `Request failed (${response.status})`);
-
-    // Server-sent events over a POST: each event is one "data: {json}" line followed by a blank line.
-    const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
-    let buffer = "";
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buffer += value;
-      const events = buffer.split("\n\n");
-      buffer = events.pop();
-      for (const raw of events) {
-        if (raw.startsWith("data: ")) handle(JSON.parse(raw.slice(6)));
+    const response = await fetch("/api/chat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sessionId, message: message.trim(), tz, asOf, ...(options.clarification ? { clarification: options.clarification } : {}) }), signal: abort.signal });
+    if (!response.ok) {
+      const failure = await response.json();
+      if (failure.code === "clarification_unavailable") {
+        view.clarificationId = null; view.submittedSelection = null;
+        view.clarification.replaceChildren();
       }
+      throw new Error(failure.error ?? "The request could not be completed.");
     }
+    const reader = response.body.pipeThrough(new TextDecoderStream()).getReader(); let buffer = "";
+    for (;;) {
+      const { value, done } = await reader.read(); if (done) break; buffer += value;
+      const batches = buffer.split("\n\n"); buffer = batches.pop();
+      for (const raw of batches) if (raw.startsWith("data: ")) handle(JSON.parse(raw.slice(6)));
+    }
+    if (!completed && !view.awaitingClarification && !abort.signal.aborted) throw new Error("The connection ended before the answer was saved. You can retry your question.");
   } catch (error) {
-    if (abort.signal.aborted) view.timings.textContent = "stopped";
-    else handle({ type: "error", message: error.message });
+    cancelAnimationFrame(frame); frame = 0; view.steps.hidden = true;
+    view.status.classList.remove("is-complete"); view.status.classList.add("is-interrupted");
+    view.status.textContent = abort.signal.aborted ? "Stopped. You can edit or retry your question." : "The answer was interrupted. Your question is still here.";
+    if (!abort.signal.aborted) view.answer.replaceChildren(el("p", "failure", displayError(error.message)));
+    showActions(view, true);
   } finally {
     cancelAnimationFrame(frame);
-    if (text && !view.answer.querySelector(".failure")) renderAnswer(view.answer, text, sources);
-    inFlight = null;
-    setBusy(false);
+    if (completed) paintView(view);
+    if (inFlight === abort) { inFlight = null; setBusy(false);
+      if (view.awaitingClarification) view.clarification.querySelector("h3")?.focus({ preventScroll: true });
+    }
   }
 }
-
-// ---- composer -------------------------------------------------------------
 
 const input = $("input");
-
 function setBusy(busy) {
-  $("send").textContent = busy ? "Stop" : "Send";
-  if (!busy) input.focus();
+  $("send").textContent = busy ? "Stop" : pendingView?.card.selection ? "Continue ↗" : pendingView ? "Add detail ↗" : "Send ↗";
+  $("send").setAttribute("aria-label", busy ? "Stop answer" : pendingView?.card.selection ? "Continue with saved choice" : pendingView ? "Submit clarification detail" : "Send message");
+  if (!busy) (pendingView?.clarification.querySelector("h3, .clarification-resume") ?? input).focus({ preventScroll: true });
 }
-
-function fitInput() {
-  input.style.height = "auto";
-  input.style.height = `${input.scrollHeight}px`;
-}
-
-$("composer").addEventListener("submit", (event) => {
-  event.preventDefault();
-  if (inFlight) return inFlight.abort();
-  const message = input.value;
-  input.value = "";
-  fitInput();
-  send(message);
-});
-
+function fitInput() { input.style.height = "auto"; input.style.height = `${Math.min(input.scrollHeight, 180)}px`; }
+$("composer").addEventListener("submit", event => { event.preventDefault(); if (inFlight) return inFlight.abort();
+  if (pendingView?.card.selection) return submitClarification(pendingView, pendingView.submittedSelection);
+  const message = input.value; if (!message.trim()) return;
+  if (pendingView && message.trim().length > 1000) return notify("Keep this detail under 1000 characters, or start a new chat.");
+  input.value = ""; fitInput();
+  if (pendingView) submitClarification(pendingView, { text: message.trim() });
+  else send(message); });
 input.addEventListener("input", fitInput);
-input.addEventListener("keydown", (event) => {
-  if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
-    event.preventDefault();
-    $("composer").requestSubmit();
-  }
-});
-
-for (const starter of document.querySelectorAll(".starters button")) {
-  starter.addEventListener("click", () => send(starter.textContent));
+input.addEventListener("keydown", event => { if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); $("composer").requestSubmit(); } });
+$("thread").addEventListener("click", event => { const starter = event.target.closest("[data-question]"); if (starter) send(starter.dataset.question); });
+function resetThread() { $("thread").replaceChildren(); entries.length = 0; lastEra = null; pendingView = null; }
+function newChat() {
+  clearTimeout(toastTimer); $("toast").hidden = true;
+  inFlight?.abort(); inFlight = null; sessionId = crypto.randomUUID(); rememberSession(); resetThread(); setBusy(false);
+  $("thread").append(emptyTemplate.cloneNode(true)); updateEra(); input.value = ""; fitInput(); $("compose-context").hidden = true;
+  updatePendingComposer();
+}
+$("new-chat").addEventListener("click", newChat);
+document.querySelector(".wordmark").addEventListener("click", event => { event.preventDefault(); newChat(); });
+$("composer-era").addEventListener("click", () => toggleClock($("clock").hidden));
+for (const id of ["header-now", "composer-now"]) $(id).addEventListener("click", () => setClock(null));
+async function recheck(question, at) {
+  if (inFlight) return notify("Finish or stop the current answer first.");
+  closeDialog($("ledger"));
+  if (!await setClock(null)) return notify("The date could not be updated. Try again.");
+  send(`Re-check your answer to “${question}” from ${dayLabel(new Date(at))} using current sources. What is still correct, and what has changed?`);
 }
 
-$("new-chat").addEventListener("click", () => location.reload());
-
-// ---- ledger ---------------------------------------------------------------
-
-async function openLedger() {
-  const { episodes } = await (await fetch("/api/memory")).json();
-  const body = $("ledger-body");
-  body.replaceChildren();
-  if (!episodes.length) body.append(el("p", "ledger-empty", "Nothing yet. Ask something."));
-
-  const claimsById = new Map(episodes.flatMap((e) => e.claims).map((c) => [c.id, c]));
+async function restoreSession(id, scroll = false) {
+  const response = await fetch(`/api/sessions/${encodeURIComponent(id)}`);
+  if (!response.ok) throw new Error("This saved conversation could not be loaded.");
+  const { episodes } = await response.json();
+  if (!episodes.length) return false;
+  resetThread(); sessionId = id; rememberSession();
+  for (const item of episodes) {
+    const { episode, sources } = item;
+    const view = addEntry(episode.question, { at: episode.askedAt, simulated: Boolean(episode.execution?.time?.simulated ?? episode.execution?.simulation), episodeId: episode.id, restored: true });
+    view.text = episode.answer; view.dataSources = sources;
+    if (episode.execution?.clarification) choiceSummary(view, episode.execution.clarification);
+    completeEntry(view, null, sources.map(source => source.n));
+    view.details.hidden = true;
+  }
+  if (scroll) entries.at(-1)?.entry.scrollIntoView({ behavior: "smooth", block: "start" });
+  return true;
+}
+async function restorePending(id) {
+  if (!clarificationsEnabled) return;
+  const response = await fetch(`/api/sessions/${encodeURIComponent(id)}/clarification`);
+  if (!response.ok) return;
+  const { card } = await response.json();
+  if (!card) return;
+  const view = addEntry(card.message, { at: card.time.effectiveAt, simulated: card.time.simulated, restored: true });
+  showClarification(view, card);
+}
+async function openConversation(episode) {
+  if (inFlight) return notify("Finish or stop the current answer first.");
+  try { await restoreSession(episode.sessionId, true); await restorePending(episode.sessionId); updatePendingComposer(); setBusy(false); closeDialog($("ledger")); notify("Conversation reopened. Continue below."); }
+  catch (error) { notify(error.message); }
+}
+function drawLedger() {
+  const term = $("ledger-search").value.trim().toLowerCase();
+  const year = agentNow().getFullYear();
+  const filtered = ledgerEpisodes.filter(episode => (!ledgerYearOnly || new Date(episode.askedAt).getFullYear() === year)
+    && `${episode.question} ${episode.summary || ""} ${episode.answer || ""} ${dayLabel(new Date(episode.askedAt))} ${new Date(episode.askedAt).toISOString().slice(0, 10)}`.toLowerCase().includes(term));
+  $("ledger-count").textContent = `${filtered.length} ${filtered.length === 1 ? "entry" : "entries"}`;
+  const body = $("ledger-body"); body.replaceChildren();
+  if (!filtered.length) body.append(el("p", "ledger-empty", ledgerEpisodes.length ? "No matching entries. Try another topic or date." : "Your first answer will start the record."));
   let currentDay = "";
-  for (const episode of episodes) {
-    const when = new Date(episode.askedAt);
-    if (dayLabel(when) !== currentDay) {
-      currentDay = dayLabel(when);
-      body.append(el("h3", "", currentDay));
-    }
+  for (const episode of filtered) {
+    const date = new Date(episode.askedAt); const label = dayLabel(date);
+    if (label !== currentDay) { currentDay = label; body.append(el("h3", "ledger-day", label)); }
     const item = el("div", "ledger-item");
-    item.append(el("div", "when", timeLabel(when)), el("p", "asked", episode.question));
-    if (episode.execution?.simulation?.mode === "era" && episode.answer) {
-      const answer = el("div", "answer simulation-answer");
-      renderAnswer(answer, episode.answer, episode.sources ?? []);
-      item.append(el("p", "when", "Era simulation"), answer);
-    }
-    if (episode.claims.length) {
-      const list = el("ul", "claims");
-      for (const claim of episode.claims) {
-        const row = el("li", claim.verdict);
-        const value = el("span", "value");
-        const prior = claim.verdict === "changed" ? claimsById.get(claim.priorClaimId) : null;
-        if (prior) value.append(el("span", "was", prior.value));
-        value.append(claim.verdict === "unchanged" ? `${claim.value} ✓` : claim.verdict === "unverified" ? `${claim.value} · could not verify` : claim.value);
-        row.append(el("span", "what", `${claim.entity} · ${claim.attribute}`), value);
-        list.append(row);
-      }
-      item.append(list);
-    }
-    if (episode.verifiedStatements?.length) {
-      const list = el("ul", "claims verified-statements");
-      for (const statement of episode.verifiedStatements) {
-        const row = el("li", "");
-        const value = el("div", "value answer");
-        renderAnswer(value, statement.text, episode.sources ?? []);
-        row.append(el("span", "what", "Historical statement · source checked"), value);
-        list.append(row);
-      }
-      item.append(list);
-    }
-    body.append(item);
+    item.append(el("div", "when", `${timeLabel(date)} · ${episode.execution?.simulation?.mode === "era" ? "Era simulation" : "Live research"}`));
+    item.append(buttonAction(episode.question, () => openConversation(episode), "ledger-question"));
+    if (episode.summary) item.append(el("p", "ledger-summary", episode.summary));
+    const actions = el("div", "ledger-entry-actions");
+    actions.append(buttonAction("Open conversation ↗", () => openConversation(episode)), buttonAction("Re-check now", () => recheck(episode.question, episode.askedAt))); item.append(actions); body.append(item);
   }
-  $("ledger").hidden = false;
+}
+async function openLedger() {
+  showDialog($("ledger")); $("ledger-body").replaceChildren(el("p", "ledger-empty", "Opening your record…"));
+  try { const response = await fetch("/api/memory"); if (!response.ok) throw new Error(); ({ episodes: ledgerEpisodes } = await response.json()); drawLedger(); }
+  catch { $("ledger-body").replaceChildren(el("p", "ledger-empty", "The Ledger could not be loaded. Close it and try again.")); }
+}
+$("open-ledger").addEventListener("click", openLedger);
+$("close-ledger").addEventListener("click", () => closeDialog($("ledger")));
+$("ledger-search").addEventListener("input", drawLedger);
+$("ledger-era").addEventListener("click", () => { ledgerYearOnly = !ledgerYearOnly; $("ledger-era").setAttribute("aria-pressed", String(ledgerYearOnly)); drawLedger(); });
+$("source-close").addEventListener("click", () => closeDialog($("source-dialog")));
+for (const dialog of [$("ledger"), $("source-dialog")]) {
+  dialog.addEventListener("cancel", event => { event.preventDefault(); closeDialog(dialog); });
+  dialog.addEventListener("click", event => { if (event.target !== dialog) return; const r = dialog.getBoundingClientRect(); if (event.clientX < r.left || event.clientX > r.right || event.clientY < r.top || event.clientY > r.bottom) closeDialog(dialog); });
+}
+function typingTarget(target) {
+  return target instanceof Element && !!target.closest("input, textarea, select, [contenteditable='true']");
 }
 
-$("open-ledger").addEventListener("click", openLedger);
-$("close-ledger").addEventListener("click", () => ($("ledger").hidden = true));
-document.addEventListener("keydown", (event) => {
-  if (event.key !== "Escape") return;
-  if (!$("clock").hidden && calendarView !== "days") {
-    const trigger = calendarView === "years" ? "cal-year" : "cal-month";
-    showCalendarView("days");
-    $(trigger).focus();
+function composeShortcutPressed(event) {
+  if (typingTarget(event.target) || !$("clock").hidden || $("ledger").open || $("source-dialog").open) return false;
+  const key = event.key.toLowerCase();
+  if (isMacPlatform) {
+    return key === "e" && event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey;
+  }
+  return key === "e" && event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey;
+}
+
+function paintComposeShortcut() {
+  const hint = $("compose-shortcut");
+  if (!hint) return;
+  hint.textContent = composeShortcut.label;
+  input.setAttribute("aria-keyshortcuts", composeShortcut.aria);
+  input.title = composeShortcut.title;
+}
+
+document.addEventListener("keydown", event => {
+  if (composeShortcutPressed(event)) {
+    event.preventDefault();
+    input.focus({ preventScroll: true });
     return;
   }
-  $("ledger").hidden = true;
-  toggleClock(false);
+  if (event.key !== "Escape") return;
+  if (!$("source-dialog").hidden && $("source-dialog").open) { event.preventDefault(); closeDialog($("source-dialog")); }
+  else if (!$("ledger").hidden) { event.preventDefault(); closeDialog($("ledger")); }
+  else if (!$("clock").hidden) {
+    event.preventDefault();
+    if (calendarView !== "days") { const trigger = calendarView === "years" ? "cal-year" : "cal-month"; showCalendarView("days"); $(trigger).focus(); }
+    else toggleClock(false);
+  }
 });
+document.addEventListener("pointerdown", event => { if (!$("clock").hidden && !event.target.closest("#clock, #stamp, #composer-era-bar")) toggleClock(false); });
 
+paintComposeShortcut();
 applyState(await (await fetch("/api/state")).json());
-tick();
+try { await restoreSession(sessionId); await restorePending(sessionId); } catch { notify("Saved conversation could not be restored. Your Ledger is still available."); }
+setBusy(false); tick();

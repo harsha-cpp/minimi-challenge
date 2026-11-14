@@ -120,6 +120,12 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     return void res.writeHead(200, { "content-type": type, "cache-control": "no-cache" }).end(await readFile(root + file));
   }
   if (req.method === "GET" && path === "/api/state") return sendJson(res, 200, state());
+  const sessionMatch = /^\/api\/sessions\/([a-zA-Z0-9_-]{1,64})$/.exec(path);
+  if (req.method === "GET" && sessionMatch) {
+    const episodes = store.sessionHistory(sessionMatch[1]!, 100, clock.now().getTime())
+      .map(episode => ({ episode, sources: store.sourcesFor(episode.id) }));
+    return sendJson(res, 200, { episodes });
+  }
   if (req.method === "GET" && path === "/api/memory") {
     const episodes = store.recent(100, clock.now().getTime()).map((e) => {
       const verifiedStatements = store.verifiedStatementsFor(e.id);

@@ -14,6 +14,7 @@
       </div>
       <div class="controls">
         <button id="stamp" class="stamp" type="button" aria-haspopup="dialog" aria-expanded="false" title="Change the agent's clock"></button>
+        <button id="header-now" class="link return-now" type="button" hidden>Return to now ↗</button>
         <button id="open-ledger" class="link" type="button">Ledger</button>
         <button id="new-chat" class="link" type="button">New chat</button>
       </div>
@@ -67,32 +68,54 @@
 
     <main id="thread" class="thread" aria-live="polite">
       <section id="empty" class="empty">
-        <h1>Ask something.<br />I keep what I said, and when.</h1>
-        <p>Then ask me later whether it is still true.</p>
+        <div class="hero-layout">
+          <div><h1>Every answer<br />has a date.</h1><p class="hero-description">Ask about the world. Change the date.<br />Come back to see what changed.</p></div>
+          <aside class="edition"><strong id="edition-year"></strong><span id="edition-date"></span><p id="edition-note" hidden></p></aside>
+        </div>
+        <div class="starter-heading"><span class="eyebrow">A place to start</span><span id="starter-context"></span></div>
         <div class="starters">
-          <button type="button">Shortlist 5 CRM tools for a 20-person sales team</button>
-          <button type="button">Compare managed Postgres hosting prices for a small SaaS</button>
-          <button type="button">What did I ask you yesterday? Is your answer still correct?</button>
+          <button type="button" data-starter="0"></button>
+          <button type="button" data-starter="1"></button>
+          <button type="button" data-starter="2"></button>
         </div>
       </section>
     </main>
 
     <form id="composer" class="composer">
+      <div id="composer-era-bar" class="composer-era" hidden><button id="composer-era" type="button" aria-label="Change answer date"></button><span id="composer-era-note"></span><button id="composer-now" class="text-action" type="button" hidden>Return to now ↗</button></div>
+      <p id="compose-context" class="compose-context" hidden></p>
       <div id="notice" class="notice" hidden></div>
       <div class="field">
-        <textarea id="input" rows="1" placeholder="Ask anything" aria-label="Message" autofocus></textarea>
+        <div class="composer-input">
+          <textarea id="input" rows="1" placeholder="Ask anything" aria-label="Message" autofocus></textarea>
+          <kbd id="compose-shortcut" class="compose-shortcut" aria-hidden="true"></kbd>
+        </div>
         <button id="send" type="submit">Send</button>
       </div>
     </form>
 
-    <aside id="ledger" class="ledger" hidden aria-label="Memory ledger">
+    <dialog id="ledger" class="ledger" hidden aria-labelledby="ledger-title">
       <div class="ledger-head">
-        <h2>Ledger</h2>
+        <div><span class="eyebrow">Your dated record</span><h2 id="ledger-title">Ledger</h2></div>
         <button id="close-ledger" class="link" type="button">Close</button>
       </div>
-      <p class="ledger-note">Every conversation, with the checkable claims it made and the day it made them.</p>
+      <p class="ledger-note">What you asked. What we found. When it was true.</p>
+      <label class="ledger-search"><span>Find an entry</span><input id="ledger-search" type="search" placeholder="Search questions, topics, or dates…" autocomplete="off" /></label>
+      <div class="ledger-toolbar"><span id="ledger-count" role="status"></span><button id="ledger-era" class="text-action" type="button" aria-pressed="false">This year only</button></div>
       <div id="ledger-body"></div>
-    </aside>
+    </dialog>
+
+    <dialog id="source-dialog" class="source-dialog" aria-labelledby="source-title">
+      <header class="drawer-head"><span class="eyebrow" id="source-number">Source</span><button id="source-close" type="button" class="link">Close</button></header>
+      <h2 id="source-title"></h2><a id="source-host" target="_blank" rel="noopener noreferrer"></a>
+      <p id="source-context" class="source-context"></p>
+      <div id="source-dates" class="source-dates"></div>
+      <div class="passage-label eyebrow">Passage used in this answer</div>
+      <blockquote id="source-passage"></blockquote>
+      <p class="source-note">This is the source excerpt used for the answer. A source’s publication date can be newer than the historical event it describes.</p>
+      <a id="source-original" class="source-original" target="_blank" rel="noopener noreferrer">Read original source ↗</a>
+    </dialog>
+    <div id="toast" class="toast" role="status" hidden></div>
 
     <script src="/vendor/marked.js"></script>
     <script src="/vendor/purify.js"></script>

@@ -10,16 +10,25 @@ import { citationTextNodes } from "../public/citations.js";
 const html = readFileSync(new URL("../public/index.html", import.meta.url), "utf8");
 const app = readFileSync(new URL("../public/app.js", import.meta.url), "utf8").replace('import { citationTextNodes } from "./citations.js";\n', "");
 
-async function mount(options: { date?: Date; post?: (body: { now: string | null }) => Promise<Response>; chatEvents?: Array<Record<string, unknown>>; memoryEpisodes?: Array<Record<string, unknown>> } = {}) {
+async function mount(options: { date?: Date; post?: (body: { now: string | null }) => Promise<Response>; chatEvents?: Array<Record<string, unknown>>; chatReplies?: Array<Array<Record<string, unknown>> | { status: number; error: string; code: string }>; pendingCard?: Record<string, unknown>; memoryEpisodes?: Array<Record<string, unknown>>; savedSession?: string } = {}) {
   const dom = new JSDOM(html, { url: "http://localhost:3000/", runScripts: "outside-only", pretendToBeVisual: true });
   const { window } = dom;
-  const state = { now: (options.date ?? new Date(2026, 10, 13, 15, 0)).toISOString(), simulated: false, missing: [], model: "test", episodes: 0 };
+  if (options.savedSession) window.localStorage.setItem("asof.preview.session.v2", options.savedSession);
+  const state = { now: (options.date ?? new Date(2026, 10, 13, 15, 0)).toISOString(), simulated: false, missing: [], model: "test", episodes: 0, features: { clarifications: Boolean(options.pendingCard) } };
   const requests: Array<{ now: string | null }> = [];
+  const chatRequests: Array<Record<string, unknown>> = [];
   window.HTMLElement.prototype.scrollIntoView = () => {};
   Object.assign(window, { marked, DOMPurify: createDOMPurify(window), citationTextNodes, TextDecoderStream,
     fetch: async (path: string, init?: RequestInit) => {
       if (path === "/api/state") return Response.json(state);
-      if (path === "/api/chat" && options.chatEvents) return new Response(options.chatEvents.map(event => `data: ${JSON.stringify(event)}\n\n`).join(""));
+      if (path.endsWith("/clarification")) return Response.json({ card: options.pendingCard ?? null });
+      if (path.startsWith("/api/sessions/")) return Response.json({ episodes: (options.memoryEpisodes ?? []).filter(episode => episode.sessionId === path.split("/").at(-1)).map(episode => ({ episode, sources: episode.sources ?? [] })) });
+      if (path.startsWith("/api/episodes/")) { const episode = options.memoryEpisodes?.find(episode => String(episode.id) === path.split("/").at(-1)); return Response.json({ episode, sources: episode?.sources ?? [] }); }
+      if (path === "/api/chat" && (options.chatEvents || options.chatReplies)) {
+        chatRequests.push(JSON.parse(String(init?.body)));
+        const reply = options.chatReplies?.[chatRequests.length - 1] ?? options.chatEvents ?? [];
+        return Array.isArray(reply) ? new Response(reply.map(event => `data: ${JSON.stringify(event)}\n\n`).join("")) : Response.json(reply, { status: reply.status });
+      }
       if (path === "/api/memory" && options.memoryEpisodes) return Response.json({ episodes: options.memoryEpisodes });
       assert.equal(path, "/api/clock");
       const body = JSON.parse(String(init?.body)) as { now: string | null };
@@ -35,7 +44,7 @@ async function mount(options: { date?: Date; post?: (body: { now: string | null 
     button(`#cal-options button[data-value="${value}"]`).click();
   };
   const form = window.document.getElementById("clock") as HTMLFormElement;
-  return { dom, window, requests, form, button, choose, open: () => button("#stamp").click(), travel: () => button('#clock button[type="submit"]').click() };
+  return { dom, window, requests, chatRequests, form, button, choose, open: () => button("#stamp").click(), travel: () => button('#clock button[type="submit"]').click() };
 }
 
 test("month navigation submits the visible month without requiring a second day click", async () => {
@@ -52,6 +61,24 @@ test("month navigation submits the visible month without requiring a second day 
     assert.deepEqual(ui.requests, [{ now: new Date(2026, 9, 13, 15, 0).toISOString() }]);
     assert.match(ui.button("#stamp").textContent!, /Simulated.*13 Oct 2026/);
     assert.equal(ui.form.hidden, true);
+  } finally { ui.dom.window.close(); }
+});
+
+test("compose shortcut focuses the input and live mode hides the composer date strip", async () => {
+  const ui = await mount();
+  try {
+    const isMac = /Mac|iPhone|iPad|iPod/.test(ui.window.navigator.platform);
+    const hint = ui.window.document.getElementById("compose-shortcut")!;
+    assert.equal(hint.textContent, isMac ? "⌘E" : "Ctrl+E");
+    assert.equal(ui.window.document.getElementById("composer-era-bar")!.hidden, true);
+    ui.window.document.body.focus();
+    ui.window.document.dispatchEvent(new ui.window.KeyboardEvent("keydown", {
+      key: "e",
+      metaKey: isMac,
+      ctrlKey: !isMac,
+      bubbles: true,
+    }));
+    assert.equal(ui.window.document.activeElement, ui.window.document.getElementById("input"));
   } finally { ui.dom.window.close(); }
 });
 
@@ -81,19 +108,19 @@ test("obsolete capture failures never reappear as actionable website errors", as
     ui.button("#send").click();
     await nextTurn();
     const answer = ui.window.document.querySelector(".answer")!;
-    assert.match(answer.textContent!, /older simulation mode.*Ask again/);
+    assert.match(answer.textContent!, /older answer.*retired simulation mode.*Re-check/);
     assert.doesNotMatch(answer.textContent!, /Snapshot|HTTP 403|access|quota/);
     const trace = ui.window.document.querySelector(".trace")!;
     assert.match(trace.textContent!, /lookup unsuccessful/);
     assert.match(trace.textContent!, /review unavailable/);
-    assert.doesNotMatch(trace.querySelector("li")!.getAttribute("title")!, /Snapshot|HTTP 403|quota/);
+    assert.doesNotMatch(trace.querySelector("li")!.getAttribute("title") ?? "", /Snapshot|HTTP 403|quota/);
   } finally { ui.dom.window.close(); }
 });
 
 test("the ledger retains era answers and citations without presenting them as verified claims", async () => {
   const source = { n: 1, title: "Independence history", url: "https://example.com/independence" };
   const ui = await mount({ memoryEpisodes: [{
-    id: 1, askedAt: new Date(1948, 0, 14, 12).getTime(), question: "Will India get independence?",
+    id: 1, sessionId: "saved-session", askedAt: new Date(1948, 0, 14, 12).getTime(), question: "Will India get independence?",
     answer: "India became independent on **15 August 1947**. [1]", sources: [source],
     execution: { simulation: { mode: "era", review: "pass" } }, claims: [], verifiedStatements: [],
   }] });
@@ -103,7 +130,11 @@ test("the ledger retains era answers and citations without presenting them as ve
     const ledger = ui.window.document.getElementById("ledger")!;
     assert.equal(ledger.hidden, false);
     assert.match(ledger.textContent!, /Era simulation/);
-    const answer = ledger.querySelector(".simulation-answer")!;
+    assert.match(ledger.textContent!, /Will India get independence/);
+    ui.button(".ledger-question").click();
+    await nextTurn();
+    assert.equal(ledger.hidden, true);
+    const answer = ui.window.document.querySelector("#thread .answer")!;
     assert.match(answer.textContent!, /India became independent on 15 August 1947/);
     assert.equal(answer.querySelector("strong")!.textContent, "15 August 1947");
     assert.equal(answer.querySelector("a.cite")!.getAttribute("href"), source.url);
@@ -123,7 +154,10 @@ test("modern source dates are identified as publication dates beside a simulated
     input.value = "Will India get independence?";
     ui.button("#send").click();
     await nextTurn();
-    assert.equal(ui.window.document.querySelector(".sources .date")!.textContent, "published 2026-01-01");
+    ui.button(".source-chip").click();
+    await nextTurn();
+    assert.equal(ui.window.document.querySelector("#source-dialog")!.hasAttribute("hidden"), false);
+    assert.match(ui.window.document.querySelector("#source-dates")!.textContent!, /Published2026-01-01/);
     assert.equal(ui.window.document.querySelector(".answer a.cite")!.getAttribute("href"), source.url);
   } finally { ui.dom.window.close(); }
 });
@@ -286,5 +320,183 @@ test("return to now clears simulated mode", async () => {
     assert.deepEqual(ui.requests[1], { now: null });
     assert.doesNotMatch(ui.button("#stamp").textContent!, /Simulated/);
     assert.equal(ui.form.hidden, true);
+  } finally { ui.dom.window.close(); }
+});
+
+test("preview restores a saved conversation after reload and new chat starts a separate session", async () => {
+  const ui = await mount({ savedSession: "saved-session", memoryEpisodes: [{
+    id: 11, sessionId: "saved-session", askedAt: new Date(1948, 0, 14, 12).getTime(), question: "A saved question",
+    answer: "A saved answer [1].", sources: [{ n: 1, url: "https://example.com/history", title: "History", text: "Preserved passage." }],
+    execution: { time: { simulated: true }, simulation: { mode: "era" } }, claims: [], verifiedStatements: [],
+  }] });
+  try {
+    assert.match(ui.window.document.querySelector("#thread")!.textContent!, /A saved answer/);
+    assert.equal(ui.window.localStorage.getItem("asof.preview.session.v2"), "saved-session");
+    ui.button("#new-chat").click();
+    assert.ok(ui.window.document.querySelector("#empty"));
+    assert.notEqual(ui.window.localStorage.getItem("asof.preview.session.v2"), "saved-session");
+    ui.button("#stamp").click();
+    assert.equal(ui.form.hidden, false, "date action still works after restoring the empty state");
+  } finally { ui.dom.window.close(); }
+});
+
+test("citation inspector uses the saved passage and preserves a direct original-source link", async () => {
+  const ui = await mount({ savedSession: "evidence-session", memoryEpisodes: [{
+    id: 12, sessionId: "evidence-session", askedAt: Date.parse("1948-01-14T12:00:00Z"), question: "Evidence?",
+    answer: "A historical fact [1].", sources: [{ n: 1, url: "https://example.com/history", title: "A history source", text: "An exact source passage.", publishedDate: "2026-01-01" }],
+    execution: { time: { simulated: true } }, claims: [], verifiedStatements: [],
+  }] });
+  try {
+    ui.button(".cite").click();
+    assert.equal(ui.window.document.getElementById("source-passage")!.textContent, "An exact source passage.");
+    assert.equal(ui.window.document.getElementById("source-original")!.getAttribute("href"), "https://example.com/history");
+    assert.match(ui.window.document.getElementById("source-dates")!.textContent!, /Published2026-01-01/);
+    ui.button("#source-close").click();
+    assert.equal(ui.window.document.getElementById("source-dialog")!.hidden, true);
+  } finally { ui.dom.window.close(); }
+});
+
+test("Ledger search finds dated records and an empty search result remains recoverable", async () => {
+  const ui = await mount({ memoryEpisodes: [{ id: 1, sessionId: "record", askedAt: Date.parse("1948-01-14T12:00:00Z"), question: "India independence", summary: "Discussed independence", claims: [], verifiedStatements: [] }] });
+  try {
+    ui.button("#open-ledger").click(); await nextTurn();
+    const input = ui.window.document.getElementById("ledger-search") as HTMLInputElement;
+    input.value = "1948"; input.dispatchEvent(new ui.window.Event("input", { bubbles: true }));
+    assert.match(ui.window.document.getElementById("ledger-count")!.textContent!, /1 entry/);
+    input.value = "nonexistent"; input.dispatchEvent(new ui.window.Event("input", { bubbles: true }));
+    assert.match(ui.window.document.getElementById("ledger-body")!.textContent!, /No matching entries/);
+    input.value = "India"; input.dispatchEvent(new ui.window.Event("input", { bubbles: true }));
+    assert.match(ui.window.document.getElementById("ledger-body")!.textContent!, /India independence/);
+  } finally { ui.dom.window.close(); }
+});
+
+test("Re-check now returns to the present and sends the dated original question without a simulated cutoff", async () => {
+  const ui = await mount({ savedSession: "recheck-session", memoryEpisodes: [{
+    id: 13, sessionId: "recheck-session", askedAt: Date.parse("1948-01-14T12:00:00Z"), question: "Who leads India?",
+    answer: "A historical answer [1].", sources: [{ n: 1, title: "History", url: "https://example.com/history", text: "Historic leadership." }],
+    execution: { time: { simulated: true } }, claims: [], verifiedStatements: [],
+  }], chatEvents: [
+    { type: "text", delta: "An updated answer." },
+    { type: "done", episodeId: 14, cited: [], timings: { recallMs: 0, searches: 1, modelCalls: 2, totalMs: 20 } },
+  ] });
+  try {
+    const action = [...ui.window.document.querySelectorAll<HTMLButtonElement>(".answer-actions button")].find(button => button.textContent === "Re-check now ↗")!;
+    action.click(); await nextTurn(); await nextTurn();
+    assert.deepEqual(ui.requests, [{ now: null }]);
+    assert.equal(ui.chatRequests.length, 1);
+    assert.match(String(ui.chatRequests[0]!.message), /Who leads India.*14 Jan 1948.*current sources/);
+    assert.equal(ui.chatRequests[0]!.asOf, undefined);
+  } finally { ui.dom.window.close(); }
+});
+
+const clarificationCard = {
+  id: "12345678-1234-4321-8123-123456789abc", message: "Help me choose a project management tool",
+  question: "What kind of team will use it?", why: "Team size changes the plans and collaboration features worth comparing.",
+  time: { effectiveAt: "1948-01-14T12:00:00.000Z", receivedAt: "2026-11-15T10:00:00.000Z", simulated: true, tz: "Asia/Kolkata" },
+  options: [{ id: "a", label: "Small team", detail: "Low-cost collaboration for a few people" }, { id: "b", label: "Larger company", detail: "Cross-team reporting and automation" }],
+};
+const clarificationDone = [
+  { type: "text", delta: "For your small team, start with these criteria." },
+  { type: "done", episodeId: 15, cited: [], timings: { recallMs: 0, searches: 1, modelCalls: 2, totalMs: 20 } },
+];
+const flushChat = async () => { await nextTurn(); await nextTurn(); };
+
+test("clarification cards end normally, have no preselection, and resume the original entry with the real clicked choice", async () => {
+  const ui = await mount({ chatReplies: [[{ type: "clarification", card: clarificationCard }], clarificationDone] });
+  try {
+    const input = ui.window.document.getElementById("input") as HTMLTextAreaElement;
+    input.value = clarificationCard.message; ui.button("#send").click(); await flushChat();
+    assert.equal(ui.window.document.querySelectorAll(".clarification-option").length, 2);
+    assert.equal(ui.window.document.querySelectorAll('.clarification-option[aria-pressed="true"]').length, 0);
+    assert.equal(ui.window.document.querySelector(".failure"), null);
+    assert.match(ui.window.document.querySelector(".answer-status")!.textContent!, /Waiting for your direction/);
+    assert.equal(ui.chatRequests.length, 1);
+    ui.button(".clarification-option").click(); await flushChat();
+    assert.deepEqual(ui.chatRequests[1]!.clarification, { id: clarificationCard.id, selection: { optionId: "a" } });
+    assert.equal(ui.chatRequests[1]!.message, clarificationCard.message);
+    assert.equal(ui.window.document.querySelectorAll("#thread .entry").length, 1);
+    assert.match(ui.window.document.querySelector(".clarification-summary")!.textContent!, /Small team/);
+    assert.match(ui.window.document.querySelector(".answer")!.textContent!, /For your small team/);
+    assert.equal((ui.window.document.querySelector(".answer-details") as HTMLElement).hidden, false);
+  } finally { ui.dom.window.close(); }
+});
+
+for (const kind of ["freeform", "skip", "composer"] as const) {
+  test(`clarification supports ${kind} without inventing a selected option`, async () => {
+    const ui = await mount({ chatReplies: [[{ type: "clarification", card: clarificationCard }], clarificationDone] });
+    try {
+      const input = ui.window.document.getElementById("input") as HTMLTextAreaElement;
+      input.value = clarificationCard.message; ui.button("#send").click(); await flushChat();
+      if (kind === "skip") ui.button(".clarification-skip").click();
+      else if (kind === "freeform") {
+        const custom = ui.window.document.querySelector(".clarification-custom input") as HTMLInputElement;
+        ui.button('.clarification-custom button[type="submit"]').click();
+        assert.match(ui.window.document.querySelector(".clarification-error")!.textContent!, /Choose an option/);
+        assert.equal(ui.chatRequests.length, 1);
+        custom.value = "For 8 teachers in India"; ui.button('.clarification-custom button[type="submit"]').click();
+      } else { input.value = "For 8 teachers in India"; ui.button("#send").click(); }
+      await flushChat();
+      assert.deepEqual(ui.chatRequests[1]!.clarification, { id: clarificationCard.id, selection: kind === "skip" ? { skip: true } : { text: "For 8 teachers in India" } });
+      assert.equal(ui.window.document.querySelectorAll("#thread .entry").length, 1);
+      assert.match(ui.window.document.querySelector(".clarification-summary")!.textContent!, kind === "skip" ? /reasonable assumptions/ : /8 teachers/);
+    } finally { ui.dom.window.close(); }
+  });
+}
+
+test("refresh restores the pending historical question and selection stays pinned despite a live clock change", async () => {
+  const ui = await mount({ savedSession: "pending-session", pendingCard: clarificationCard, chatEvents: clarificationDone });
+  try {
+    assert.match(ui.window.document.querySelector(".question")!.textContent!, /project management tool/);
+    assert.match(ui.window.document.querySelector(".clarification-date")!.textContent!, /14 Jan 1948/);
+    ui.open(); ui.button("#clock-reset").click(); await flushChat();
+    ui.button(".clarification-option").click(); await flushChat();
+    assert.equal(ui.chatRequests[0]!.sessionId, "pending-session");
+    assert.equal(ui.chatRequests[0]!.asOf, clarificationCard.time.effectiveAt);
+    assert.equal(ui.window.document.querySelectorAll("#thread .entry").length, 1);
+  } finally { ui.dom.window.close(); }
+});
+
+test("interrupted clarified answers retry the same choice on the same entry", async () => {
+  const ui = await mount({ chatReplies: [[{ type: "clarification", card: clarificationCard }], [], clarificationDone] });
+  try {
+    const input = ui.window.document.getElementById("input") as HTMLTextAreaElement;
+    input.value = clarificationCard.message; ui.button("#send").click(); await flushChat();
+    ui.button(".clarification-option").click(); await flushChat();
+    assert.match(ui.window.document.querySelector(".failure")!.textContent!, /connection ended/);
+    [...ui.window.document.querySelectorAll<HTMLButtonElement>(".answer-actions button")].find(button => button.textContent === "Retry question ↗")!.click();
+    await flushChat();
+    assert.deepEqual(ui.chatRequests[2]!.clarification, ui.chatRequests[1]!.clarification);
+    assert.equal(ui.window.document.querySelectorAll("#thread .entry").length, 1);
+    assert.equal(ui.window.document.querySelector(".failure"), null);
+  } finally { ui.dom.window.close(); }
+});
+
+test("refresh after an interrupted selection offers only the saved choice and can continue from the composer", async () => {
+  const selection = { id: clarificationCard.id, question: clarificationCard.question, answer: "Small team: Low-cost collaboration for a few people", skipped: false, optionId: "a" };
+  const ui = await mount({ savedSession: "pending-session", pendingCard: { ...clarificationCard, selection }, chatEvents: clarificationDone });
+  try {
+    assert.equal(ui.window.document.querySelector(".clarification-option"), null);
+    assert.match(ui.window.document.querySelector(".clarification-summary")!.textContent!, /Small team/);
+    ui.button("#send").click(); await flushChat();
+    assert.deepEqual(ui.chatRequests[0]!.clarification, { id: clarificationCard.id, selection: { optionId: "a" } });
+    assert.equal(ui.window.document.querySelectorAll("#thread .entry").length, 1);
+    ui.button("#new-chat").click();
+    assert.equal(ui.button("#send").textContent, "Send ↗");
+    assert.equal(ui.window.document.querySelector(".clarification-summary"), null);
+  } finally { ui.dom.window.close(); }
+});
+
+test("expired clarification can restart the original question without retrying the expired reference forever", async () => {
+  const ui = await mount({ chatReplies: [[{ type: "clarification", card: clarificationCard }], { status: 409, error: "This question has expired. Ask your question again.", code: "clarification_unavailable" }, clarificationDone] });
+  try {
+    const input = ui.window.document.getElementById("input") as HTMLTextAreaElement;
+    input.value = clarificationCard.message; ui.button("#send").click(); await flushChat();
+    ui.button(".clarification-option").click(); await flushChat();
+    assert.match(ui.window.document.querySelector(".failure")!.textContent!, /expired/);
+    [...ui.window.document.querySelectorAll<HTMLButtonElement>(".answer-actions button")].find(button => button.textContent === "Retry question ↗")!.click();
+    await flushChat();
+    assert.equal(ui.chatRequests[2]!.message, clarificationCard.message);
+    assert.equal(ui.chatRequests[2]!.clarification, undefined);
+    assert.equal(ui.window.document.querySelectorAll("#thread .entry").length, 2);
   } finally { ui.dom.window.close(); }
 });
