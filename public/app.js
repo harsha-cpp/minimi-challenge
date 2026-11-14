@@ -1,5 +1,5 @@
-import { citationTextNodes } from "./citations.js";
 // The whole interface: no framework and no build step, so `npm run dev` has nothing to compile.
+import { citationTextNodes } from "./citations.js";
 
 const $ = (id) => document.getElementById(id);
 const el = (tag, className, text) => {
@@ -83,23 +83,38 @@ function showClockError(message) {
 // The calendar in the clock popover. `picked` is the chosen day; `shown` is the month on screen.
 let picked = new Date();
 let shown = new Date();
+let calendarView = "days";
+let firstYear = 1900;
+
+// setFullYear preserves years below 100, which Date's constructor treats as 1900–1999.
+function calendarDate(year, month, day = 1, hour = 0, minute = 0) {
+  const date = new Date(0);
+  date.setFullYear(year, month, day);
+  date.setHours(hour, minute, 0, 0);
+  return date;
+}
+
+const monthNames = Array.from({ length: 12 }, (_, month) => calendarDate(2000, month).toLocaleDateString("en-GB", { month: "long" }));
 
 const sameDay = (a, b) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
 
 function drawCalendar() {
   const year = shown.getFullYear();
   const month = shown.getMonth();
-  $("cal-title").textContent = shown.toLocaleDateString("en-GB", { month: "long", year: "numeric" });
+  $("cal-month").textContent = monthNames[month];
+  $("cal-month").setAttribute("aria-label", `Choose month, ${monthNames[month]}`);
+  $("cal-year").textContent = String(year);
+  $("cal-year").setAttribute("aria-label", `Choose year, ${year}`);
 
   // Weeks start on Monday, matching how the agent reads "last week".
   const cells = ["M", "T", "W", "T", "F", "S", "S"].map((letter) => el("span", "", letter));
-  const blanks = (new Date(year, month, 1).getDay() + 6) % 7;
+  const blanks = (calendarDate(year, month).getDay() + 6) % 7;
   for (let i = 0; i < blanks; i++) cells.push(el("span"));
 
   const today = new Date();
-  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const daysInMonth = calendarDate(year, month + 1, 0).getDate();
   for (let d = 1; d <= daysInMonth; d++) {
-    const date = new Date(year, month, d);
+    const date = calendarDate(year, month, d);
     const button = el("button", [sameDay(date, picked) && "selected", sameDay(date, today) && "today"].filter(Boolean).join(" "), String(d));
     button.type = "button";
     button.setAttribute("aria-label", dayLabel(date));
@@ -114,9 +129,57 @@ function drawCalendar() {
   $("clock-summary").textContent = dayLabel(picked);
 }
 
-function shiftMonth(by) {
-  shown = new Date(shown.getFullYear(), shown.getMonth() + by, 1);
+function choosePeriod(year, month) {
+  const next = calendarDate(year, month);
+  if (next.getFullYear() < 1 || next.getFullYear() > 9999) return;
+  shown = next;
+  // Every navigation path updates the submitted date and clamps to a valid day.
+  const lastDay = calendarDate(shown.getFullYear(), shown.getMonth() + 1, 0).getDate();
+  picked = calendarDate(shown.getFullYear(), shown.getMonth(), Math.min(picked.getDate(), lastDay));
+  showClockError("");
   drawCalendar();
+}
+
+function showCalendarView(view, focus = false) {
+  calendarView = view;
+  const months = view === "months";
+  const years = view === "years";
+  $("cal-grid").hidden = view !== "days";
+  $("cal-options").hidden = view === "days";
+  $("cal-month").setAttribute("aria-expanded", String(months));
+  $("cal-year").setAttribute("aria-expanded", String(years));
+  $("cal-help").textContent = months ? "Choose a month." : years ? "Choose a year. Scroll for more." : "Choose a day, or open the month and year above.";
+  for (const id of ["cal-prev", "cal-next"]) $(id).style.visibility = view === "days" ? "" : "hidden";
+  $("cal-earlier").hidden = !years || firstYear === 1;
+  if (view !== "days") {
+    const year = shown.getFullYear();
+    const lastYear = Math.min(9999, Math.max(new Date().getFullYear() + 10, year));
+    firstYear = Math.min(firstYear, year);
+    const values = months ? monthNames.map((_, month) => month) : Array.from({ length: lastYear - firstYear + 1 }, (_, i) => lastYear - i);
+    $("cal-options").classList.toggle("years", years);
+    $("cal-options").setAttribute("aria-label", months ? "Months" : "Years");
+    $("cal-options").replaceChildren(...values.map(value => {
+      const selected = months ? value === shown.getMonth() : value === year;
+      const option = el("button", selected ? "selected" : "", months ? monthNames[value] : String(value));
+      option.type = "button";
+      option.dataset.value = String(value);
+      option.setAttribute("aria-pressed", String(selected));
+      option.addEventListener("click", () => {
+        choosePeriod(months ? shown.getFullYear() : value, months ? value : shown.getMonth());
+        showCalendarView(months ? "days" : "months", true);
+      });
+      return option;
+    }));
+  }
+  if (focus) {
+    const selected = $(view === "days" ? "cal-grid" : "cal-options").querySelector('[aria-pressed="true"]');
+    selected?.focus({ preventScroll: true });
+    selected?.scrollIntoView?.({ block: "nearest" });
+  }
+}
+
+function shiftMonth(by) {
+  choosePeriod(shown.getFullYear(), shown.getMonth() + by);
 }
 
 // The time of day in the clock popover, as minutes since midnight. One number
@@ -218,10 +281,13 @@ function toggleClock(open) {
   $("clock").hidden = !open;
   $("stamp").setAttribute("aria-expanded", String(open));
   if (open) {
+    showClockError("");
     picked = agentNow();
-    shown = new Date(picked.getFullYear(), picked.getMonth(), 1);
+    shown = calendarDate(picked.getFullYear(), picked.getMonth());
+    firstYear = Math.max(1, Math.min(1900, picked.getFullYear() - 10));
     pickedMinutes = picked.getHours() * 60 + picked.getMinutes();
     drawCalendar();
+    showCalendarView("days");
     drawTime();
   }
 }
@@ -229,9 +295,28 @@ function toggleClock(open) {
 $("stamp").addEventListener("click", () => toggleClock($("clock").hidden));
 $("cal-prev").addEventListener("click", () => shiftMonth(-1));
 $("cal-next").addEventListener("click", () => shiftMonth(1));
+$("cal-month").addEventListener("click", () => showCalendarView(calendarView === "months" ? "days" : "months", true));
+$("cal-year").addEventListener("click", () => showCalendarView(calendarView === "years" ? "days" : "years", true));
+$("cal-earlier").addEventListener("click", () => {
+  firstYear = Math.max(1, firstYear - 100);
+  const scroll = $("cal-options").scrollTop;
+  showCalendarView("years");
+  $("cal-options").scrollTop = scroll;
+});
+$("cal-options").addEventListener("keydown", (event) => {
+  const buttons = [...$("cal-options").querySelectorAll("button")];
+  const index = buttons.indexOf(document.activeElement);
+  const columns = calendarView === "years" ? 4 : 3;
+  const delta = { ArrowLeft: -1, ArrowRight: 1, ArrowUp: -columns, ArrowDown: columns }[event.key];
+  if (index < 0 || (delta === undefined && event.key !== "Home" && event.key !== "End")) return;
+  event.preventDefault();
+  const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1 : Math.max(0, Math.min(buttons.length - 1, index + delta));
+  buttons[next].focus({ preventScroll: true });
+  buttons[next].scrollIntoView?.({ block: "nearest" });
+});
 $("clock").addEventListener("submit", (event) => {
   event.preventDefault();
-  const target = new Date(picked.getFullYear(), picked.getMonth(), picked.getDate(), Math.floor(pickedMinutes / 60), pickedMinutes % 60);
+  const target = calendarDate(picked.getFullYear(), picked.getMonth(), picked.getDate(), Math.floor(pickedMinutes / 60), pickedMinutes % 60);
   setClock(target.toISOString());
 });
 $("clock-reset").addEventListener("click", () => setClock(null));
@@ -246,8 +331,26 @@ DOMPurify.addHook("afterSanitizeAttributes", (node) => {
 });
 
 /** Markdown to safe HTML, with [n] turned into links to the numbered sources. */
+function sourceHref(source) {
+  return source.archive?.captureUrl
+    ?? (source.temporal?.provenanceKind === "archive" ? source.temporal.provenanceUrl : source.url);
+}
+
+// Old ledger records remain intact; obsolete retrieval failures are not useful instructions.
+function displayAnswer(text) {
+  return /^\s*I could not verify this as of \S+\.[\s\S]*(?:Exa Snapshot|preserved evidence|cited historical evidence|fully verified answer)/i.test(text)
+    ? "This answer used an older simulation mode. Ask again to research this date."
+    : text;
+}
+
+function displayError(message) {
+  return /Exa Snapshot|snapshot_access_denied|matching preserved evidence/i.test(message)
+    ? "This answer used an older simulation mode. Ask again to research this date."
+    : message;
+}
+
 function renderAnswer(container, markdown, sources) {
-  container.innerHTML = DOMPurify.sanitize(marked.parse(markdown, { gfm: true }));
+  container.innerHTML = DOMPurify.sanitize(marked.parse(displayAnswer(markdown), { gfm: true }));
   const byNumber = new Map(sources.map((s) => [s.n, s]));
   for (const node of citationTextNodes(container)) {
     const parts = node.textContent.split(/(\[\d+(?:\s*,\s*\d+)*\])/);
@@ -261,7 +364,7 @@ function renderAnswer(container, markdown, sources) {
       }
       for (const n of numbers) {
         const link = el("a", "cite", `[${n}]`);
-        link.href = byNumber.get(n).url;
+        link.href = sourceHref(byNumber.get(n));
         link.title = byNumber.get(n).title;
         link.target = "_blank";
         link.rel = "noopener noreferrer";
@@ -277,12 +380,12 @@ function renderSources(list, sources) {
     ...sources.map((s) => {
       const item = el("li");
       const link = el("a");
-      link.href = s.url;
+      link.href = sourceHref(s);
       link.target = "_blank";
       link.rel = "noopener noreferrer";
       link.append(el("span", "host", new URL(s.url).hostname.replace(/^www\./, "")), ` — ${s.title}`);
       item.append(el("span", "n", String(s.n)), link);
-      if (s.publishedDate) item.append(el("span", "date", s.publishedDate));
+      if (s.publishedDate) item.append(el("span", "date", `published ${s.publishedDate}`));
       return item;
     }),
   );
@@ -323,6 +426,8 @@ async function send(message) {
   if (inFlight || !message.trim()) return;
   const view = addEntry(message.trim());
   const abort = new AbortController();
+  // Pin this request even if the user changes the clock while it is streaming.
+  const asOf = simulated ? agentNow().toISOString() : undefined;
   inFlight = abort;
   setBusy(true);
 
@@ -330,6 +435,7 @@ async function send(message) {
   let sources = [];
   let frame = 0;
   const searches = new Map();
+  let verificationLine;
   // Tokens arrive faster than the eye reads: re-render once per animation frame at most.
   const paint = () => {
     frame ||= requestAnimationFrame(() => {
@@ -350,8 +456,13 @@ async function send(message) {
         event.state === "running"
           ? ""
           : event.state === "failed"
-            ? "failed"
+            ? "lookup unsuccessful"
             : `${event.results} result${event.results === 1 ? "" : "s"} · ${seconds(event.ms)}`;
+      if (event.message) line.title = displayError(event.message);
+    } else if (event.type === "verification") {
+      verificationLine ??= traceLine(view.trace, "verify", "Checking era and sources");
+      verificationLine.className = event.state;
+      verificationLine.querySelector(".state").textContent = event.state === "running" ? "checking" : event.state === "done" ? `checked · ${seconds(event.ms)}` : event.state === "unavailable" ? "review unavailable" : "review incomplete";
     } else if (event.type === "sources") {
       sources = event.sources;
     } else if (event.type === "text") {
@@ -367,13 +478,16 @@ async function send(message) {
       view.timings.textContent = [
         `recall ${seconds(t.recallMs)}`,
         `${t.searches} search${t.searches === 1 ? "" : "es"}`,
+        t.verificationMs ? `verification ${seconds(t.verificationMs)}` : null,
         t.firstTokenMs === null ? null : `first word ${seconds(t.firstTokenMs)}`,
         `total ${seconds(t.totalMs)}`,
       ]
         .filter(Boolean)
         .join(" · ");
     } else if (event.type === "error") {
-      view.answer.replaceChildren(el("p", "failure", event.message));
+      cancelAnimationFrame(frame);
+      frame = 0;
+      view.answer.replaceChildren(el("p", "failure", displayError(event.message)));
     }
   };
 
@@ -381,7 +495,7 @@ async function send(message) {
     const response = await fetch("/api/chat", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ sessionId, message, tz }),
+      body: JSON.stringify({ sessionId, message, tz, asOf }),
       signal: abort.signal,
     });
     if (!response.ok) throw new Error((await response.json()).error ?? `Request failed (${response.status})`);
@@ -465,6 +579,11 @@ async function openLedger() {
     }
     const item = el("div", "ledger-item");
     item.append(el("div", "when", timeLabel(when)), el("p", "asked", episode.question));
+    if (episode.execution?.simulation?.mode === "era" && episode.answer) {
+      const answer = el("div", "answer simulation-answer");
+      renderAnswer(answer, episode.answer, episode.sources ?? []);
+      item.append(el("p", "when", "Era simulation"), answer);
+    }
     if (episode.claims.length) {
       const list = el("ul", "claims");
       for (const claim of episode.claims) {
@@ -472,8 +591,19 @@ async function openLedger() {
         const value = el("span", "value");
         const prior = claim.verdict === "changed" ? claimsById.get(claim.priorClaimId) : null;
         if (prior) value.append(el("span", "was", prior.value));
-        value.append(claim.verdict === "unchanged" ? `${claim.value} ✓` : claim.value);
+        value.append(claim.verdict === "unchanged" ? `${claim.value} ✓` : claim.verdict === "unverified" ? `${claim.value} · could not verify` : claim.value);
         row.append(el("span", "what", `${claim.entity} · ${claim.attribute}`), value);
+        list.append(row);
+      }
+      item.append(list);
+    }
+    if (episode.verifiedStatements?.length) {
+      const list = el("ul", "claims verified-statements");
+      for (const statement of episode.verifiedStatements) {
+        const row = el("li", "");
+        const value = el("div", "value answer");
+        renderAnswer(value, statement.text, episode.sources ?? []);
+        row.append(el("span", "what", "Historical statement · source checked"), value);
         list.append(row);
       }
       item.append(list);
@@ -487,6 +617,12 @@ $("open-ledger").addEventListener("click", openLedger);
 $("close-ledger").addEventListener("click", () => ($("ledger").hidden = true));
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
+  if (!$("clock").hidden && calendarView !== "days") {
+    const trigger = calendarView === "years" ? "cal-year" : "cal-month";
+    showCalendarView("days");
+    $(trigger).focus();
+    return;
+  }
   $("ledger").hidden = true;
   toggleClock(false);
 });

@@ -19,13 +19,22 @@
       </div>
 
       <form id="clock" class="popover" hidden novalidate>
-        <p>Move the agent's clock to ask on one day and follow up on another.</p>
+        <p>Choose a date. Answers take that era's perspective.</p>
+        <p id="clock-coverage" class="clock-coverage">Era simulation uses live web research to reconstruct what had happened by your date. Later outcomes stay unknown; hypothetical predictions are labeled.</p>
         <div class="cal-head">
-          <button id="cal-prev" type="button" aria-label="Previous month">←</button>
-          <span id="cal-title" aria-live="polite"></span>
-          <button id="cal-next" type="button" aria-label="Next month">→</button>
+          <button id="cal-prev" class="cal-nav" type="button" aria-label="Previous month">←</button>
+          <div class="cal-period">
+            <div><span>Month</span><button id="cal-month" type="button" aria-expanded="false" aria-controls="cal-options"></button></div>
+            <div><span>Year</span><button id="cal-year" type="button" aria-expanded="false" aria-controls="cal-options"></button></div>
+          </div>
+          <button id="cal-next" class="cal-nav" type="button" aria-label="Next month">→</button>
         </div>
-        <div id="cal-grid" class="cal-grid"></div>
+        <p id="cal-help" class="cal-help">Choose a day, or open the month and year above.</p>
+        <div class="cal-body">
+          <div id="cal-grid" class="cal-grid"></div>
+          <div id="cal-options" class="cal-options" role="group" hidden></div>
+          <button id="cal-earlier" class="cal-earlier" type="button" hidden>Earlier years ↓</button>
+        </div>
         <div class="cal-time">
           <span class="label">At</span>
           <div class="spin" data-unit="hour">
@@ -39,7 +48,7 @@
             <button type="button" data-step="1" aria-label="Five minutes later">▲</button>
             <button type="button" data-step="-1" aria-label="Five minutes earlier">▼</button>
           </div>
-          <span id="clock-summary"></span>
+          <span id="clock-summary" aria-live="polite"></span>
         </div>
         <div class="cal-presets" aria-label="Common times">
           <button type="button" data-time="09:00">09:00</button>
@@ -48,7 +57,7 @@
           <button type="button" data-time="18:00">18:00</button>
           <button type="button" data-time="21:00">21:00</button>
         </div>
-        <p id="clock-error" role="alert" hidden></p>
+        <p id="clock-error" class="clock-error" role="alert" hidden></p>
         <div class="row">
           <button type="submit">Travel</button>
           <button id="clock-reset" type="button" class="quiet">Return to now</button>
