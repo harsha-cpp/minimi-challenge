@@ -13,7 +13,8 @@
     "typecheck": "tsc --noEmit",
     "eval": "tsx --disable-warning=ExperimentalWarning eval/replay.ts",
     "import": "tsx --disable-warning=ExperimentalWarning scripts/import.ts",
-    "eval:search": "tsx --disable-warning=ExperimentalWarning eval/search.ts"
+    "eval:search": "tsx --disable-warning=ExperimentalWarning eval/search.ts",
+    "eval:models": "tsx --disable-warning=ExperimentalWarning eval/compare-models.ts"
   },
   "dependencies": {
     "@fontsource/barlow-condensed": "^5.3.0",

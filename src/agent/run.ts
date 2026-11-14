@@ -35,7 +35,8 @@ export interface Deps {
   search: SearchProvider;
   store: MemoryStore;
   clock: Clock;
-  enricher: Enricher;
+  enricher: Pick<Enricher, "schedule">;
+  verifier?: Pick<Llm, "json">;
 }
 
 export interface TurnInput {
@@ -43,6 +44,7 @@ export interface TurnInput {
   message: string;
   tz: string;
   signal?: AbortSignal;
+  asOf?: Date;
 }
 
 export interface Timings {
