@@ -13,7 +13,6 @@ export class QuestionConflict extends Error {
   constructor(message: string, readonly code: "clarification_unavailable" | "clarification_in_progress" | "clarification_invalid_option" | "clarification_choice_sealed") { super(message); }
 }
 
-/** Pending questions are separate from answered episodes; preferences are never web evidence. */
 export class QuestionStore implements ClarificationPort {
   private db: DatabaseSync;
   private active = new Set<string>();

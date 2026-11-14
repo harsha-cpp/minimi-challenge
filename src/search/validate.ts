@@ -12,7 +12,6 @@ export function publicUrl(value: string): URL {
   return url;
 }
 
-/** Remove tracking identifiers; preserve functional query parameters. */
 export function canonicalUrl(value: string): string {
   const url = publicUrl(value);
   url.hash = "";

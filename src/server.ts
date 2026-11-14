@@ -1,7 +1,5 @@
-/**
- * One Node process: serves the page, streams chat turns as server-sent events,
- * and exposes the clock and the memory log to the interface.
- */
+
+
 import { readFile } from "node:fs/promises";
 import { type IncomingMessage, type ServerResponse, createServer } from "node:http";
 import { fileURLToPath } from "node:url";
@@ -23,7 +21,6 @@ if (config.startAt) clock.travelTo(config.startAt);
 const store = new MemoryStore(config.dbPath);
 const questions = new QuestionStore(config.dbPath);
 
-// Without keys the server still starts, and the page says which ones are missing.
 let deps: Deps | null = null;
 if (config.llm && config.exaApiKey) {
   const llm = createLlm(config.llm);
@@ -40,7 +37,7 @@ const STATIC: Record<string, [file: string, type: string]> = {
   "/style.css": ["public/style.css", "text/css; charset=utf-8"],
   "/vendor/marked.js": ["node_modules/marked/lib/marked.umd.js", "text/javascript; charset=utf-8"],
   "/vendor/purify.js": ["node_modules/dompurify/dist/purify.min.js", "text/javascript; charset=utf-8"],
-  // Fonts are shipped with the app so the page looks the same on every machine.
+
   "/fonts/mono-400.woff2": ["node_modules/@fontsource/ibm-plex-mono/files/ibm-plex-mono-latin-400-normal.woff2", "font/woff2"],
   "/fonts/mono-400-italic.woff2": ["node_modules/@fontsource/ibm-plex-mono/files/ibm-plex-mono-latin-400-italic.woff2", "font/woff2"],
   "/fonts/mono-600.woff2": ["node_modules/@fontsource/ibm-plex-mono/files/ibm-plex-mono-latin-600-normal.woff2", "font/woff2"],
@@ -121,7 +118,6 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
     return void res.end();
   }
 
-  // Closing the tab or pressing stop cancels the model and search calls in flight.
   const abort = new AbortController();
   res.on("close", () => {
     if (!res.writableEnded) abort.abort();
@@ -137,7 +133,7 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
       emit({ type: "done", episodeId: episode.id, cited: sources.map(source => source.n), timings: { recallMs: 0, firstTokenMs: 0, totalMs: 0, searches: 0, modelCalls: 0 } });
       return;
     }
-    // Keep the original question's mode even if the shared preview clock was changed while waiting.
+
     const requestDeps = resumed ? { ...deps, clock: resumed.card.time.simulated
       ? { now: () => new Date(resumed!.card.time.effectiveAt), simulated: true } : new SystemClock() } : deps;
     await runTurn(requestDeps, { sessionId, message, tz, asOf, clarification, signal: abort.signal }, event => {
@@ -180,7 +176,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     return sendJson(res, 200, { episode, claims: store.claimsFor(id), sources: store.sourcesFor(id), verifiedStatements: store.verifiedStatementsFor(id) });
   }
   if (req.method === "POST" && path === "/api/clock") {
-    // Body: { now: ISO string } to travel, { now: null } to return to the present.
+
     const { now } = await readJson(req);
     if (now === null) clock.reset();
     else {

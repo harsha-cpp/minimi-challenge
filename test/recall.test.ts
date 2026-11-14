@@ -7,7 +7,6 @@ const TZ = "Asia/Kolkata";
 const NOW = new Date("2026-11-11T23:44:00+05:30");
 const at = (local: string) => Date.parse(`${local}+05:30`);
 
-/** A small history: Postgres on Tue 3 Nov, a CRM shortlist on Mon 9 Nov, something unrelated on Tue 10 Nov. */
 function seeded() {
   const store = new MemoryStore(":memory:");
   const save = (askedAt: number, question: string, answer: string) =>
@@ -33,7 +32,6 @@ test("'on 3 November' finds that day's conversation and its claims", () => {
   const { store, postgres } = seeded();
   const result = recall(store, "What did I ask you on 3 November? Is your answer still correct today?", NOW, TZ);
 
-  // "today" is the present here, not a second day to look up.
   assert.deepEqual(result.refs.map((r) => r.text), ["3 November"]);
   const third = result.refs[0]!;
   assert.deepEqual(third.hits[0]!.episodes.map((e) => e.episode.id), [postgres]);
@@ -46,7 +44,7 @@ test("'on 3 November' finds that day's conversation and its claims", () => {
 
 test("'last Tuesday' is settled by which Tuesday has a matching conversation", () => {
   const { store, postgres } = seeded();
-  // Both Tuesdays have a conversation; only the 3rd is about Postgres hosting.
+
   const result = recall(store, "Last Tuesday I asked you about Postgres hosting. Has any pricing changed since then?", NOW, TZ);
   const ref = result.refs[0]!;
   assert.equal(ref.hits.length, 1);
@@ -63,14 +61,14 @@ test("an ambiguous day with nothing to tell the readings apart stays ambiguous",
 
 test("the topic words reach a conversation that used different words", () => {
   const { store, postgres } = seeded();
-  // The question that day said "managed database"; "Postgres hosting" exists only in the enriched topics.
+
   const result = recall(store, "that postgres hosting comparison, any pricing changes?", NOW, TZ);
   assert.deepEqual(result.related.map((e) => e.episode.id), [postgres]);
 });
 
 test("an empty date says so, offers the neighbours, and falls back to topic", () => {
   const { store, crm, postgres } = seeded();
-  // The shortlist was on Monday the 9th; the user misremembers it as Friday.
+
   const result = recall(store, "On Friday we shortlisted 5 CRM tools for our sales team. Any changes?", NOW, TZ);
   const ref = result.refs[0]!;
   assert.equal(ref.hits.length, 0);

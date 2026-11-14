@@ -1,16 +1,16 @@
-/** Labels belong to the evaluator, never to the answering model or retrieval query. */
+
 export interface SimulationCase {
   id: string;
   split: "regression" | "probe";
   category: string;
   asOf: string;
   question: string;
-  /** An actual preceding user turn, generated in the same empty in-memory session. */
+
   precedingQuestion?: string;
   research: "required" | "optional" | "none";
   pairedCurrent?: boolean;
   expectations: Array<{ id: string; criterion: string }>;
-  /** Evaluator references only: neither supplied URLs nor seeded research evidence. */
+
   references: string[];
 }
 

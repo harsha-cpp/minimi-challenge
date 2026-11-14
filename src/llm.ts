@@ -1,16 +1,9 @@
-/**
- * The model, behind the two calls the agent needs: a streamed chat turn that
- * may request tool calls, and a one-shot JSON answer for the memory step.
- *
- * Responses mode supports Azure Foundry reasoning models and preserves their
- * output items across tool rounds. Chat Completions remains available for other
- * compatible hosts. The agent still uses the same streamed-turn and JSON ports.
- */
+
+
 import OpenAI from "openai";
 import type { ResponseOutputItem } from "openai/resources/responses/responses";
 import { createResponsesLlm } from "./llm/responses.ts";
 
-/** Output types used by this function-tool loop, retained only within one turn. */
 export type ModelOutputItem = Extract<ResponseOutputItem, { type: "message" | "function_call" | "reasoning" }>;
 
 export type ChatMessage =
@@ -32,7 +25,7 @@ export interface ToolDefinition {
 export interface StreamRequest {
   messages: ChatMessage[];
   tools: ToolDefinition[];
-  /** "none" forces a written answer; used on the last allowed round. */
+
   toolChoice: "auto" | "none";
   onText(delta: string): void;
   signal?: AbortSignal;
@@ -63,7 +56,7 @@ export interface LlmUsage {
 export function createLlm(config: LlmConfig, options: { fetch?: typeof fetch; onUsage?: (usage: LlmUsage) => void } = {}): Llm {
   const client = new OpenAI({ apiKey: config.apiKey, baseURL: config.baseUrl || undefined, maxRetries: 1, ...(options.fetch ? { fetch: options.fetch } : {}) });
   if (config.apiMode === "responses") return createResponsesLlm(client, config, options.onUsage);
-  // Only sent when configured: hosts that do not know the parameter reject it.
+
   const effort = config.reasoningEffort ? { reasoning_effort: config.reasoningEffort as "low" } : {};
 
   return {
@@ -74,7 +67,7 @@ export function createLlm(config: LlmConfig, options: { fetch?: typeof fetch; on
       );
 
       let text = "";
-      // A tool call arrives in fragments, keyed by its position in the list.
+
       const calls: ToolCall[] = [];
       for await (const chunk of stream) {
         const delta = chunk.choices[0]?.delta;
@@ -111,7 +104,6 @@ export function createLlm(config: LlmConfig, options: { fetch?: typeof fetch; on
   };
 }
 
-/** Tolerates a model that wraps its JSON in prose or a code fence. */
 export function parseJson(text: string): unknown {
   try {
     return JSON.parse(text);

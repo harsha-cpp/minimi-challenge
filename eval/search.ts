@@ -1,4 +1,4 @@
-/** Opt-in live retrieval diagnostics. Does not call a model or claim answer correctness. */
+
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { loadConfig } from "../src/config.ts";

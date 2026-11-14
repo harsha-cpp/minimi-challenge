@@ -1,7 +1,6 @@
 import type { SearchHit, SearchProvider } from "./types.ts";
 import { normalizeQuery } from "./validate.ts";
 
-/** Bounded LRU + single-flight. Each subscriber owns its own cancellation. */
 export function withCache(provider: SearchProvider, ttlMs = 300_000, maxEntries = 256): SearchProvider {
   const cache = new Map<string, { until: number; hits: SearchHit[] }>();
   const pending = new Map<string, { controller: AbortController; result: Promise<SearchHit[]>; users: number }>();

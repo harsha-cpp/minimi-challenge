@@ -1,4 +1,4 @@
-// The whole interface: no framework and no build step, so `npm run dev` has nothing to compile.
+
 import { citationTextNodes } from "./citations.js";
 
 const $ = (id) => document.getElementById(id);
@@ -15,13 +15,13 @@ const isMacPlatform = /Mac|iPhone|iPad|iPod/.test(navigator.platform)
 const composeShortcut = isMacPlatform
   ? { label: "⌘E", aria: "Meta+E", title: "Command+E to focus" }
   : { label: "Ctrl+E", aria: "Control+E", title: "Control+E to focus" };
-// Preview storage is local to this origin and never touches the original app.
+
 function savedSession() { try { return localStorage.getItem("asof.preview.session.v2"); } catch { return null; } }
 let sessionId = savedSession() || crypto.randomUUID();
 function rememberSession() { try { localStorage.setItem("asof.preview.session.v2", sessionId); } catch {} }
 rememberSession();
 let inFlight = null;
-// The agent's clock can differ from this machine's; keep the difference and tick locally.
+
 let clockOffset = 0;
 let simulated = false;
 let clockSaving = false;
@@ -32,8 +32,6 @@ const agentNow = () => new Date(Date.now() + clockOffset);
 const dayLabel = (date) => date.toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short", year: "numeric" });
 const timeLabel = (date) => date.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
 const seconds = (ms) => (ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)} s`);
-
-// ---- clock ----------------------------------------------------------------
 
 function applyState(state) {
   clockOffset = new Date(state.now).getTime() - Date.now();
@@ -56,7 +54,6 @@ function drawStamp() {
   stamp.classList.toggle("simulated", simulated);
 }
 
-/** Redraws the stamp on each second of the agent's clock, re-aiming every time so it never drifts or skips. */
 function tick() {
   drawStamp();
   setTimeout(tick, 1000 - ((Date.now() + clockOffset) % 1000));
@@ -94,13 +91,11 @@ function showClockError(message) {
   $("clock-error").hidden = !message;
 }
 
-// The calendar in the clock popover. `picked` is the chosen day; `shown` is the month on screen.
 let picked = new Date();
 let shown = new Date();
 let calendarView = "days";
 let firstYear = 1900;
 
-// setFullYear preserves years below 100, which Date's constructor treats as 1900–1999.
 function calendarDate(year, month, day = 1, hour = 0, minute = 0) {
   const date = new Date(0);
   date.setFullYear(year, month, day);
@@ -120,7 +115,6 @@ function drawCalendar() {
   $("cal-year").textContent = String(year);
   $("cal-year").setAttribute("aria-label", `Choose year, ${year}`);
 
-  // Weeks start on Monday, matching how the agent reads "last week".
   const cells = ["M", "T", "W", "T", "F", "S", "S"].map((letter) => el("span", "", letter));
   const blanks = (calendarDate(year, month).getDay() + 6) % 7;
   for (let i = 0; i < blanks; i++) cells.push(el("span"));
@@ -147,7 +141,7 @@ function choosePeriod(year, month) {
   const next = calendarDate(year, month);
   if (next.getFullYear() < 1 || next.getFullYear() > 9999) return;
   shown = next;
-  // Every navigation path updates the submitted date and clamps to a valid day.
+
   const lastDay = calendarDate(shown.getFullYear(), shown.getMonth() + 1, 0).getDate();
   picked = calendarDate(shown.getFullYear(), shown.getMonth(), Math.min(picked.getDate(), lastDay));
   showClockError("");
@@ -196,13 +190,10 @@ function shiftMonth(by) {
   choosePeriod(shown.getFullYear(), shown.getMonth() + by);
 }
 
-// The time of day in the clock popover, as minutes since midnight. One number
-// means stepping past :55 carries into the next hour with no special cases.
 let pickedMinutes = 0;
 const DAY_MINUTES = 24 * 60;
 const twoDigits = (n) => String(n).padStart(2, "0");
 
-/** `keepTyping` leaves the fields alone while someone is mid-keystroke in one of them. */
 function drawTime(keepTyping = false) {
   const hour = twoDigits(Math.floor(pickedMinutes / 60));
   const minute = twoDigits(pickedMinutes % 60);
@@ -215,7 +206,6 @@ function drawTime(keepTyping = false) {
   }
 }
 
-/** The arrows move an hour, or to the next five-minute mark; `fine` (the arrow keys) moves one minute. */
 function stepTime(unit, direction, fine = false) {
   let next = pickedMinutes + direction * (unit === "hour" ? 60 : 1);
   if (unit === "minute" && !fine) {
@@ -236,17 +226,17 @@ for (const spin of document.querySelectorAll(".spin")) {
     input.value = digits;
     if (!digits) return;
     const value = Math.min(Number(digits), highest);
-    // Out-of-range input is corrected as it is typed: "75" minutes shows as "59" straight away.
+
     if (Number(digits) > highest) input.value = String(highest);
     pickedMinutes = unit === "hour" ? value * 60 + (pickedMinutes % 60) : Math.floor(pickedMinutes / 60) * 60 + value;
     drawTime(true);
-    // The hour is complete after two digits, or after one that cannot begin a longer hour ("7"): move on to minutes.
+
     if (unit === "hour" && (digits.length === 2 || value > 2)) {
       input.value = twoDigits(value);
       $("clock-minute").focus();
     }
   });
-  // Leaving a field pads it: "7" becomes "07".
+
   input.addEventListener("blur", () => drawTime());
   input.addEventListener("keydown", (event) => {
     if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
@@ -257,7 +247,7 @@ for (const spin of document.querySelectorAll(".spin")) {
 
   for (const arrow of spin.querySelectorAll("button")) {
     const step = () => stepTime(unit, Number(arrow.dataset.step));
-    // Press to step once; keep holding to run.
+
     let pressed = false;
     arrow.addEventListener("pointerdown", () => {
       pressed = true;
@@ -269,13 +259,13 @@ for (const spin of document.querySelectorAll(".spin")) {
         clearInterval(repeat);
         arrow.removeEventListener("pointerup", stop);
         arrow.removeEventListener("pointerleave", stop);
-        // Sliding off the arrow cancels the press, so no click will follow to clear the flag.
+
         if (event.type === "pointerleave") pressed = false;
       };
       arrow.addEventListener("pointerup", stop);
       arrow.addEventListener("pointerleave", stop);
     });
-    // A click that no press already handled is the keyboard (Enter or Space on the focused arrow).
+
     arrow.addEventListener("click", () => {
       if (!pressed) step();
       pressed = false;
@@ -335,8 +325,6 @@ $("clock").addEventListener("submit", (event) => {
   setClock(target.toISOString());
 });
 $("clock-reset").addEventListener("click", () => setClock(null));
-
-// ---- reading, evidence and saved conversations ----------------------------
 
 const emptyTemplate = $("empty").cloneNode(true);
 const entries = [];

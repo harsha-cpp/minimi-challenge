@@ -1,14 +1,5 @@
-/**
- * One turn of the agent, start to finish:
- *
- *   recall (code, ms) → model ⇄ web_search (parallel) → stream answer → save → enrich (background)
- *
- * There is no router or planner call in front of the model. The work a router
- * would do is done by code that is exact and free (date resolution, memory
- * lookup), which leaves a single model deciding whether and what to search
- * with everything already in front of it. A message that needs no search costs
- * exactly one model call.
- */
+
+
 import { createHash } from "node:crypto";
 import { pinTurnTime, type Clock } from "../clock.ts";
 import type { ChatMessage, Llm, ToolCall } from "../llm.ts";
@@ -27,11 +18,10 @@ import { ASK_CLARIFICATION_TOOL, CLARIFICATION_INSTRUCTIONS, canClarify, parseCl
   type ClarificationAnswer, type ClarificationCard, type ClarificationPort } from "./clarification.ts";
 export { citedNumbers } from "./citations.ts";
 
-/** Rounds in which the model may search. After these it must answer with what it has. */
 const MAX_SEARCH_ROUNDS = 3;
 const MAX_SEARCH_CALLS = 12;
 const TURN_TIMEOUT_MS = 120_000;
-/** Earlier turns of the current chat sent verbatim; anything older is reached through recall. */
+
 const HISTORY_TURNS = 8;
 
 export interface Deps {
@@ -40,11 +30,11 @@ export interface Deps {
   store: MemoryStore;
   clock: Clock;
   enricher: Pick<Enricher, "schedule">;
-  /** Independent verification request, normally using the quality model rather than memory's fast model. */
+
   verifier?: Pick<Llm, "json">;
-  /** Interactive UI control; Exa remains the only web-search tool. */
+
   questions?: ClarificationPort;
-  /** Legacy archive-corpus hook, retained for old tooling; era simulation never invokes it. */
+
   historicalCatalog?: (question: string, cutoff: Date) => Array<{ url: string }>;
 }
 
@@ -53,14 +43,14 @@ export interface TurnInput {
   message: string;
   tz: string;
   signal?: AbortSignal;
-  /** The browser pins its selected historical instant to this request. */
+
   asOf?: Date;
   clarification?: ClarificationAnswer;
 }
 
 export interface Timings {
   recallMs: number;
-  /** Until the first word of the final answer reached the client. */
+
   firstTokenMs: number | null;
   totalMs: number;
   searches: number;
@@ -75,7 +65,7 @@ export type AgentEvent =
   | { type: "search"; id: string; query: string; publishedAfter?: string; state: "running" | "done" | "failed"; results?: number; ms?: number; message?: string }
   | { type: "sources"; sources: Source[] }
   | { type: "text"; delta: string }
-  /** Text streamed ahead of a tool call was a preamble, not the answer: discard it. */
+
   | { type: "retract" }
   | { type: "verification"; state: "running" | "done" | "failed" | "unavailable"; ms?: number }
   | { type: "done"; episodeId: number; cited: number[]; timings: Timings }
@@ -113,7 +103,6 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
     if (clarificationAllowed) messages.splice(2, 0, { role: "system", content: CLARIFICATION_INSTRUCTIONS });
     const evidence = new EvidenceWindow();
 
-    // A citation identifies one URL + passage observation throughout the turn.
     const sources: Source[] = [];
     const numberByUrl = new Map<string, number>();
     const numberFor = (hit: SearchHit): number => {
@@ -129,14 +118,14 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
     };
 
     const runSearch = async (call: ToolCall): Promise<{ query: SearchQuery; hits: SearchHit[] } | string> => {
-      // The viewpoint constrains events in the answer, never the age of a research page.
+
       const query = parseSearchCall(call);
       if (typeof query === "string") return query;
       if (prompt.policy.fresh) query.freshness = "fresh";
       if (searches >= MAX_SEARCH_CALLS) return "Search budget exhausted. Answer using existing evidence and identify anything unverified.";
       searches++;
       const began = performance.now();
-      // Generated search queries may themselves contain memorized future outcomes.
+
       const base = { type: "search", id: call.id, query: buffered ? "Era research" : query.query,
         ...(!buffered && query.publishedAfter ? { publishedAfter: query.publishedAfter } : {}) } as const;
       emit({ ...base, state: "running" });
@@ -149,7 +138,7 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
         if (signal?.aborted) throw error;
         const message = buffered ? "A web lookup could not be completed; trying the available context." : `Search failed (${errorMessage(error)}).`;
         emit({ ...base, state: "failed", ms: Math.round(performance.now() - began), message });
-        // A failed search is information for the model, not a reason to fail the turn.
+
         return `${message} Give a useful answer from well-established history where possible, label any inference or hypothetical part, and identify only the specific facts you could not check. Never request archive access or describe a snapshot limitation.`;
       }
     };
@@ -169,7 +158,7 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
         toolChoice: mustAnswer ? "none" : "auto",
         signal,
         onText: (delta) => {
-          if (buffered || mayAsk) return; // Never leak a tool preamble ahead of an interactive question.
+          if (buffered || mayAsk) return;
           firstTokenMs ??= elapsed();
           emit({ type: "text", delta });
         },
@@ -189,7 +178,7 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
           signal.throwIfAborted();
           const card = deps.questions!.create({ sessionId, message, time, question });
           emit({ type: "clarification", card });
-          return; // Waiting for the user never holds a model/search request or creates a fake answer.
+          return;
         }
       }
 
@@ -201,7 +190,6 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
         ...(turn.responseOutput ? { responseOutput: turn.responseOutput } : {}),
       });
 
-      // Independent lookups overlap, subject to the per-turn and process limits.
       const results = await Promise.all(turn.toolCalls.map(call => call.function.name === ASK_CLARIFICATION_TOOL.function.name
         ? "No further clarification is available. Research and answer the original request using reasonable, explicitly stated assumptions."
         : runSearch(call)));
@@ -252,14 +240,14 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
           }
         } catch {
           signal.throwIfAborted();
-          // A repair outage does not discard the reviewer's useful source-based correction.
+
         }
         if (review.status !== "approved" && safeAnswer) { answer = safeAnswer; corrected = true; }
       }
       cited = citedNumbers(answer);
       if (invalidCitations()) throw new Error("The answer cited unavailable evidence. Please retry.");
       emit({ type: "verification", state: review.status === "unavailable" && !corrected ? "unavailable" : "done", ms: reviewMs });
-      // A simulation review is a model quality check, not a proof or an archive-admission gate.
+
       emit({ type: "sources", sources: sources.filter(source => cited.includes(source.n)) });
       signal.throwIfAborted();
       firstTokenMs = elapsed();
@@ -286,7 +274,7 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
     const priorClaims = [...recalled.refs.flatMap((r) => r.hits.flatMap((h) => h.episodes)), ...recalled.related].flatMap(
       (e) => e.claims,
     );
-    // Reconstructed simulation prose is retained as conversation, not promoted to verified facts.
+
     if (!buffered) deps.enricher.schedule(episodeId, { question: message, answer, sources: citedSources, priorClaims });
   } catch (error) {
     if (input.signal?.aborted) return;
@@ -327,7 +315,6 @@ function parseSearchCall(call: ToolCall): SearchQuery | string {
   } catch (error) { return `Invalid arguments: ${errorMessage(error)}`; }
 }
 
-/** What the interface shows while the model is starting: which dates were understood and what was found. */
 function recallNotes(result: RecallResult): string[] {
   const count = (n: number) => `${n} conversation${n === 1 ? "" : "s"}`;
   const notes = result.refs.map((ref) => {

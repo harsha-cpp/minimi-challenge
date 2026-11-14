@@ -13,7 +13,7 @@ export interface SimulationIssue {
 export interface SimulationReview {
   status: "approved" | "needs_revision" | "unavailable";
   issues: SimulationIssue[];
-  /** A bounded, source-supported correction, not an independently proven historical record. */
+
   safeAnswer?: string;
   reason?: "review_timeout" | "review_unavailable" | "invalid_review_output" | "review_limit" | "invalid_input";
   ms: number;
@@ -84,7 +84,6 @@ warning, or demand that the user import sources. Do not introduce facts absent f
 Keep safeAnswer concise while preserving the requested scope, up to 6000 characters.
 This is a probabilistic editorial review, not proof of historical truth or source authenticity.`;
 
-/** A bounded editorial check of live-researched facts; reviewer outages do not become chat refusals. */
 export async function reviewSimulationAnswer(input: SimulationReviewInput): Promise<SimulationReview> {
   const started = performance.now();
   let modelCalls = 0;
@@ -111,7 +110,7 @@ export async function reviewSimulationAnswer(input: SimulationReviewInput): Prom
   }
   let remaining = LIMITS.evidence as number;
   const evidence: Array<{ n: number; title: string; url: string; text: string; publishedDate?: string }> = [];
-  // Preserve cited passages first; additional passages can support a useful correction.
+
   for (const source of [...input.sources].sort((a, b) => Number(citations.includes(b.n)) - Number(citations.includes(a.n)))) {
     const passage = source.text ?? "";
     if (!passage.trim() || !remaining) continue;

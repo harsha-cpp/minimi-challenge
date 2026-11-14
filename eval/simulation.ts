@@ -1,4 +1,4 @@
-/** Private live-web era-simulation benchmark. No APIs are called without --live. */
+
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -89,7 +89,7 @@ const http: typeof fetch = async (input, init) => {
   const observation: NetworkObservation = { endpoint: new URL(address).origin + new URL(address).pathname,
     snapshotRequested: hasSnapshot(payload), archiveRequested: /web\.archive\.org/.test(address) || Boolean(payload && typeof payload === "object" && "ids" in payload && /web\.archive\.org/.test(JSON.stringify(payload.ids))) };
   requestContext.getStore()?.push(observation);
-  // This benchmark must never accidentally reintroduce paid Snapshot/URL-archive dependency.
+
   if (observation.snapshotRequested || observation.archiveRequested) throw new Error("Simulation attempted a forbidden historical capture request.");
   return fetch(input, init);
 };
@@ -195,7 +195,6 @@ async function trial(task: SimulationCase, present: boolean): Promise<Trial> {
 
 function redact(value: string) { let text = value; for (const key of [config?.llm?.apiKey, config?.exaApiKey]) if (key) text = text.replaceAll(key, "[redacted]"); return text.slice(0, 1000); }
 
-// Every preflight case is checked even when a caller selects just one live trial.
 const ids = new Set<string>();
 for (const task of SIMULATION_CASES) {
   if (ids.has(task.id) || !task.question.trim() || !task.expectations.length || !Number.isFinite(Date.parse(task.asOf))

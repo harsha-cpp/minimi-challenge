@@ -9,17 +9,16 @@ export const PROMPT_LIMITS = { historyChars: 18_000, memoryChars: 12_000, toolCh
 export interface TurnPolicy {
   intent: "conversation" | "recall" | "creative" | "transform" | "verify" | "lookup";
   fresh: boolean;
-  /** Retained for old callers; era simulation never requires archived source versions. */
+
   requireHistoricalEvidence: boolean;
   requireSimulationReview: boolean;
 }
 
-/** Cheap request policy; the answer model still plans focused searches itself. */
 export function turnPolicy(message: string, simulated: boolean): TurnPolicy {
   const verify = /\b(still (?:true|correct|accurate)|recheck|re-check|verify|what(?:'s| has)? changed|changed since|any .{0,30}changes?|up.to.date)\b/i.test(message);
   const volatile = /\b(pric(?:e|es|ing)|costs?|plans?|versions?|releases?|latest|current|availability|available|news|today|now)\b/i.test(message);
   const conversation = /^(?:hi|hello|hey|thanks|thank you|good (?:morning|evening|night))[!.,\s]*$/i.test(message.trim());
-  // Inspect the instructions, not factual words inside the supplied text.
+
   const instructions = message.split(/[:\n"“]/, 1)[0]!.trim();
   const task = instructions.replace(/^(?:(?:please|can you|could you|would you)\s+)+/i, "");
   const creative = /^(?:write|compose|create|draft|tell|give)(?:\s+me)?\s+(?:(?:a|an|the|short|funny|original|fictional|bedtime)\s+)*(?:haiku|poem|poetry|sonnet|story|joke|song|lyrics|riddle|limerick|dialogue|scene|pun|metaphor)\b/i.test(task);
@@ -44,7 +43,6 @@ export interface PreparedHistory {
   chars: number;
 }
 
-/** Select once, so recall only excludes turns actually present in the prompt. */
 export function prepareHistory(history: Episode[], tz: string): PreparedHistory {
   const pairs: ChatMessage[][] = [];
   const ids = new Set<number>();
@@ -62,7 +60,6 @@ export function prepareHistory(history: Episode[], tz: string): PreparedHistory 
   return { messages: pairs.flat(), ids, chars };
 }
 
-/** Constant instruction prefix, trusted time metadata, bounded untrusted memory, original user request. */
 export function preparePrompt(input: { message: string; time: TurnTime; history: Episode[] | PreparedHistory; memory: string; historicalUrls?: string[]; clarification?: ClarificationAnswer }) {
   const { message, time } = input;
   const policy = turnPolicy(message, time.simulated);

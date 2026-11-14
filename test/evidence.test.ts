@@ -81,7 +81,7 @@ test("verified statement validation binds every citation to the same new episode
       { text: "x".repeat(20_001), sourceNumbers: [1] },
       { text: "Claim", sourceNumbers: [] },
       { text: "Claim", sourceNumbers: [0] },
-      { text: "Claim", sourceNumbers: [2] }, // Citation exists only in the earlier episode.
+      { text: "Claim", sourceNumbers: [2] },
       { text: "Claim", sourceNumbers: [1.5] },
     ]) assert.throws(() => store.saveEpisode({ ...episode, sources: [source], verifiedStatements: [invalid] }));
     assert.equal(store.count(), 1);

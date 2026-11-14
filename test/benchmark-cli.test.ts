@@ -14,7 +14,7 @@ test("private comparison imports matching recordings and rejects a different his
     const first = run([]);
     assert.equal(first.status, 0, first.stderr);
     const report = JSON.parse(readFileSync(reportPath, "utf8"));
-    // A recording of our synthetic replay verifies import plumbing, not another service.
+
     const sample = { ...report.outcomes[0].sample, engine: "recording-parser-test-fixture", basis: "recorded" };
     writeFileSync(baselinePath, JSON.stringify([sample]));
     const compared = run(["--baseline", baselinePath]);

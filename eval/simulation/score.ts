@@ -6,7 +6,6 @@ import type { SimulationCase } from "./cases.ts";
 export interface JudgedCheck { id: string; passed: boolean; reason: string }
 export interface Judgment { available: boolean; checks: JudgedCheck[]; reason?: string }
 
-/** These are behavioral checks, not an estimate of universal factual accuracy. */
 export function deterministicChecks(task: SimulationCase, answer: string, sources: Source[], searches: number): Record<string, boolean> {
   const cited = citedNumbers(answer);
   const result: Record<string, boolean> = {
@@ -26,8 +25,7 @@ export function deterministicChecks(task: SimulationCase, answer: string, source
     const winners = ["Rajasthan Royals", "Deccan Chargers", "Chennai Super Kings", "Chennai Super Kings", "Kolkata Knight Riders", "Mumbai Indians", "Kolkata Knight Riders", "Mumbai Indians", "Sunrisers Hyderabad", "Mumbai Indians", "Chennai Super Kings", "Mumbai Indians", "Mumbai Indians", "Chennai Super Kings", "Gujarat Titans", "Chennai Super Kings", "Kolkata Knight Riders"];
     const lines = answer.split(/\n/);
     result.allSeventeenWinners = winners.every((winner, i) => lines.some(line => new RegExp(`\\b${2008 + i}\\b`).test(line) && line.toLowerCase().includes(winner.toLowerCase())));
-    // Future rows are assessed semantically: merely mentioning a year or a team
-    // inside an explicit denial/hypothetical must not produce a false failure.
+
   }
   return result;
 }

@@ -2,7 +2,6 @@ import type OpenAI from "openai";
 import type { Response, ResponseInput } from "openai/resources/responses/responses";
 import { parseJson, type ChatMessage, type Llm, type LlmConfig, type LlmUsage, type ToolCall, type ModelOutputItem } from "../llm.ts";
 
-/** Rebuild each request from turn-local items; no shared response IDs or stored sessions. */
 export function responsesInput(messages: ChatMessage[]): ResponseInput {
   const input: ResponseInput = [];
   for (const message of messages) {
@@ -10,7 +9,7 @@ export function responsesInput(messages: ChatMessage[]): ResponseInput {
       input.push({ type: "function_call_output", call_id: message.tool_call_id, output: message.content });
     } else if (message.role === "assistant") {
       if (message.responseOutput) {
-        // Preserve original order, IDs and opaque encrypted reasoning exactly once.
+
         input.push(...message.responseOutput);
       } else {
         if (message.content) input.push({ role: "assistant", content: message.content });
@@ -65,7 +64,7 @@ export function createResponsesLlm(client: OpenAI, config: LlmConfig, onUsage?: 
       });
       const finalText = outputText(output);
       if (finalText !== text) {
-        // A compliant stream supplies text deltas; accept a terminal-only response too.
+
         if (!text && finalText) onText(finalText);
         else if (finalText !== text) throw new Error("Model text stream did not match its completed response.");
       }

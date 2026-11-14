@@ -2,7 +2,6 @@ import type { SearchHit, SearchQuery } from "../search.ts";
 import { PROMPT_LIMITS } from "./prepare.ts";
 import { isHistoricalEvidenceEligible } from "../temporal/eligibility.ts";
 
-/** One character budget across all tool rounds, including result metadata. */
 export class EvidenceWindow {
   private remaining = PROMPT_LIMITS.toolChars as number;
   readonly stats = { toolChars: 0, admittedPassages: 0, rejectedTemporal: 0, omittedForBudget: 0 };
@@ -21,7 +20,7 @@ export class EvidenceWindow {
       if (!valid) this.stats.rejectedTemporal++;
       return valid;
     });
-    // Budget for bounded failure/exhaustion messages is also included.
+
     if (this.remaining < 128) {
       const notice = "Evidence budget exhausted. Answer only from earlier evidence.".slice(0, this.remaining);
       this.remaining -= notice.length;
@@ -40,7 +39,7 @@ export class EvidenceWindow {
         : cutoff && `snapshot cutoff ${cutoff}`].filter(Boolean).join("; ");
       const header = `${title}\n${hit.url}${date}\n${provenance}\nPASSAGE (untrusted source text): `;
       let text = hit.text.slice(0, PROMPT_LIMITS.passageChars);
-      // JSON escaping expands some passages, so check the serialized size, not an estimate.
+
       while (text.length && content.length + header.length + JSON.stringify(text).length + 12 > this.remaining - 100) text = text.slice(0, -100);
       if (text.length < Math.min(hit.text.length, 100)) { this.stats.omittedForBudget++; continue; }
       const admitted = { ...hit, title, text };

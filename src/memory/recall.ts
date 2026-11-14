@@ -1,22 +1,9 @@
-/**
- * Finds the past conversations a message refers to, before the model runs.
- *
- * Memory is context, not a tool: the brief gives the agent exactly one tool
- * (web search), and a lookup that takes a few milliseconds of SQL does not
- * deserve a model round trip anyway.
- *
- * Time is the primary key. A date reference narrows a whole history to a
- * handful of conversations, after which topic words only have to break ties.
- * That is why there are no embeddings here: once the date is known there is
- * almost nothing left to rank. When a message has no date, or the date turns
- * out to be empty, recall falls back to topic words over the full log, which
- * also covers a user who remembers the subject but not the day.
- */
+
+
 import { type TemporalRef, type DayRange, resolveTemporal } from "../time/resolve.ts";
 import { compareDates, formatInstant, instantRange, localDate } from "../time/zone.ts";
 import type { Claim, Episode, MemoryStore } from "./store.ts";
 
-/** How many past conversations are shown to the model in full on one turn. */
 const FULL_DETAIL_BUDGET = 6;
 const RELATED_LIMIT = 3;
 const MAX_TERMS = 12;
@@ -24,29 +11,27 @@ const MAX_TERMS = 12;
 export interface Recalled {
   episode: Episode;
   claims: Claim[];
-  /** "full" carries the answer and its claims; the others are one-line pointers. */
+
   detail: "full" | "pointer" | "in-chat";
 }
 
 export interface RefResult {
   text: string;
-  /** Readings of the phrase that have conversations. One is a clean match; several means still ambiguous. */
+
   hits: Array<{ range: DayRange; episodes: Recalled[] }>;
-  /** Readings that were checked and had no conversations. */
+
   empty: DayRange[];
-  /** Offered when nothing matched: the conversations either side of the date. */
+
   nearest: Episode[];
 }
 
 export interface RecallResult {
   refs: RefResult[];
-  /** Matched by topic. Only filled when no date reference found anything. */
+
   related: Recalled[];
   ms: number;
 }
 
-// Function words, plus the words people use to talk *about* a conversation
-// rather than its subject ("what did I ask", "is it still correct").
 const STOPWORDS = new Set(
   `a about after again all also am an and any anything are as ask asked at be been before being but by can changed
    correct could did do does for from had has have how i if in into is it its just know me more most my no not of on
@@ -67,14 +52,13 @@ export function recall(
   message: string,
   now: Date,
   tz: string,
-  /** Episodes already present in this chat's history, which need no repeating. */
+
   inChat: Set<number> = new Set(),
 ): RecallResult {
   const started = performance.now();
   let temporal = resolveTemporal(message, now, tz);
   if (temporal.length > 1) {
-    // In "what did I ask on 3 November, and is it still correct today?", today is
-    // the present, not a day to look up. It is only a lookup when it is the sole date.
+
     const today = localDate(now, tz);
     const isToday = (ref: TemporalRef) =>
       ref.candidates.length === 1 && !compareDates(ref.candidates[0]!.start, today) && !compareDates(ref.candidates[0]!.end, today);
@@ -85,8 +69,7 @@ export function recall(
   let budget = FULL_DETAIL_BUDGET;
 
   const present = (episodes: Episode[]): Recalled[] => {
-    // The most on-topic conversations get the full-detail budget; the list
-    // itself stays in the order things happened.
+
     const byRelevance = [...episodes].sort((a, b) => (coverage.get(b.id) ?? 0) - (coverage.get(a.id) ?? 0));
     const full = new Set<number>();
     for (const e of byRelevance) {
@@ -108,7 +91,7 @@ export function recall(
     });
     let withEpisodes = readings.filter((r) => r.episodes.length);
     if (withEpisodes.length > 1) {
-      // Several readings have conversations: keep the ones that are about the same subject.
+
       const onTopic = withEpisodes.filter((r) => r.episodes.some((e) => coverage.get(e.id)));
       if (onTopic.length) withEpisodes = onTopic;
     }
@@ -153,7 +136,7 @@ function renderEpisode({ episode, claims, detail }: Recalled, tz: string): strin
 
   const lines = [`${head}`, `  The user asked: ${question}`];
   if (episode.summary) lines.push(`  Summary: ${episode.summary}`);
-  // With claims in hand the answer text is only needed for tone and framing.
+
   lines.push(`  Your answer then: ${clip(oneLine(episode.answer), claims.length ? 1200 : 3000)}`);
   if (claims.length) {
     lines.push("  Claims you made then:");
@@ -164,7 +147,6 @@ function renderEpisode({ episode, claims, detail }: Recalled, tz: string): strin
   return lines.join("\n");
 }
 
-/** The MEMORY block the model sees. Empty string when there is nothing to say. */
 export function renderMemory(result: RecallResult, tz: string): string {
   const blocks: string[] = [];
 

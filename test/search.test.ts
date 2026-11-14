@@ -105,7 +105,7 @@ test("the provider deadline aborts HTTP work", async () => {
   const http = ((_url: unknown, init: RequestInit) => new Promise((_resolve, reject) => {
     init.signal!.addEventListener("abort", () => reject(init.signal!.reason), { once: true });
   })) as typeof fetch;
-  // Keep node alive: AbortSignal.timeout deliberately uses an unref'ed timer.
+
   const keepAlive = setTimeout(() => {}, 1000);
   try { await assert.rejects(createExaSearch("key", { fetch: http, timeoutMs: 10 }).search({ query: "q" }), { name: "TimeoutError" }); }
   finally { clearTimeout(keepAlive); }

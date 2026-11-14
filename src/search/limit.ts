@@ -1,6 +1,5 @@
 import type { SearchProvider } from "./types.ts";
 
-/** Process-wide backpressure, including cancellation while waiting for a slot. */
 export function withConcurrency(provider: SearchProvider, max = 4, maxQueued = 64): SearchProvider {
   if (!Number.isInteger(max) || max < 1) throw new Error("Invalid search concurrency.");
   let active = 0;

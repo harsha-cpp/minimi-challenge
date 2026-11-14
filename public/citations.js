@@ -1,6 +1,6 @@
-/** Text eligible for citation links, shared by rendering and server validation. */
+
 export function citationTextNodes(container) {
-  const walker = container.ownerDocument.createTreeWalker(container, 4); // SHOW_TEXT
+  const walker = container.ownerDocument.createTreeWalker(container, 4);
   const nodes = [];
   while (walker.nextNode()) {
     if (!walker.currentNode.parentElement?.closest("code, pre, a")) nodes.push(walker.currentNode);

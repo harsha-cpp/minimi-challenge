@@ -1,4 +1,4 @@
-/** Private end-to-end samples and recorded-baseline comparison; no web UI integration. */
+
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -114,7 +114,7 @@ function fixtureDeps(fixture: Fixture): { llm: Llm; search: SearchProvider } {
   let step = 0;
   return {
     llm: {
-      // Scripted positive checker for fixed, labeled plumbing fixtures. This is not a quality score.
+
       json: async ({ user }) => {
         const payload = JSON.parse(user) as { draft: string };
         return fixture.correction && payload.draft === fixture.answer

@@ -30,7 +30,6 @@ export const caseInputHash = (item: BenchmarkCase) => createHash("sha256").updat
 const normalize = (text: string) => text.toLowerCase().replace(/\s+/g, " ").trim();
 const canonical = (url: string) => { const value = new URL(url); value.hash = ""; return value.href; };
 
-/** Human labels are inputs. These diagnostics do not perform semantic fact checking. */
 export function scoreSample(item: BenchmarkCase, sample: BenchmarkSample) {
   const grades = new Map(Object.entries(item.sourceGrades ?? {}).map(([url, grade]) => [canonical(url), grade]));
   const ranked = [...new Set(sample.sources.map(s => canonical(s.url)))].slice(0, 5);
@@ -52,8 +51,7 @@ export function scoreSample(item: BenchmarkCase, sample: BenchmarkSample) {
     forbiddenFactPresent: forbiddenFactMatches.length > 0,
     citationReferencesValid: citations.every(n => numbers.has(n)),
     citedSources: citations.length,
-    // Era simulation admits live retrospective sources. Only explicitly labeled answer
-    // strings can be checked here; this is not semantic temporal-leakage detection.
+
     temporalPolicyViolations: item.asOf ? forbiddenFactMatches.length : 0,
     abstained,
     abstentionCorrect: item.expectedAbstention === undefined ? null : abstained === item.expectedAbstention,

@@ -7,9 +7,9 @@ export interface Config {
   temporalDbPath: string;
   llm: LlmConfig | null;
   exaApiKey: string | null;
-  /** Where to start the clock, when AGENT_NOW is set. */
+
   startAt: Date | null;
-  /** Required env vars that are not set. The server still starts and the page says what is missing. */
+
   missing: string[];
 }
 

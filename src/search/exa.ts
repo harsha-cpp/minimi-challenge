@@ -13,13 +13,12 @@ const object = (value: unknown): JsonObject => value && typeof value === "object
 const string = (value: unknown): string | undefined => typeof value === "string" ? value : undefined;
 
 export interface ExaOptions {
-  /** Injectable HTTP boundary for network-free contract tests. */
+
   fetch?: typeof fetch;
   timeoutMs?: number;
   retryDelayMs?: number;
 }
 
-/** One deadline covers both attempts, backoff, body reading and normalization. */
 export function createExaSearch(apiKey: string, options: ExaOptions = {}): SearchProvider {
   const http = options.fetch ?? fetch;
   return {
@@ -57,12 +56,12 @@ export function createExaSearch(apiKey: string, options: ExaOptions = {}): Searc
         }
         if (response.ok) break;
         await response.body?.cancel();
-        // Do not echo the provider body: it can contain credentials or user text.
+
         if (attempt || !RETRYABLE.has(response.status)) throw new Error(`Exa responded ${response.status}.`);
         const header = response.headers.get("retry-after");
         const retryMs = header === null ? options.retryDelayMs ?? 200 :
           /^\d+(?:\.\d+)?$/.test(header) ? Number(header) * 1000 : Math.max(0, Date.parse(header) - Date.now());
-        // A long Retry-After is a reason to stop, never to retry too early.
+
         if (!Number.isFinite(retryMs) || retryMs > 2000) throw new Error(`Exa responded ${response.status}; retry later.`);
         await delay(retryMs, undefined, { signal });
       }
@@ -70,7 +69,7 @@ export function createExaSearch(apiKey: string, options: ExaOptions = {}): Searc
       const data = object(await readJson(response));
       signal.throwIfAborted();
       if (!Array.isArray(data.results)) throw new Error("Exa returned an invalid results payload.");
-      // A request whose restrictions were ignored is not an acceptable fallback.
+
       if ([...(Array.isArray(data.warnings) ? data.warnings : []), ...(Array.isArray(data.notices) ? data.notices : [])]
         .some(item => ["IGNORED_FIELD", "RESTRICTIONS_RELAXED"].includes(String(object(item).code)))) {
         throw new Error("Exa could not honor the requested retrieval policy.");
@@ -93,7 +92,7 @@ export function createExaSearch(apiKey: string, options: ExaOptions = {}): Searc
         if (query.asOf && published && published.length > 10 && Date.parse(published) > query.asOf.getTime()) continue;
         const highlights = Array.isArray(result.highlights) ? result.highlights.filter((x): x is string => typeof x === "string") : [];
         const text = (highlights.length ? highlights.join(" … ") : string(result.text) ?? "").replaceAll("\0", "").slice(0, EXCERPT_CHARS).trim();
-        if (!text) continue; // A URL alone is not evidence.
+        if (!text) continue;
         seen.add(url);
         hits.push({
           url, title: (string(result.title) || url).slice(0, 300), publishedDate, text,

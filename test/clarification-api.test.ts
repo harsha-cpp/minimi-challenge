@@ -8,8 +8,6 @@ import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
 
-// Wire test uses the real server, HTTP/SSE, SQLite and model SDK against a local fake.
-// It exercises orchestration and validation; live model decision quality is checked separately.
 test("HTTP clarification round-trip pins the original era, validates choices and replays completed retries", { timeout: 20_000 }, async () => {
   const directory = mkdtempSync(join(tmpdir(), "asof-clarification-api-"));
   const modelRequests: Array<Record<string, any>> = [];

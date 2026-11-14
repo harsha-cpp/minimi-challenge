@@ -1,15 +1,5 @@
-/**
- * The conversation log and the claim ledger, in one SQLite file.
- *
- * An episode is one question and its answer, stamped with when it was asked.
- * A claim is one checkable fact that answer stated ("Neon Launch plan: $19 a
- * month"), with the source it came from and the moment it was observed. Claims
- * are what make "is that still correct?" answerable: there is a list of exact
- * things to re-check instead of a paragraph to re-read.
- *
- * node:sqlite ships with Node, so there is no native module to compile and
- * `npm install` cannot fail on it.
- */
+
+
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -20,7 +10,7 @@ export interface Source {
   url: string;
   title: string;
   publishedDate?: string;
-  /** Exact bounded passage seen by the answering model; absent in older ledgers. */
+
   text?: string;
   contentHash?: string;
   provider?: string;
@@ -35,7 +25,7 @@ export interface Source {
 export interface Episode {
   id: number;
   sessionId: string;
-  /** UTC milliseconds, taken from the injected clock. */
+
   askedAt: number;
   tz: string;
   question: string;
@@ -56,14 +46,13 @@ export interface Claim {
   kind: string;
   sourceUrl: string | null;
   observedAt: number;
-  /** The earlier claim this one re-checks, if any. Following it back gives the value's history. */
+
   priorClaimId: number | null;
   verdict: Verdict;
 }
 
 export type NewClaim = Omit<Claim, "id" | "episodeId" | "observedAt">;
 
-/** Source support was checked before persistence; the database does not perform semantic verification. */
 export interface NewVerifiedStatement {
   text: string;
   sourceNumbers: number[];
@@ -71,9 +60,9 @@ export interface NewVerifiedStatement {
 
 export interface VerifiedStatement extends NewVerifiedStatement {
   id: number;
-  /** Historical viewpoint from the turn, not an inferred fact-validity interval. */
+
   viewpointAt: number;
-  /** Real wall-clock verification time, never the simulated clock. */
+
   verifiedAt: number;
 }
 
@@ -211,7 +200,7 @@ export class MemoryStore {
     this.db = new DatabaseSync(path);
     this.db.exec("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;");
     this.db.exec(SCHEMA);
-    // Additive migration: old citations remain readable with unknown evidence.
+
     const columns = this.db.prepare("PRAGMA table_info(sources)").all() as Array<{ name: string }>;
     if (!columns.some(c => c.name === "evidence_json")) this.db.exec("ALTER TABLE sources ADD COLUMN evidence_json TEXT");
     const episodeColumns = this.db.prepare("PRAGMA table_info(episodes)").all() as Array<{ name: string }>;
@@ -222,11 +211,6 @@ export class MemoryStore {
     this.db.close();
   }
 
-  /**
-   * Written synchronously as soon as an answer finishes, so the very next
-   * message can already recall it. The summary, topics and claims arrive later
-   * through `enrich`.
-   */
   saveEpisode(e: Omit<Episode, "id" | "summary" | "topics"> & { sources: Source[]; verifiedStatements?: NewVerifiedStatement[] }): number {
     const verifiedStatements = validateStatements(e.verifiedStatements, e.sources, e.askedAt);
     this.db.exec("BEGIN");
@@ -243,8 +227,7 @@ export class MemoryStore {
         insertSource.run(id, n, url, title, publishedDate ?? null, JSON.stringify(evidence));
       }
       if (verifiedStatements.length) {
-        // The episode INSERT already owns SQLite's writer lock. Reserve consecutive IDs
-        // and create evidence links before their immutable statement rows (deferred FK).
+
         let statementId = Number((this.db.prepare("SELECT coalesce(max(id), 0) AS id FROM verified_statements").get() as { id: number }).id);
         const verifiedAt = Date.now();
         const insertLink = this.db.prepare("INSERT INTO verified_statement_sources (statement_id, episode_id, source_n) VALUES (?, ?, ?)");
@@ -269,7 +252,7 @@ export class MemoryStore {
     const episode = this.episode(episodeId);
     if (!episode) return;
     const topics = enrichment.topics.join(", ");
-    // Later summary enrichment cannot erase the canonical audited statement terms.
+
     const audited = this.verifiedStatementsFor(episodeId).map(statement => statement.text).join("\n");
     const entities = [audited, [...new Set(enrichment.claims.map((c) => c.entity))].join(", ")].filter(Boolean).join("\n");
 
@@ -300,7 +283,6 @@ export class MemoryStore {
     return row ? toEpisode(row) : null;
   }
 
-  /** Episodes asked in [startMs, endMs), oldest first. */
   episodesBetween(startMs: number, endMs: number, knownAt = Number.MAX_SAFE_INTEGER): Episode[] {
     const rows = this.db
       .prepare("SELECT * FROM episodes WHERE asked_at >= ? AND asked_at < ? AND asked_at <= ? ORDER BY asked_at")
@@ -308,14 +290,12 @@ export class MemoryStore {
     return rows.map(toEpisode);
   }
 
-  /** The last conversation before a moment and the first one at or after another: what to offer when a date is empty. */
   neighbours(beforeMs: number, afterMs: number, knownAt = Number.MAX_SAFE_INTEGER): Episode[] {
     const before = this.db.prepare("SELECT * FROM episodes WHERE asked_at < ? AND asked_at <= ? ORDER BY asked_at DESC LIMIT 1").get(beforeMs, knownAt);
     const after = this.db.prepare("SELECT * FROM episodes WHERE asked_at >= ? AND asked_at <= ? ORDER BY asked_at LIMIT 1").get(afterMs, knownAt);
     return [before, after].filter((r) => r !== undefined).map((r) => toEpisode(r as Row));
   }
 
-  /** The most recent turns of one chat, oldest first. */
   sessionHistory(sessionId: string, limit: number, knownAt = Number.MAX_SAFE_INTEGER): Episode[] {
     const rows = this.db
       .prepare("SELECT * FROM episodes WHERE session_id = ? AND asked_at <= ? ORDER BY asked_at DESC, id DESC LIMIT ?")
@@ -323,11 +303,6 @@ export class MemoryStore {
     return rows.map(toEpisode).reverse();
   }
 
-  /**
-   * For each episode, how many of `terms` it mentions. Counting distinct terms
-   * (rather than using a relevance score) keeps one common word from pulling
-   * in an unrelated conversation, and is easy to reason about.
-   */
   termCoverage(terms: string[]): Map<number, number> {
     const coverage = new Map<number, number>();
     const match = this.db.prepare("SELECT rowid FROM episodes_fts WHERE episodes_fts MATCH ?");
@@ -379,7 +354,6 @@ export class MemoryStore {
     }));
   }
 
-  /** Newest first, for the memory panel. */
   recent(limit: number, knownAt = Number.MAX_SAFE_INTEGER): Episode[] {
     const rows = this.db.prepare("SELECT * FROM episodes WHERE asked_at <= ? ORDER BY asked_at DESC, id DESC LIMIT ?").all(knownAt, limit) as Row[];
     return rows.map(toEpisode);

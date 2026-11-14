@@ -1,10 +1,5 @@
 import type { ToolDefinition } from "../llm.ts";
 
-/**
- * Fixed text only. Everything that changes per turn is assembled separately,
- * so this prefix stays identical
- * across requests and provider-side prompt caching can reuse it.
- */
 export const SYSTEM_PROMPT = `You are asof, a chat assistant with one tool: web_search. You talk with one person across many days.
 
 # Answering
