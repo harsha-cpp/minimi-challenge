@@ -1,50 +1,29 @@
 # Design
 
-This document records the original product design. The search implementation has
-since gained direct source reads, bounded execution, persistent evidence and
-live-web era simulation;
-see [the complete application architecture](docs/architecture/README.md) for details and the
-research roadmap.
+**asof is a web research assistant with a memory of what it said and when.** The useful follow-up is “is that still true?” Answering it needs dated claims and their sources, not just a transcript.
 
-## The idea
+![asof architecture: browser, Node.js orchestration, Azure Foundry, Exa live search and SQLite memory](docs/assets/asof-architecture.png)
 
-The brief's sample questions share one shape: find a past conversation by its date, look at the web again, and say what changed. A chat log can answer "what did I ask". It cannot answer "is it still correct", because it never recorded what was claimed or where the claim came from.
+## How it works
 
-So an answer is stored as dated claims, not just as a message. "Neon Launch plan: $19/month, from neon.com/pricing, observed Tue 3 Nov" is one row. A follow-up a week later becomes: load the rows for that date, re-check each one, report then against now.
+A browser client sends the question, timezone and date to a TypeScript/Node.js server; SSE carries progress and answers. Code resolves calendar references, pins request time and recalls conversations by date and SQLite full-text search. Bounded history and memory accompany the untouched question; retrieved text remains untrusted.
 
-## How a turn works
+Azure-hosted GPT plans retrieval through Exa, the sole search/source provider. An underspecified request can pause for one optional multiple-choice question before research. A real choice, free-text detail or skip resumes the saved request. This UI control clarifies preferences; it does not retrieve facts.
 
-1. **Resolve dates in code.** `time/resolve.ts` turns "last Tuesday" or "3 November" into calendar days in the user's timezone, against an injectable clock. No model call.
-2. **Recall by date, then topic.** `memory/recall.ts` loads the conversations on those days from SQLite, with their claims. An ambiguous phrase returns every reading and the one that has a matching conversation wins. An empty date falls back to topic words and reports the nearest conversations.
-3. **One model, one tool.** The model gets the current time and the recalled memory as context, and may call `web_search` several times in parallel, for at most three rounds.
-4. **Answer with numbered citations.** Present-day answers stream directly.
-   Simulated factual answers receive a bounded era-and-source review before
-   display, with one correction when needed. Both modes research live Exa pages.
-5. **Enrich afterwards.** The exchange is saved at once. A background call then extracts a summary, topic words and claims, and links each re-checked claim to the one it replaces.
+Validated Exa Search/Contents calls run concurrently within fixed budgets: three search rounds, twelve lookups and a 32,000-character evidence window. Recheck searches bypass the result cache. Answers cite numbered passages; the Ledger saves the answer, exact cited text, hashes and execution context together. Present-day conversations receive background summaries and linked claims; simulated answers remain conversation records rather than verified claims.
+
+**Time travel is an era simulation.** Live sources, including modern histories, establish events; the selected date controls the answer’s perspective. A factual historical draft receives a separate era/source review and, when needed, one revision before display. This reconstructs a viewpoint, not what the web contained then. Citation validation checks references; model review cannot guarantee truth or eliminate hindsight.
 
 ## Why this shape
 
-- **Fast.** Nothing sits in front of the model. Recall is a few milliseconds of SQL, so a plain message costs one model call and a searched answer usually two. A round's searches run concurrently, and Exa returns page passages with its results, so there is no fetch-and-scrape step. Memory is written after the response.
-- **Right.** Dates are computed, not guessed. Memory tells the model exactly what was found, including "nothing on that day", and the prompt forbids inventing a past conversation. Re-checks start from a list of exact claims with sources, and "could not verify" is an allowed result.
-- **Testable.** The clock is injected, so a test or a reviewer can ask on one day and follow up on another. `npm test` covers date resolution, recall and the agent loop without a network. `npm run eval` replays the brief's questions end to end.
+A modular monolith keeps orchestration and persistence inspectable. Native SQLite provides transactions and recall without another service; an injected clock makes temporal behavior reproducible. Code handles dates and memory, while the model handles language. No mandatory planner call precedes every answer, and lookups overlap. Explicit interfaces make the engine testable without live APIs. The tradeoff is a single-process, single-user prototype with lexical recall and an in-memory extraction queue.
 
 ## Considered and rejected
 
-- **Memory as a second tool.** The brief says one tool, and it would spend a model round trip on what SQL does in milliseconds.
-- **A router or planner call before the main model.** It adds latency to every turn. Code does that work here, exactly and for free.
-- **Embeddings and a vector store.** Once a date narrows the log to a few conversations there is little left to rank. Full-text search over model-written topic words handles different wording ("Postgres hosting" finds a question that said "managed database") with no extra key or network call.
-- **The model providers' built-in web search.** It cannot filter by date and hides the sources the ledger needs.
-- **Letting the model parse dates.** Not reliable, and not unit-testable.
-- **An agent framework.** The loop is about a hundred lines. Owning it keeps every decision visible.
-- **A native SQLite module or a database server.** `node:sqlite` ships with Node, so `npm install` has nothing to compile.
-
-## Limits today
-
-Date phrases are English only, there is one user, and topic recall is lexical.
+- **Snapshot-only retrieval and a curated temporal graph:** coverage, access limits and ingestion requirements made arbitrary dates brittle. Live retrospective research supports the intended simulation; archival proof is a different product.
+- **A vector database or distributed services:** added infrastructure before recall volume justified it. SQLite is sufficient for this prototype.
+- **Mandatory planning agents or multiple search providers:** extra latency, cost and failure paths without measured gains. Exa stays the sole retrieval boundary.
 
 ## With another week
 
-- **Nudges.** A background job that re-checks volatile claims and tells you when one changes, before you ask.
-- **Richer then-versus-now diffs.** Live web research can establish dated past and present facts. Structured claim/value comparisons need broader evaluation. Era simulation uses event dates, rather than requiring preserved web captures from the selected year.
-- **A shelf life per claim,** so prices are re-checked eagerly and stable facts are left alone.
-- **Graded evals.** A larger question set with answer scoring, and latency budgets enforced in CI.
+I would prioritize correctness and recovery over more features: preserve negative review findings through reviewer failures, require evidence for explicit factual verification, and distinguish supported answers from uncertainty. Next, add durable turn IDs, restart-safe extraction and conversation ordering independent of simulated dates; require owner isolation before shared hosting. Finally, expand held-out factual, historical and clarification cases, measure citation support and hindsight leakage with human review, and track p50/p95 latency and cost. Existing scripted tests validate behavior, not a claim of perfect accuracy.
