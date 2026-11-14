@@ -16,6 +16,7 @@ let inFlight = null;
 // The agent's clock can differ from this machine's; keep the difference and tick locally.
 let clockOffset = 0;
 let simulated = false;
+let clockSaving = false;
 
 const agentNow = () => new Date(Date.now() + clockOffset);
 const dayLabel = (date) => date.toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short", year: "numeric" });
@@ -50,13 +51,33 @@ function tick() {
 }
 
 async function setClock(now) {
-  const response = await fetch("/api/clock", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ now }),
-  });
-  if (response.ok) applyState(await response.json());
-  toggleClock(false);
+  if (clockSaving) return;
+  clockSaving = true;
+  showClockError("");
+  $("clock").setAttribute("aria-busy", "true");
+  for (const control of $("clock").querySelectorAll("button, input")) control.disabled = true;
+  try {
+    const response = await fetch("/api/clock", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ now }),
+    });
+    const state = await response.json();
+    if (!response.ok) throw new Error(state.error || "The date could not be changed. Please try again.");
+    applyState(state);
+    toggleClock(false);
+  } catch (error) {
+    showClockError(`Could not change the date. ${error instanceof TypeError ? "Check your connection and try again." : error.message}`);
+  } finally {
+    clockSaving = false;
+    $("clock").removeAttribute("aria-busy");
+    for (const control of $("clock").querySelectorAll("button, input")) control.disabled = false;
+  }
+}
+
+function showClockError(message) {
+  $("clock-error").textContent = message;
+  $("clock-error").hidden = !message;
 }
 
 // The calendar in the clock popover. `picked` is the chosen day; `shown` is the month on screen.
