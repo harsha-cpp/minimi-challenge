@@ -37,6 +37,7 @@ export interface Deps {
   clock: Clock;
   enricher: Pick<Enricher, "schedule">;
   verifier?: Pick<Llm, "json">;
+  historicalCatalog?: (question: string, cutoff: Date) => Array<{url:string}>;
 }
 
 export interface TurnInput {

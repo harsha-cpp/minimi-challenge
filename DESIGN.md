@@ -1,5 +1,11 @@
 # Design
 
+This document records the original product design. The search implementation has
+since gained direct source reads, bounded execution, persistent evidence and
+live-web era simulation;
+see [the complete application architecture](docs/architecture/README.md) for details and the
+research roadmap.
+
 ## The idea
 
 The brief's sample questions share one shape: find a past conversation by its date, look at the web again, and say what changed. A chat log can answer "what did I ask". It cannot answer "is it still correct", because it never recorded what was claimed or where the claim came from.
@@ -11,7 +17,9 @@ So an answer is stored as dated claims, not just as a message. "Neon Launch plan
 1. **Resolve dates in code.** `time/resolve.ts` turns "last Tuesday" or "3 November" into calendar days in the user's timezone, against an injectable clock. No model call.
 2. **Recall by date, then topic.** `memory/recall.ts` loads the conversations on those days from SQLite, with their claims. An ambiguous phrase returns every reading and the one that has a matching conversation wins. An empty date falls back to topic words and reports the nearest conversations.
 3. **One model, one tool.** The model gets the current time and the recalled memory as context, and may call `web_search` several times in parallel, for at most three rounds.
-4. **Stream the answer** with numbered citations.
+4. **Answer with numbered citations.** Present-day answers stream directly.
+   Simulated factual answers receive a bounded era-and-source review before
+   display, with one correction when needed. Both modes research live Exa pages.
 5. **Enrich afterwards.** The exchange is saved at once. A background call then extracts a summary, topic words and claims, and links each re-checked claim to the one it replaces.
 
 ## Why this shape
@@ -37,6 +45,6 @@ Date phrases are English only, there is one user, and topic recall is lexical.
 ## With another week
 
 - **Nudges.** A background job that re-checks volatile claims and tells you when one changes, before you ask.
-- **True then-versus-now diffs,** by reading the archived version of a page as of the original date instead of relying on the stored claim alone.
+- **Richer then-versus-now diffs.** Live web research can establish dated past and present facts. Structured claim/value comparisons need broader evaluation. Era simulation uses event dates, rather than requiring preserved web captures from the selected year.
 - **A shelf life per claim,** so prices are re-checked eagerly and stable facts are left alone.
 - **Graded evals.** A larger question set with answer scoring, and latency budgets enforced in CI.

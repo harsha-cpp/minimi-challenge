@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "description": "Three explicitly curated original-document transcription excerpts from the U.S. National Archives. Availability dates are conservative admission bounds, not first-publication dates. Reviewed flags attest session curation, not software proof of authenticity or comprehensive historical/legal coverage. See corpus/README.md.",
+  "documents": [
+    {
+      "sourceId": "constitution-article-ii-term",
+      "url": "https://www.archives.gov/founding-docs/constitution-transcript",
+      "title": "Original U.S. Constitution, Article II: presidential term",
+      "text": "He shall hold his Office during the Term of four Years",
+      "availableAt": "1800-01-01T00:00:00.000Z",
+      "capturedAt": "2026-11-13T18:32:47.331Z",
+      "provenanceKind": "primary-source",
+      "provenanceUrl": "https://www.archives.gov/founding-docs/constitution-transcript",
+      "reviewed": true
+    },
+    {
+      "sourceId": "first-amendment-religion",
+      "url": "https://www.archives.gov/founding-docs/bill-of-rights-transcript",
+      "title": "Original U.S. Bill of Rights, First Amendment: religion clauses",
+      "text": "Congress shall make no law respecting an establishment of religion, or prohibiting the free exercise thereof",
+      "availableAt": "1800-01-01T00:00:00.000Z",
+      "capturedAt": "2026-11-13T18:32:47.331Z",
+      "provenanceKind": "primary-source",
+      "provenanceUrl": "https://www.archives.gov/founding-docs/bill-of-rights-transcript",
+      "reviewed": true
+    },
+    {
+      "sourceId": "thirteenth-enforcement",
+      "url": "https://www.archives.gov/founding-docs/amendments-11-27",
+      "title": "Original Thirteenth Amendment, Section 2: enforcement",
+      "text": "Congress shall have power to enforce this article by appropriate legislation.",
+      "availableAt": "1866-01-01T00:00:00.000Z",
+      "capturedAt": "2026-11-13T18:32:47.331Z",
+      "provenanceKind": "primary-source",
+      "provenanceUrl": "https://www.archives.gov/founding-docs/amendments-11-27",
+      "reviewed": true
+    }
+  ]
+}

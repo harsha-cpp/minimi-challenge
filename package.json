@@ -14,7 +14,12 @@
     "eval": "tsx --disable-warning=ExperimentalWarning eval/replay.ts",
     "import": "tsx --disable-warning=ExperimentalWarning scripts/import.ts",
     "eval:search": "tsx --disable-warning=ExperimentalWarning eval/search.ts",
-    "eval:models": "tsx --disable-warning=ExperimentalWarning eval/compare-models.ts"
+    "eval:models": "tsx --disable-warning=ExperimentalWarning eval/compare-models.ts",
+    "eval:temporal": "tsx --disable-warning=ExperimentalWarning eval/temporal.ts",
+    "eval:verification": "tsx --disable-warning=ExperimentalWarning eval/historical-verification.ts",
+    "eval:historical-pilot": "tsx --disable-warning=ExperimentalWarning eval/historical-pilot.ts",
+    "import:corpus": "tsx --disable-warning=ExperimentalWarning scripts/import-corpus.ts",
+    "capture:archive": "tsx --disable-warning=ExperimentalWarning scripts/capture-archive.ts"
   },
   "dependencies": {
     "@fontsource/barlow-condensed": "^5.3.0",
