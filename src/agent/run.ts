@@ -23,6 +23,8 @@ import { turnPolicy } from "./prepare.ts";
 import { EvidenceWindow } from "./evidence.ts";
 import { reviewSimulationAnswer, type SimulationReview } from "./simulation.ts";
 import { citedNumbers } from "./citations.ts";
+import { ASK_CLARIFICATION_TOOL, CLARIFICATION_INSTRUCTIONS, canClarify, parseClarification,
+  type ClarificationAnswer, type ClarificationCard, type ClarificationPort } from "./clarification.ts";
 export { citedNumbers } from "./citations.ts";
 
 /** Rounds in which the model may search. After these it must answer with what it has. */
@@ -40,6 +42,8 @@ export interface Deps {
   enricher: Pick<Enricher, "schedule">;
   /** Independent verification request, normally using the quality model rather than memory's fast model. */
   verifier?: Pick<Llm, "json">;
+  /** Interactive UI control; Exa remains the only web-search tool. */
+  questions?: ClarificationPort;
   /** Legacy archive-corpus hook, retained for old tooling; era simulation never invokes it. */
   historicalCatalog?: (question: string, cutoff: Date) => Array<{ url: string }>;
 }
@@ -51,6 +55,7 @@ export interface TurnInput {
   signal?: AbortSignal;
   /** The browser pins its selected historical instant to this request. */
   asOf?: Date;
+  clarification?: ClarificationAnswer;
 }
 
 export interface Timings {
@@ -65,6 +70,7 @@ export interface Timings {
 }
 
 export type AgentEvent =
+  | { type: "clarification"; card: ClarificationCard }
   | { type: "recall"; notes: string[]; ms: number }
   | { type: "search"; id: string; query: string; publishedAfter?: string; state: "running" | "done" | "failed"; results?: number; ms?: number; message?: string }
   | { type: "sources"; sources: Source[] }
@@ -101,8 +107,10 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
         episodes: hit.episodes.map(item => ({ ...item, episode: withoutLegacyFailure(item.episode) })) })) })),
       related: recalled.related.map(item => ({ ...item, episode: withoutLegacyFailure(item.episode) })),
     };
-    const prompt = preparePrompt({ message, time, history, memory: renderMemory(cleanMemory, tz) });
+    const prompt = preparePrompt({ message, time, history, memory: renderMemory(cleanMemory, tz), clarification: input.clarification });
     const messages: ChatMessage[] = prompt.messages;
+    const clarificationAllowed = Boolean(deps.questions && !input.clarification && canClarify(message, simulated));
+    if (clarificationAllowed) messages.splice(2, 0, { role: "system", content: CLARIFICATION_INSTRUCTIONS });
     const evidence = new EvidenceWindow();
 
     // A citation identifies one URL + passage observation throughout the turn.
@@ -153,14 +161,15 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
 
     for (let round = 1; ; round++) {
       const mustAnswer = round > MAX_SEARCH_ROUNDS;
+      const mayAsk = clarificationAllowed && round === 1;
       modelCalls++;
       const turn = await llm.stream({
         messages,
-        tools: [WEB_SEARCH_TOOL],
+        tools: mayAsk ? [WEB_SEARCH_TOOL, ASK_CLARIFICATION_TOOL] : [WEB_SEARCH_TOOL],
         toolChoice: mustAnswer ? "none" : "auto",
         signal,
         onText: (delta) => {
-          if (buffered) return; // Review the era perspective before displaying factual simulation prose.
+          if (buffered || mayAsk) return; // Never leak a tool preamble ahead of an interactive question.
           firstTokenMs ??= elapsed();
           emit({ type: "text", delta });
         },
@@ -168,9 +177,21 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
 
       if (!turn.toolCalls.length || mustAnswer) {
         answer = turn.text;
+        if (mayAsk && !buffered && answer) { firstTokenMs ??= elapsed(); emit({ type: "text", delta: answer }); }
         break;
       }
       if (turn.toolCalls.length > 16) throw new Error("The model requested too many tools in one response.");
+
+      const questions = turn.toolCalls.filter(call => call.function.name === ASK_CLARIFICATION_TOOL.function.name);
+      if (mayAsk && questions.length === 1 && turn.toolCalls.length === 1) {
+        const question = parseClarification(questions[0]!.function.arguments);
+        if (question) {
+          signal.throwIfAborted();
+          const card = deps.questions!.create({ sessionId, message, time, question });
+          emit({ type: "clarification", card });
+          return; // Waiting for the user never holds a model/search request or creates a fake answer.
+        }
+      }
 
       if (firstTokenMs !== null) {
         emit({ type: "retract" });
@@ -181,7 +202,9 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
       });
 
       // Independent lookups overlap, subject to the per-turn and process limits.
-      const results = await Promise.all(turn.toolCalls.map(runSearch));
+      const results = await Promise.all(turn.toolCalls.map(call => call.function.name === ASK_CLARIFICATION_TOOL.function.name
+        ? "No further clarification is available. Research and answer the original request using reasonable, explicitly stated assumptions."
+        : runSearch(call)));
       turn.toolCalls.forEach((call, i) => {
         const result = results[i]!;
         const content =
@@ -248,6 +271,7 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
     const episodeId = store.saveEpisode({
       sessionId, askedAt: now.getTime(), tz, question: message, answer, sources: citedSources,
       execution: { time, intent: prompt.policy.intent, prompt: prompt.stats, evidence: { ...evidence.stats }, searches, modelCalls,
+        ...(input.clarification ? { clarification: input.clarification } : {}),
         ...(simulated ? { simulation: { mode: "era", research: "live-web", review: corrected ? "corrected" : review?.status ?? "not-required", revisionCount, reviewMs, reviewCalls } } : {}) },
     });
 
