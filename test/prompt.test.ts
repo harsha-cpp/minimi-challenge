@@ -60,6 +60,22 @@ test("era creative writing and supplied-text transformations do not need factual
   }
 });
 
+test("era prompts research live retrospective facts and use event dates for the viewpoint", () => {
+  const result = preparePrompt({ message: "Will India get independence?", time: {
+    ...time, effectiveAt: "1948-01-14T08:17:10.442Z",
+  }, history: [], memory: "", historicalUrls: ["https://example.com/old-library"] });
+  const context = result.messages[1]!.content as string;
+  const system = result.messages[0]!.content as string;
+  assert.match(context, /era simulation/);
+  assert.match(context, /Actual research time: 2026-11-12T10:00:00Z/);
+  assert.match(context, /including reliable pages published later/);
+  assert.match(context, /EVENT date controls/);
+  assert.match(system, /already became independent on 15 August 1947/);
+  assert.match(system, /uncertain or hypothetical/);
+  assert.match(system, /technology and product availability/);
+  assert.doesNotMatch(system + context, /snapshot|captured before|require cited historical evidence/i);
+  assert.doesNotMatch(JSON.stringify(result.messages), /UNTRUSTED HISTORICAL SOURCE CANDIDATES|old-library/);
+});
 
 test("present factual turns do not invoke era review", () => {
   assert.equal(turnPolicy("Who is the president today?", false).requireSimulationReview, false);
