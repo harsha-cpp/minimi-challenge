@@ -54,7 +54,7 @@ The offline tests exercise these boundaries without spending. Ordinary era answe
 
 Run one service process on one host with local SQLite WAL storage. Local mode binds to loopback. Hosted mode additionally requires exact HTTPS origins and unique owner access tokens; terminate TLS at a proxy that passes SSE through without response buffering. Owners, conversation IDs and idempotency keys have separate roles. Do not run multiple application processes against the same database or place its WAL on a shared network filesystem.
 
-Follow [operations](operations.md) for shutdown, backups, integrity checks, restore drills and retention. Preserve the provider wallet separately from conversation backups. The recovery objectives—24-hour RPO and one-hour RTO—require scheduled off-host backups and a timed deployment restore drill; they are objectives, not measured guarantees. Automatic retention removes operational traces and completed jobs while retaining immutable conversation evidence and pending work.
+Follow [operations](operations.md) for shutdown, backups, integrity checks, restore drills and retention. Preserve the provider wallet separately from conversation backups. The recovery objectives - 24-hour RPO and one-hour RTO - require scheduled off-host backups and a timed deployment restore drill; they are objectives, not measured guarantees. Automatic retention removes operational traces and completed jobs while retaining immutable conversation evidence and pending work.
 
 ## Evidence and remaining release gates
 

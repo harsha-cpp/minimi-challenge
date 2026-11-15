@@ -1,4 +1,4 @@
-# Stored data model — reviewed implementation
+# Stored data model  -  reviewed implementation
 
 ```mermaid
 erDiagram

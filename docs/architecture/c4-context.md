@@ -1,8 +1,8 @@
-# System context — asof
+# System context  -  asof
 
 ```mermaid
 C4Context
-  title System context for asof — reviewed 14 November 2026
+  title System context for asof  -  reviewed 14 November 2026
   Person(user, "Local user", "Asks questions, selects an era, revisits answers")
   System(asof, "asof", "Live-researched answers with dated conversation memory")
   System_Ext(azure, "Configured model endpoint", "Azure Foundry in this installation")

@@ -1,6 +1,6 @@
 # asof
 
-A chat agent with one tool—**web search**—and a memory of what it told you and when.
+A chat agent with one tool, **web search**, and a memory of what it told you and when.
 
 asof connects the current conversation to fresh web research. Ask a question, come back later, and check whether the answer still holds. Follow-ups stay anchored to the current chat, even when the viewpoint changes. Other conversations are recalled only when you explicitly ask for personal memory; their claims are reference records rather than verified evidence.
 
@@ -195,7 +195,7 @@ Follow the [operations guide](docs/operations.md) before exposing the service.
 
 ## Design and evaluation notes
 
-The architecture keeps deterministic work—dates, memory visibility, validation and persistence—in code, and uses models for language understanding, research decisions and synthesis. SQLite and explicit interfaces keep the implementation small and testable. [DESIGN.md](DESIGN.md) explains the tradeoffs and alternatives considered.
+The architecture keeps deterministic work, including dates, memory visibility, validation and persistence, in code, and uses models for language understanding, research decisions and synthesis. SQLite and explicit interfaces keep the implementation small and testable. [DESIGN.md](DESIGN.md) explains the tradeoffs and alternatives considered.
 
 Current checks establish software behavior and development observations. They do not establish parity with commercial search assistants or independently verified factual accuracy. Human reference labeling, calibrated judging and representative latency/quality evaluation remain separate work. Automatic task-specific retrieval profiles are opt-in until paired evaluation supports enabling them; required verification and historical policies remain active.
 

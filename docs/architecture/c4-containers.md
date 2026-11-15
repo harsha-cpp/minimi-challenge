@@ -1,8 +1,8 @@
-# Runtime containers — original and isolated preview
+# Runtime containers  -  original and isolated preview
 
 ```mermaid
 C4Container
-  title Runtime containers for asof — actual local deployment
+  title Runtime containers for asof  -  actual local deployment
   Person(user, "Local user", "Browses the original or UI preview")
   System_Boundary(main, "Original application") {
     Container(mainBrowser, "Main browser UI", "HTML / CSS / JavaScript", "Chat, era picker and Ledger")

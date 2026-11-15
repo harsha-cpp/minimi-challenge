@@ -1,4 +1,4 @@
-# Backend and web search architecture review — 15 November 2026
+# Backend and web search architecture review  -  15 November 2026
 
 > Historical review of the pre-fix implementation. Current repairs and validation are tracked in the [implementation record](backend-search-implementation.md); the reproduced behavior below is not a description of the repaired code.
 

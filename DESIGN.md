@@ -1,29 +1,29 @@
 # Design
 
-**asof is a web research assistant with a memory of what it said and when.** The useful follow-up is “is that still true?” Answering it needs dated claims and their sources, not just a transcript.
+**asof answers a question twice: when you first ask it, and when you return to ask whether it is still true.** It has one external tool, web search. Its memory preserves what was said, when it was said, and the evidence behind it.
 
-![asof architecture: browser, Node.js orchestration, Azure Foundry, Exa live search and SQLite memory](docs/assets/asof-architecture.png)
+![asof architecture: one Node.js backend with request admission, agent orchestration, model gateway, Exa search, durable SQLite storage and a background memory worker](docs/assets/asof-architecture-dark.png)
 
 ## How it works
 
-A browser client sends the question, timezone and date to a TypeScript/Node.js server; SSE carries progress and answers. Code resolves calendar references, pins request time and recalls conversations by date and SQLite full-text search. Bounded history and memory accompany the untouched question; retrieved text remains untrusted.
+For “Last Tuesday I asked about Postgres hosting. Has pricing changed?”, the agent first resolves Tuesday in the user's timezone and finds the relevant conversation. It uses the earlier answer to identify what needs checking, then researches current sources through Exa and explains what changed, what stayed the same, and what it could not establish. Missing history is a gap to explain, not permission to invent a previous discussion.
 
-Azure-hosted GPT plans retrieval through Exa, the sole search/source provider. An underspecified request can pause for one optional multiple-choice question before research. A real choice, free-text detail or skip resumes the saved request. This UI control clarifies preferences; it does not retrieve facts.
+A TypeScript/Node server owns the request from admission to persistence. Code handles dates, owner boundaries, context limits and tool validation. The model handles language, focused search proposals and synthesis. Exa Search and Contents share the single `web_search` interface: discover pages or read a known source without adding another agent tool. Independent lookups overlap; repeated passages are deduplicated before entering a bounded evidence window.
 
-Validated Exa Search/Contents calls run concurrently within fixed budgets: three search rounds, twelve lookups and a 32,000-character evidence window. Recheck searches bypass the result cache. Answers cite numbered passages; the Ledger saves the answer, exact cited text, hashes and execution context together. Present-day conversations receive background summaries and linked claims; simulated answers remain conversation records rather than verified claims.
+Current-chat follow-ups use durable conversation order, even after changing the viewpoint. Other conversations enter context only for explicit personal-memory requests. Earlier claims and retrieved passages remain untrusted reference material. Answers cite numbered passages, and the ledger stores the exact cited text and its hash alongside the answer.
 
-**Time travel is an era simulation.** Live sources, including modern histories, establish events; the selected date controls the answer’s perspective. A factual historical draft receives a separate era/source review and, when needed, one revision before display. This reconstructs a viewpoint, not what the web contained then. Citation validation checks references; model review cannot guarantee truth or eliminate hindsight.
+## Fast when possible, careful when needed
 
-## Why this shape
+Conversation and supplied-text transformations take a direct model path without a mandatory planner call. Explicit factual verification uses fresh applicable evidence and a separate claim-support review. Factual era simulations also check temporal perspective. A known rejection survives a malformed correction or reviewer outage; uncertain results remain visibly qualified. Citation validity checks references, while model review assesses support. Neither proves truth.
 
-A modular monolith keeps orchestration and persistence inspectable. Native SQLite provides transactions and recall without another service; an injected clock makes temporal behavior reproducible. Code handles dates and memory, while the model handles language. No mandatory planner call precedes every answer, and lookups overlap. Explicit interfaces make the engine testable without live APIs. The tradeoff is a single-process, single-user prototype with lexical recall and an in-memory extraction queue.
+Ordinary text streams provisionally over SSE. Verification and factual simulation commit before publishing final prose. Durable turn IDs and idempotency keys recover saved answers after a lost connection without generating duplicates. Summaries and claims are extracted through a durable background queue, with lower priority than foreground responses. Shared request, token and deadline limits keep research and background work from overwhelming the model gateway.
 
-## Considered and rejected
+## Why this architecture
 
-- **Snapshot-only retrieval and a curated temporal graph:** coverage, access limits and ingestion requirements made arbitrary dates brittle. Live retrospective research supports the intended simulation; archival proof is a different product.
-- **A vector database or distributed services:** added infrastructure before recall volume justified it. SQLite is sufficient for this prototype.
-- **Mandatory planning agents or multiple search providers:** extra latency, cost and failure paths without measured gains. Exa stays the sole retrieval boundary.
+One modular service and local SQLite keep transactions, recovery and deployment understandable. Full-text recall avoids an extra retrieval service; explicit model, search and clock interfaces make failures reproducible in tests. The tradeoff is a single-host design with lexical recall and external-provider latency. Hosted owner isolation is implemented, but multiple application instances would need shared storage and coordination.
+
+I rejected mandatory planning agents and provider federation because they add calls and failure paths before demonstrating a quality gain. I deferred embeddings and distributed services until recall misses or measured load justify them. Snapshot-only retrieval was too restrictive for arbitrary historical questions: era simulation uses live retrospective sources to reconstruct a viewpoint, while acknowledging that hindsight can still slip through.
 
 ## With another week
 
-I would prioritize correctness and recovery over more features: preserve negative review findings through reviewer failures, require evidence for explicit factual verification, and distinguish supported answers from uncertainty. Next, add durable turn IDs, restart-safe extraction and conversation ordering independent of simulated dates; require owner isolation before shared hosting. Finally, expand held-out factual, historical and clarification cases, measure citation support and hindsight leakage with human review, and track p50/p95 latency and cost. Existing scripted tests validate behavior, not a claim of perfect accuracy.
+I would concentrate on evidence quality: human-label held-out follow-up questions, assess claim-to-passage support and calibrated uncertainty, and compare retrieval strategies on identical inputs. I would also repeat five-user latency measurements on the deployment target, including queue time, review overhead and interrupted-stream recovery. Automated tests and frozen fixtures establish software behavior; independent answer quality and same-or-better hosted latency still need measurement.
