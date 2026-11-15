@@ -20,6 +20,11 @@ test("subject-free verification requires an actual conversational predecessor", 
     "Please check the above.", "Is what you said still accurate?", "Are you sure?",
     "Can you double-check all the statements you just made?", "I want you to verify your last answer.",
     "Verify your previous answer as of May 15, 2026", "Is that still true on 2026-05-15?",
+    "Verify your claims properly now.", "Thoroughly verify your previous answer with sources.",
+    "Please fact-check the above answer meticulously, using primary sources.",
+    "Could you rigorously check the claims you made earlier?", "Please make absolutely sure your previous answer is correct.",
+    "Go back and verify your last response carefully.", "Can you substantiate what you just said using reliable sources?",
+    "Please check that properly.", "Verify your claims about that answer thoroughly.",
   ]) {
     assert.deepEqual(resolve(message), missing, message);
     const result = resolve(message, [episode(22)]);
@@ -37,6 +42,10 @@ test("new named subjects, URLs and supplied claims remain independent pivots", (
     "Check ‘what did I choose yesterday?’ as an English sentence.", "Verify this: https://example.com/claim",
     'Translate "what did we discuss yesterday?" into French.', "Rewrite this: remember my database preference.",
     'Summarize "our previous conversation" as a title.', "Check 'our previous conversation' for grammar.",
+    "Verify your claims about IPL winners properly now.", "Thoroughly verify your previous answer about SQLite.",
+    "Verify your claims about Grammarly.", "Verify your claims for Bitly.", "Verify your claims about Swiftly pricing.",
+    "Verify your claims and IPL winners thoroughly.", 'Properly verify this claim: "Kimi has a million-token context".',
+    "Verify that Grammarly is accurate.", "Verify that grammarly is accurate.", "Verify this Bitly link properly.",
   ]) assert.deepEqual(resolve(message, [episode(22)]), standalone, message);
 });
 
@@ -114,6 +123,24 @@ test("legacy unbound verification prose cannot replace its original same-convers
   assert.equal(resolve("verify this", [original, contaminated, pivot]).anchor?.episodeId, 25);
 });
 
+test("strong verification references retain the original subject despite adverbs and legacy contaminated follow-ups", () => {
+  const original = episode(22);
+  const legacy = episode(23, { question: "verify your claims now", answer: "An unrelated IPL answer from an older unbound request." });
+  for (const message of [
+    "verify your claims properly now", "Verify your previous answer thoroughly.",
+    "Please verify your claims with sources.", "Can you meticulously check the above answer using official sources?",
+    "Please make absolutely sure your last response is correct.", "Re-evaluate what you just told me carefully.",
+  ]) {
+    const result = resolve(message, [original, legacy]);
+    assert.equal(result.kind, "conversation_reference", message);
+    assert.equal(result.anchor?.episodeId, original.id, message);
+    assert.equal(result.anchor?.answerHash, hash(original.answer), message);
+    assert.equal(result.memoryScope, "none", message);
+  }
+  const legacyWithAdverb = episode(24, { question: "Verify your claims properly now.", answer: "Another contaminated IPL answer." });
+  assert.equal(resolve("Verify your previous answer thoroughly.", [original, legacy, legacyWithAdverb]).anchor?.episodeId, original.id);
+});
+
 test("valid bound verification outputs may become the next reference", () => {
   const original = episode(22);
   const verified = episode(24, { question: "verify your claims now", answer: "I checked the Kimi and Claude claims.", execution: {
@@ -125,6 +152,65 @@ test("valid bound verification outputs may become the next reference", () => {
     requestContext: { kind: "conversation_reference", anchorEpisodeId: verified.id, anchorAnswerHash: hash(verified.answer) },
   } });
   assert.equal(resolve("verify this", [next, original, verified]).anchor?.episodeId, 25);
+});
+
+test("a bound unresolved check follows its recorded original claims rather than its status prose or adjacent topic", () => {
+  const original = episode(22);
+  const intervening = episode(23, { question: "Which database is smaller?", answer: "A different database topic.",
+    execution: { requestContext: { kind: "standalone", memoryScope: "none" } } });
+  const fallback = episode(24, { question: "verify your claims now", answer: "I couldn't complete the check of my previous answer.",
+    quality: "explicitly_unverified", execution: { requestContext: {
+      kind: "conversation_reference", anchorEpisodeId: original.id, anchorAnswerHash: hash(original.answer),
+    } } });
+  const result = resolve("verify again", [original, intervening, fallback]);
+  assert.equal(result.anchor?.episodeId, 22);
+  assert.equal(result.anchor?.answer, original.answer);
+  assert.equal(result.anchor?.answerHash, hash(original.answer));
+  assert.equal(result.memoryScope, "none");
+});
+
+test("repeated unresolved checks follow exact valid parent bindings while supported checks remain claim targets", () => {
+  const original = episode(22);
+  const fallback = (id: number, parent: Episode, executionQuality = false) => episode(id, {
+    question: "verify again", answer: `The check is unresolved, attempt ${id}.`,
+    ...(executionQuality ? {} : { quality: "explicitly_unverified" }),
+    execution: { ...(executionQuality ? { quality: "explicitly_unverified" } : {}), requestContext: {
+      kind: "conversation_reference", anchorEpisodeId: parent.id, anchorAnswerHash: hash(parent.answer),
+    } },
+  });
+  const first = fallback(24, original), second = fallback(25, first, true), third = fallback(26, second);
+  assert.equal(resolve("verify again", [original, first, second, third]).anchor?.episodeId, 22);
+  const supported = episode(27, { question: "verify this", answer: "Some Kimi and Claude claims have passage support.",
+    quality: "supported_partial", execution: { requestContext: {
+      kind: "conversation_reference", anchorEpisodeId: original.id, anchorAnswerHash: hash(original.answer),
+    } } });
+  assert.equal(resolve("verify again", [original, supported, fallback(28, supported)]).anchor?.episodeId, 27);
+});
+
+test("an unresolved retry with a missing, modified, clarifying or cyclic parent cannot fall back to another answer", () => {
+  const original = episode(22);
+  const fallback = (id: number, parentId: number, parentHash: string) => episode(id, {
+    question: "verify again", answer: `Unresolved verification ${id}.`, quality: "explicitly_unverified",
+    execution: { requestContext: { kind: "conversation_reference", anchorEpisodeId: parentId, anchorAnswerHash: parentHash } },
+  });
+  const first = fallback(24, original.id, hash(original.answer));
+  const latest = fallback(25, first.id, hash(first.answer));
+  assert.deepEqual(resolve("verify again", [episode(20), latest]), missing);
+  assert.deepEqual(resolve("verify again", [episode(20), first, latest]), missing, "a missing original cannot be replaced by turn20");
+  assert.deepEqual(resolve("verify again", [episode(20), { ...original, answer: "Modified claims." }, first, latest]), missing);
+  const clarification = episode(22, { execution: { requestContext: { kind: "missing_reference" } } });
+  assert.deepEqual(resolve("verify again", [episode(20), clarification, first, latest]), missing);
+  const cycleFirst = fallback(24, 25, hash(latest.answer));
+  const cycleLatest = fallback(25, 24, hash(cycleFirst.answer));
+  assert.deepEqual(resolve("verify again", [original, cycleFirst, cycleLatest]), missing);
+});
+
+test("ordinary standalone unverified answers retain their actual claims as the target", () => {
+  for (const marker of [undefined, { kind: "standalone", memoryScope: "none" }]) {
+    const original = episode(22, { answer: "Kimi may support this context size; I have not checked the source.",
+      quality: "explicitly_unverified", execution: { quality: "explicitly_unverified", ...(marker ? { requestContext: marker } : {}) } });
+    assert.equal(resolve("verify again", [original]).anchor?.answer, original.answer);
+  }
 });
 
 test("new standalone markers keep a safe answer current even when its question looks deictic", () => {

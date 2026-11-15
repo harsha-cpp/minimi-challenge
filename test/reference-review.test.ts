@@ -56,7 +56,7 @@ test("a truncated original answer cannot be approved as completely checked", asy
   assert.equal(partial.status, "approved"); assert.equal(partial.quality, "supported_partial");
 });
 
-test("an unavailable reference review cannot publish a researched answer to another subject", async () => {
+for (const simulated of [false, true]) test(`an unavailable ${simulated ? "era" : "current"} reference review cannot publish a researched answer to another subject`, async () => {
   const store = new MemoryStore(":memory:");
   try {
     store.saveEpisode({ sessionId: "models", askedAt: reference.viewpointAt, tz: "UTC", question: reference.question,
@@ -68,16 +68,18 @@ test("an unavailable reference review cannot publish a researched answer to anot
       const text = "Rajasthan Royals won the 2008 IPL [1].";
       request.onText(text); return { text, toolCalls: [] };
     } };
-    await runTurn({ llm, store, clock: { now: () => new Date(reference.viewpointAt), simulated: false },
+    await runTurn({ llm, store, clock: { now: () => simulated ? input.viewpoint : new Date(reference.viewpointAt), simulated },
       search: { search: async () => [{ url: "https://example.com/ipl", title: "IPL", text: "Rajasthan Royals won the 2008 IPL." }] },
       enricher: { schedule() {} } }, { sessionId: "models", message: "verify your claims now", tz: "UTC" }, event => events.push(event));
     const prose = events.filter(event => event.type === "text").map(event => event.delta).join("");
     assert.doesNotMatch(prose, /IPL|Rajasthan/);
+    assert.doesNotMatch(prose, /I could not verify this answer against the available evidence|Treat the following as unverified/);
     assert.match(prose, /previous answer.*conversation/);
     const done = events.find(event => event.type === "done"); assert.ok(done && done.type === "done");
     assert.equal(done.quality, "explicitly_unverified");
     const saved = store.episode(done.episodeId)!;
     assert.doesNotMatch(saved.answer, /IPL|Rajasthan/);
+    assert.equal(saved.answer, prose);
     assert.equal((saved.execution?.requestContext as { anchorEpisodeId: number }).anchorEpisodeId, 1);
   } finally { store.close(); }
 });

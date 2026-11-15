@@ -59,6 +59,10 @@ const referenceWords = new Set(("verify verification recheck re check fact factc
   "number numbers price prices pricing cost costs plan plans version versions availability result results value values correctness accuracy " +
   "true correct accurate right valid verified supported available unchanged changed up to date sure certain confident about stand by said say wrote written gave given made make provided just " +
   "for with against evidence sources source checkable thing things time selected viewpoint calendar comparison comparisons want need to and or not full entire complete").split(/\s+/));
+const verificationWords = new Set(("using consulting reading reliable official primary independent credible actual proper rigorous thorough exhaustive sourced " +
+  "citation citations references research detail depth care exact links link documents docs doing go back over well better deeper further hard fast together " +
+  "own recent assistant tell told stated claimed ensure possible respect regarding concerning related substantiate corroborate reassess cross evaluate doublecheck").split(/\s+/));
+const strongReference = /\b(?:your\s+(?:(?:own|previous|last|earlier|prior|above|preceding|original|latest|recent)\s+)*(?:claims?|answers?|responses?|statements?|assertions?|recommendations?)|(?:the\s+)?(?:above|previous|last|earlier|prior|preceding)\s+(?:assistant\s+)?(?:answers?|responses?|claims?|statements?|assertions?)|(?:claims?|statements?|assertions?|answers?|responses?)\s+(?:that\s+)?you\s+(?:(?:just|previously|earlier)\s+)*(?:made|gave|provided|wrote|stated)|(?:what|everything)\s+you\s+(?:(?:just|previously|earlier)\s+)*(?:said|told|wrote|claimed|stated)|(?:this|that|these|those))\b/i;
 
 /** Recognize closed, subject-free follow-ups. Any supplied claim, URL or new subject stays standalone. */
 function implicitReference(message: string): boolean {
@@ -67,13 +71,29 @@ function implicitReference(message: string): boolean {
   if (/["“”`][\s\S]+["“”`]|(?:^|\s)'[^']+'(?=\s|[.!?,;:]|$)|:\s*\S|https?:\/\//i.test(text)) return false;
   const temporalSuffix = /\s+(?:as of|on|at|from)\s+(?:(?:the\s+)?(?:selected|current|previous|original)\s+(?:date|time|viewpoint)|\d{4}-\d{2}-\d{2}(?:T[^\s]+)?|\d{1,2}\s+(?:january|february|march|april|may|june|july|august|september|october|november|december)(?:\s+\d{4})?|(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}(?:,?\s+\d{4})?|\d{4})[.!?]*$/i;
   const core = text.replace(temporalSuffix, "");
+  const directReference = strongReference.test(core);
   const verification = /\b(?:verify|verification|re-?check|fact[- ]?check|confirm|validate|double[- ]?check|check)\b/i.test(core)
     || /\b(?:true|correct|accurate|right|valid|up[- ]to[- ]date|changed|unchanged)\b/i.test(core)
       && /\b(?:is|are|was|were|still|has|have|what|what's|whats)\b/i.test(core)
-    || /\b(?:are you sure|stand by your (?:answer|response|claims?))\b/i.test(core);
+    || /\b(?:are you sure|stand by your (?:answer|response|claims?))\b/i.test(core)
+    || directReference && /\b(?:substantiate|corroborate|reassess|cross[- ]?check|re[- ]?evaluate)\b/i.test(core);
   if (!verification) return false;
   const words = core.toLocaleLowerCase("en-US").match(/[\p{L}\p{N}]+(?:'[\p{L}]+)?/gu) ?? [];
-  return words.length > 0 && words.every(word => referenceWords.has(word));
+  if (words.length && words.every(word => referenceWords.has(word))) return true;
+  if (!directReference) return false;
+  const generic = (word: string) => referenceWords.has(word) || verificationWords.has(word);
+  // "Verify that <named subject> is ..." supplies a claim rather than pointing at a prior one.
+  for (const supplied of core.matchAll(/\b(?:this|that|these|those)\s+(?:the\s+)?([\p{L}\p{N}]+)\s+(?:is|are|was|were|has|have|can|will|links?|claims?|versions?)\b/giu)) {
+    if (!generic(supplied[1]!.toLocaleLowerCase("en-US"))) return false;
+  }
+  // Topic modifiers introduce their own subject even when its name happens to end in "ly".
+  // Adverbs such as "properly" or "meticulously" cannot turn Grammarly/Bitly into antecedents.
+  for (const modifier of core.matchAll(/\b(?:about|regarding|concerning|on|for|from|of|related to|with respect to)\s+(?:(?:the|a|an|current|latest|previous|last|earlier|official|primary|reliable)\s+)*([\p{L}\p{N}]+)/giu)) {
+    if (!generic(modifier[1]!.toLocaleLowerCase("en-US"))) return false;
+  }
+  // A direct conversational target tolerates productive adverbs and evidence-method phrasing;
+  // an unknown noun or explicit new subject still cannot inherit a conversation target.
+  return words.every(word => generic(word) || /^\p{L}{3,}ly$/u.test(word));
 }
 
 function sequence(episode: Episode): number | null {
@@ -134,7 +154,19 @@ export function resolveRequestContext(input: RequestContextInput): RequestContex
     // A declared but invalid binding is not permission to select another subject.
     if (context?.kind === "conversation_reference" && !validBinding(episode)) return missing;
     if (!legacyReference || context?.kind === "standalone" || context?.kind === "conversation_reference") {
-      const anchor = anchorFor(episode, ownerId);
+      let subject = episode;
+      const followed = new Set<number>();
+      while (metadata(subject)?.kind === "conversation_reference"
+        && (subject.quality === "explicitly_unverified" || subject.execution?.quality === "explicitly_unverified")) {
+        if (followed.has(subject.id)) return missing;
+        followed.add(subject.id);
+        // Bound unresolved replies contain safe status prose, not a replacement claim set.
+        // The binding was validated above; follow that exact parent rather than an adjacent turn.
+        const parent = byId.get(metadata(subject)!.anchorEpisodeId as number);
+        if (!parent) return missing;
+        subject = parent;
+      }
+      const anchor = anchorFor(subject, ownerId);
       return anchor ? { kind: "conversation_reference", memoryScope: "none", anchor } : missing;
     }
     // Legacy unbound follow-up prose may already contain cross-conversation contamination.
