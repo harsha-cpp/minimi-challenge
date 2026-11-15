@@ -1,17 +1,9 @@
-/**
- * One turn of the agent, start to finish:
- *
- *   recall (code, ms) → model ⇄ web_search (parallel) → stream answer → save → enrich (background)
- *
- * There is no router or planner call in front of the model. The work a router
- * would do is done by code that is exact and free (date resolution, memory
- * lookup), which leaves a single model deciding whether and what to search
- * with everything already in front of it. A message that needs no search costs
- * exactly one model call.
- */
+
+
 import { createHash } from "node:crypto";
 import { pinTurnTime, type Clock } from "../clock.ts";
-import type { ChatMessage, Llm, ToolCall } from "../llm.ts";
+import { ModelError, type ChatMessage, type Llm, type ToolCall } from "../llm.ts";
+import { AdmissionError } from "../llm/gateway.ts";
 import type { Enricher } from "../memory/enrich.ts";
 import { type RecallResult, recall, renderMemory } from "../memory/recall.ts";
 import type { Episode, MemoryStore, Source } from "../memory/store.ts";
@@ -21,17 +13,17 @@ import { WEB_SEARCH_TOOL } from "./prompt.ts";
 import { prepareHistory, preparePrompt } from "./prepare.ts";
 import { turnPolicy } from "./prepare.ts";
 import { EvidenceWindow } from "./evidence.ts";
-import { reviewSimulationAnswer, type SimulationReview } from "./simulation.ts";
+import { reviewSimulationAnswer, type EvidenceQuality, type SimulationReview } from "./simulation.ts";
+import { recordStage } from "../runtime/telemetry.ts";
 import { citedNumbers } from "./citations.ts";
 import { ASK_CLARIFICATION_TOOL, CLARIFICATION_INSTRUCTIONS, canClarify, parseClarification,
   type ClarificationAnswer, type ClarificationCard, type ClarificationPort } from "./clarification.ts";
 export { citedNumbers } from "./citations.ts";
 
-/** Rounds in which the model may search. After these it must answer with what it has. */
 const MAX_SEARCH_ROUNDS = 3;
 const MAX_SEARCH_CALLS = 12;
 const TURN_TIMEOUT_MS = 120_000;
-/** Earlier turns of the current chat sent verbatim; anything older is reached through recall. */
+
 const HISTORY_TURNS = 8;
 
 export interface Deps {
@@ -40,27 +32,34 @@ export interface Deps {
   store: MemoryStore;
   clock: Clock;
   enricher: Pick<Enricher, "schedule">;
-  /** Independent verification request, normally using the quality model rather than memory's fast model. */
+
   verifier?: Pick<Llm, "json">;
-  /** Interactive UI control; Exa remains the only web-search tool. */
+
   questions?: ClarificationPort;
-  /** Legacy archive-corpus hook, retained for old tooling; era simulation never invokes it. */
+
   historicalCatalog?: (question: string, cutoff: Date) => Array<{ url: string }>;
+  reviewTimeoutMs?: number;
+  repairTimeoutMs?: number;
+  /** Evaluation-only observation hook. Production traces retain counters rather than passage text. */
+  onEvidence?: (sources: Source[]) => void;
 }
 
 export interface TurnInput {
   sessionId: string;
+  ownerId?: string;
+  turnId?: string;
   message: string;
   tz: string;
   signal?: AbortSignal;
-  /** The browser pins its selected historical instant to this request. */
+  deadlineAt?: number;
+
   asOf?: Date;
   clarification?: ClarificationAnswer;
 }
 
 export interface Timings {
   recallMs: number;
-  /** Until the first word of the final answer reached the client. */
+
   firstTokenMs: number | null;
   totalMs: number;
   searches: number;
@@ -75,18 +74,22 @@ export type AgentEvent =
   | { type: "search"; id: string; query: string; publishedAfter?: string; state: "running" | "done" | "failed"; results?: number; ms?: number; message?: string }
   | { type: "sources"; sources: Source[] }
   | { type: "text"; delta: string }
-  /** Text streamed ahead of a tool call was a preamble, not the answer: discard it. */
+
   | { type: "retract" }
   | { type: "verification"; state: "running" | "done" | "failed" | "unavailable"; ms?: number }
-  | { type: "done"; episodeId: number; cited: number[]; timings: Timings }
-  | { type: "error"; message: string };
+  | { type: "done"; episodeId: number; turnId?: string; quality: EvidenceQuality; cited: number[]; timings: Timings }
+  | { type: "error"; message: string; code?: string };
 
 export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentEvent) => void): Promise<void> {
   const started = performance.now();
   const elapsed = () => Math.round(performance.now() - started);
   const { llm, store, clock } = deps;
   const { sessionId, message, tz } = input;
-  const deadline = AbortSignal.timeout(TURN_TIMEOUT_MS);
+  const deadlineAt = input.deadlineAt ?? Date.now() + TURN_TIMEOUT_MS;
+  const availableMs = Math.max(1, Math.ceil(deadlineAt - Date.now()));
+  const synthesisReserveMs = Math.min(15_000, Math.floor(availableMs / 3));
+  const remainingMs = () => deadlineAt - Date.now();
+  const deadline = AbortSignal.timeout(Math.min(2_147_483_647, availableMs));
   const signal = input.signal ? AbortSignal.any([input.signal, deadline]) : deadline;
   const search = withConcurrency(deps.search, 4);
   let buffered = false;
@@ -96,10 +99,13 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
     const time = pinTurnTime(clock, tz, input.asOf);
     const now = new Date(time.effectiveAt);
     const simulated = time.simulated;
-    buffered = turnPolicy(message, simulated).requireSimulationReview;
-    const prior = store.sessionHistory(sessionId, HISTORY_TURNS, now.getTime());
+    const policy = turnPolicy(message, simulated);
+    buffered = policy.requireSimulationReview || policy.requireVerificationEvidence;
+    const recallStarted = performance.now();
+    const prior = store.sessionHistory(sessionId, HISTORY_TURNS, now.getTime(), input.ownerId);
     const history = prepareHistory(prior.map(withoutLegacyFailure), tz);
-    const recalled = recall(store, message, now, tz, history.ids);
+    const recalled = recall(store, message, now, tz, history.ids, input.ownerId);
+    recordStage("history_recall", performance.now() - recallStarted);
     emit({ type: "recall", notes: recallNotes(recalled), ms: Math.round(recalled.ms) });
 
     const cleanMemory: RecallResult = { ...recalled,
@@ -113,7 +119,6 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
     if (clarificationAllowed) messages.splice(2, 0, { role: "system", content: CLARIFICATION_INSTRUCTIONS });
     const evidence = new EvidenceWindow();
 
-    // A citation identifies one URL + passage observation throughout the turn.
     const sources: Source[] = [];
     const numberByUrl = new Map<string, number>();
     const numberFor = (hit: SearchHit): number => {
@@ -129,15 +134,26 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
     };
 
     const runSearch = async (call: ToolCall): Promise<{ query: SearchQuery; hits: SearchHit[] } | string> => {
-      // The viewpoint constrains events in the answer, never the age of a research page.
+
       const query = parseSearchCall(call);
-      if (typeof query === "string") return query;
+      if (typeof query === "string") {
+        recordStage("tool_validation", 0, { outcome: "rejected", code: "invalid_search_arguments" });
+        return query;
+      }
       if (prompt.policy.fresh) query.freshness = "fresh";
-      if (searches >= MAX_SEARCH_CALLS) return "Search budget exhausted. Answer using existing evidence and identify anything unverified.";
+      query.profile ??= policy.requireVerificationEvidence ? "verification" : simulated ? "historical" : undefined;
+      if (remainingMs() < synthesisReserveMs) {
+        recordStage("search_admission", 0, { outcome: "rejected", code: "deadline_reserve" });
+        return "Research deadline reached. Use the existing passages, identify unresolved facts, and finish the answer now.";
+      }
+      if (searches >= MAX_SEARCH_CALLS) {
+        recordStage("search_admission", 0, { outcome: "rejected", code: "search_budget" });
+        return "Search budget exhausted. Answer using existing evidence and identify anything unverified.";
+      }
       searches++;
       const began = performance.now();
-      // Generated search queries may themselves contain memorized future outcomes.
-      const base = { type: "search", id: call.id, query: buffered ? "Era research" : query.query,
+
+      const base = { type: "search", id: call.id, query: simulated && buffered ? "Era research" : query.query,
         ...(!buffered && query.publishedAfter ? { publishedAfter: query.publishedAfter } : {}) } as const;
       emit({ ...base, state: "running" });
       try {
@@ -147,9 +163,9 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
         return { query, hits };
       } catch (error) {
         if (signal?.aborted) throw error;
-        const message = buffered ? "A web lookup could not be completed; trying the available context." : `Search failed (${errorMessage(error)}).`;
+        const message = buffered ? "A web lookup could not be completed; trying the available context." : "Search failed. The web lookup could not be completed.";
         emit({ ...base, state: "failed", ms: Math.round(performance.now() - began), message });
-        // A failed search is information for the model, not a reason to fail the turn.
+
         return `${message} Give a useful answer from well-established history where possible, label any inference or hypothetical part, and identify only the specific facts you could not check. Never request archive access or describe a snapshot limitation.`;
       }
     };
@@ -160,20 +176,35 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
     let modelCalls = 0;
 
     for (let round = 1; ; round++) {
-      const mustAnswer = round > MAX_SEARCH_ROUNDS;
-      const mayAsk = clarificationAllowed && round === 1;
-      modelCalls++;
-      const turn = await llm.stream({
-        messages,
-        tools: mayAsk ? [WEB_SEARCH_TOOL, ASK_CLARIFICATION_TOOL] : [WEB_SEARCH_TOOL],
-        toolChoice: mustAnswer ? "none" : "auto",
-        signal,
-        onText: (delta) => {
-          if (buffered || mayAsk) return; // Never leak a tool preamble ahead of an interactive question.
-          firstTokenMs ??= elapsed();
-          emit({ type: "text", delta });
-        },
-      });
+      let mustAnswer = round > MAX_SEARCH_ROUNDS || remainingMs() < synthesisReserveMs;
+      let mayAsk = clarificationAllowed && round === 1 && !mustAnswer;
+      const generate = () => {
+        modelCalls++;
+        return llm.stream({
+          messages,
+          tools: mustAnswer ? [] : mayAsk ? [WEB_SEARCH_TOOL, ASK_CLARIFICATION_TOOL] : [WEB_SEARCH_TOOL],
+          toolChoice: mustAnswer ? "none" : "auto",
+          signal,
+          purpose: mustAnswer ? "synthesis" : "research",
+          onText: (delta) => {
+            if (buffered || mayAsk) return;
+            firstTokenMs ??= elapsed();
+            emit({ type: "text", delta });
+          },
+        });
+      };
+      let turn: Awaited<ReturnType<Llm["stream"]>>;
+      try { turn = await generate(); }
+      catch (error) {
+        if (mustAnswer || !(error instanceof AdmissionError) || !["budget", "deadline"].includes(error.code) || signal.aborted || remainingMs() <= 0) throw error;
+        // Research cannot spend the reserved final call. Retry once, with tools disabled.
+        // An actual exhausted account still fails this synthesis attempt with its own busy/error state.
+        if (firstTokenMs !== null) { emit({ type: "retract" }); firstTokenMs = null; }
+        mustAnswer = true; mayAsk = false;
+        messages.push({ role: "system", content: "The remaining research allowance is reserved for completion. Finish now using the available passages. Clearly identify unresolved facts, avoid unsupported assertions, and do not call tools." });
+        recordStage("synthesis_reserve", 0, { reason: error.code, outcome: "used" });
+        turn = await generate();
+      }
 
       if (!turn.toolCalls.length || mustAnswer) {
         answer = turn.text;
@@ -189,7 +220,7 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
           signal.throwIfAborted();
           const card = deps.questions!.create({ sessionId, message, time, question });
           emit({ type: "clarification", card });
-          return; // Waiting for the user never holds a model/search request or creates a fake answer.
+          return;
         }
       }
 
@@ -201,14 +232,16 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
         ...(turn.responseOutput ? { responseOutput: turn.responseOutput } : {}),
       });
 
-      // Independent lookups overlap, subject to the per-turn and process limits.
       const results = await Promise.all(turn.toolCalls.map(call => call.function.name === ASK_CLARIFICATION_TOOL.function.name
         ? "No further clarification is available. Research and answer the original request using reasonable, explicitly stated assumptions."
         : runSearch(call)));
+      const packStarted = performance.now();
+      const contents = evidence.renderRound(results, numberFor);
+      deps.onEvidence?.(structuredClone(sources));
+      recordStage("evidence_packing", performance.now() - packStarted, { candidates: evidence.stats.rawCandidates,
+        admitted: evidence.stats.admittedPassages, duplicates: evidence.stats.duplicatePassages });
       turn.toolCalls.forEach((call, i) => {
-        const result = results[i]!;
-        const content =
-          typeof result === "string" ? evidence.error(result) : evidence.render(result.query, result.hits, numberFor);
+        const content = contents[i]!;
         messages.push({ role: "tool", tool_call_id: call.id, content });
       });
       if (!buffered) emit({ type: "sources", sources });
@@ -224,60 +257,106 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
 
     let review: SimulationReview | undefined;
     let reviewMs = 0, reviewCalls = 0, revisionCount = 0;
+    const reviewKind = policy.requireVerificationEvidence ? "verification" : "simulation";
+    const reviewAttempts: Array<{ kind: string; status: string; reason: string | null; calls: number; ms: number }> = [];
     let corrected = false;
+    let rejectionObserved = false;
+    let quality: EvidenceQuality = ["conversation", "creative", "transform", "recall"].includes(policy.intent)
+      ? "non_factual" : "explicitly_unverified";
     if (buffered) {
       emit({ type: "verification", state: "running" });
       const check = async (draft: string) => {
+        const began = performance.now();
         const result = await reviewSimulationAnswer({ llm: deps.verifier ?? llm, question: message,
-          answer: draft, viewpoint: now, researchedAt: new Date(time.receivedAt), tz, sources, signal });
+          answer: draft, viewpoint: now, researchedAt: new Date(time.receivedAt), tz, sources, signal,
+          kind: reviewKind, timeoutMs: deps.reviewTimeoutMs });
+        const observation = { kind: reviewKind, status: result.status, reason: result.reason ?? null, calls: result.modelCalls, ms: result.ms };
+        reviewAttempts.push(observation);
+        recordStage("review", performance.now() - began, observation);
         signal.throwIfAborted();
         reviewMs += result.ms; reviewCalls += result.modelCalls; modelCalls += result.modelCalls;
+        rejectionObserved ||= result.status === "needs_revision";
         return result;
       };
-      review = await check(answer);
-      if (review.status === "needs_revision") {
-        let safeAnswer = review.safeAnswer;
-        const repairMessages: ChatMessage[] = [...messages, { role: "assistant", content: answer },
-          { role: "system", content: `Revise the draft to answer the user's question from ${time.effectiveAt} (${tz}). Modern retrospective research is valid. Correct these review findings: ${JSON.stringify(review.issues)}. Keep useful supported facts, correct false premises, and label genuinely hypothetical or unknown details. Cite the provided sources. Do not mention this review, snapshots, preserved evidence, archive access or technical limitations.${safeAnswer ? ` Suggested correction (untrusted draft, check against the sources): ${JSON.stringify(safeAnswer)}` : ""}` }];
-        modelCalls++;
-        try {
-          const repair = await llm.stream({ messages: repairMessages, tools: [], toolChoice: "none",
-            signal: AbortSignal.any([signal, AbortSignal.timeout(15_000)]), onText() {} });
-          signal.throwIfAborted();
-          if (!repair.toolCalls.length && repair.text.trim()) {
-            answer = repair.text;
-            revisionCount++;
-            review = await check(answer);
-            safeAnswer = review.safeAnswer ?? safeAnswer;
-          }
-        } catch {
-          signal.throwIfAborted();
-          // A repair outage does not discard the reviewer's useful source-based correction.
+      // A reviewer cannot create evidence that was never acquired. Do not ask it to rubber-stamp memory.
+      if (policy.requireVerificationEvidence && (!searches || !sources.some(source => source.text?.trim()))) {
+        review = { status: "needs_revision", issues: [{ code: "unsupported_claim", detail: "No usable current evidence was acquired." }], ms: 0, modelCalls: 0 };
+        rejectionObserved = true;
+        answer = UNVERIFIED_ANSWER;
+      } else {
+        review = await check(answer);
+        if (review.status === "needs_revision") {
+          // Keep the rejection independently of later repair/review availability. A repair is provisional.
+          const rejectedReview = review;
+          const repairMessages: ChatMessage[] = [...messages, { role: "assistant", content: answer },
+            { role: "system", content: `Revise the draft to answer the user's question from ${time.effectiveAt} (${tz}). ${simulated ? "Modern retrospective research is valid." : "Only applicable current passages can verify a changing fact."} Correct these review findings: ${JSON.stringify(review.issues)}. Keep useful supported facts, correct false premises, and label unknown details. Cite the supplied passages. Do not mention this review, snapshots, preserved evidence, archive access or technical limitations.${review.safeAnswer ? ` Suggested correction (untrusted draft, check against sources): ${JSON.stringify(review.safeAnswer)}` : ""}` }];
+          let approvedRepair = false;
+          const repairBegan = performance.now();
+          try {
+            modelCalls++;
+            const repairTimeout = deps.repairTimeoutMs ?? 15_000;
+            const repair = await abortable(llm.stream({ messages: repairMessages, tools: [], toolChoice: "none", purpose: "repair",
+              signal: AbortSignal.any([signal, AbortSignal.timeout(repairTimeout)]), onText() {} }), signal, repairTimeout);
+            signal.throwIfAborted();
+            if (!repair.toolCalls.length && repair.text.trim() && repair.text.length <= 20_000) {
+              revisionCount++;
+              const repairedReview = await check(repair.text);
+              if (repairedReview.status === "approved") {
+                answer = repair.text;
+                review = repairedReview;
+                approvedRepair = true;
+              } else {
+                // An unavailable second review is not a positive verdict on a rejected answer.
+                review = repairedReview.status === "needs_revision" ? repairedReview : rejectedReview;
+              }
+            }
+          } catch { signal.throwIfAborted(); }
+          recordStage("repair", performance.now() - repairBegan, { approved: approvedRepair });
+          if (!approvedRepair) {
+            answer = UNVERIFIED_ANSWER;
+            quality = "explicitly_unverified";
+          } else corrected = true;
         }
-        if (review.status !== "approved" && safeAnswer) { answer = safeAnswer; corrected = true; }
+        if (review.status === "approved") {
+          quality = review.quality ?? (citedNumbers(answer).length ? "supported" : "explicitly_unverified");
+          if (quality === "explicitly_unverified") {
+            // A quality label is not a visible qualification, and an empty claim list cannot bless assertions.
+            answer = policy.requireVerificationEvidence ? UNVERIFIED_ANSWER
+              : `I could not verify this answer against the available evidence. Treat the following as unverified.\n\n${answer}`;
+          }
+        } else if (review.status === "unavailable" && !rejectionObserved) {
+          // Preserve a researched draft only with an explicit disclosure that support was not checked.
+          answer = `I could not verify this answer against the available evidence. Treat the following as unverified.\n\n${answer}`;
+        }
       }
       cited = citedNumbers(answer);
       if (invalidCitations()) throw new Error("The answer cited unavailable evidence. Please retry.");
-      emit({ type: "verification", state: review.status === "unavailable" && !corrected ? "unavailable" : "done", ms: reviewMs });
-      // A simulation review is a model quality check, not a proof or an archive-admission gate.
-      emit({ type: "sources", sources: sources.filter(source => cited.includes(source.n)) });
-      signal.throwIfAborted();
-      firstTokenMs = elapsed();
-      emit({ type: "text", delta: answer });
+      emit({ type: "verification", state: review.status === "unavailable" ? "unavailable" : rejectionObserved && !corrected ? "failed" : "done", ms: reviewMs });
       signal.throwIfAborted();
     }
     const citedSources = sources.filter((s) => cited.includes(s.n));
     signal.throwIfAborted();
+    const commitBegan = performance.now();
     const episodeId = store.saveEpisode({
-      sessionId, askedAt: now.getTime(), tz, question: message, answer, sources: citedSources,
-      execution: { time, intent: prompt.policy.intent, prompt: prompt.stats, evidence: { ...evidence.stats }, searches, modelCalls,
+      sessionId, ownerId: input.ownerId, turnId: input.turnId, quality, createdAt: Date.parse(time.receivedAt),
+      askedAt: now.getTime(), tz, question: message, answer, sources: citedSources,
+      execution: { time, quality, rejectionObserved, intent: prompt.policy.intent, prompt: prompt.stats, evidence: { ...evidence.stats }, searches, modelCalls,
+        ...(review ? { review: { kind: reviewKind, status: review.status, reason: review.reason ?? (reviewAttempts.length ? null : "no_usable_evidence"),
+          calls: reviewCalls, ms: reviewMs, attempts: reviewAttempts } } : {}),
         ...(input.clarification ? { clarification: input.clarification } : {}),
         ...(simulated ? { simulation: { mode: "era", research: "live-web", review: corrected ? "corrected" : review?.status ?? "not-required", revisionCount, reviewMs, reviewCalls } } : {}) },
     });
 
+    recordStage("commit", performance.now() - commitBegan);
+    // Buffered factual prose is published only after the episode/evidence/turn transaction commits.
+    if (buffered) {
+      emit({ type: "sources", sources: citedSources });
+      firstTokenMs = elapsed();
+      emit({ type: "text", delta: answer });
+    }
     emit({
       type: "done",
-      episodeId,
+      episodeId, turnId: input.turnId, quality,
       cited,
       timings: { recallMs: Math.round(recalled.ms), firstTokenMs, totalMs: elapsed(), searches, modelCalls,
         ...(review ? { verificationMs: reviewMs, verificationCalls: reviewCalls } : {}) },
@@ -286,13 +365,32 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
     const priorClaims = [...recalled.refs.flatMap((r) => r.hits.flatMap((h) => h.episodes)), ...recalled.related].flatMap(
       (e) => e.claims,
     );
-    // Reconstructed simulation prose is retained as conversation, not promoted to verified facts.
-    if (!buffered) deps.enricher.schedule(episodeId, { question: message, answer, sources: citedSources, priorClaims });
+
+    // Required work is already in the transactional outbox; scheduling is only a best-effort wakeup.
+    if (!simulated) {
+      try { deps.enricher.schedule(episodeId, { question: message, answer, sources: citedSources, priorClaims }, input.ownerId); }
+      catch { recordStage("enrichment_wakeup", 0, { outcome: "deferred" }); }
+    }
   } catch (error) {
     if (input.signal?.aborted) return;
-    emit({ type: "error", message: buffered
-      ? "The answer was interrupted. Please try again." : errorMessage(error) });
+    const code = deadline.aborted ? "turn_timeout" : error instanceof ModelError ? `model_${error.code}`
+      : error instanceof AdmissionError ? `admission_${error.code}` : "turn_failed";
+    emit({ type: "error", code, message: buffered || !(error instanceof ModelError || error instanceof AdmissionError)
+      ? "The answer was interrupted. Please try again." : error.message });
   }
+}
+
+const UNVERIFIED_ANSWER = "I couldn't verify the requested facts from the available evidence. The check remains unresolved.";
+
+async function abortable<T>(operation: Promise<T>, parent: AbortSignal, timeoutMs: number): Promise<T> {
+  const signal = AbortSignal.any([parent, AbortSignal.timeout(timeoutMs)]);
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => reject(signal.reason);
+    signal.addEventListener("abort", abort, { once: true });
+    operation.then(value => { signal.removeEventListener("abort", abort); resolve(value); },
+      error => { signal.removeEventListener("abort", abort); reject(error); });
+    if (signal.aborted) abort();
+  });
 }
 
 const errorMessage = (error: unknown) => (error instanceof Error ? error.message : String(error));
@@ -322,12 +420,12 @@ function parseSearchCall(call: ToolCall): SearchQuery | string {
     return normalizeQuery({
       query: args.query as string, publishedAfter: args.published_after as string | undefined,
       domains: args.domains as string[] | undefined, urls: args.urls as string[] | undefined,
-      freshness: args.freshness as SearchQuery["freshness"],
+      freshness: args.freshness as SearchQuery["freshness"], content: args.content as SearchQuery["content"],
+      profile: args.profile as SearchQuery["profile"],
     });
   } catch (error) { return `Invalid arguments: ${errorMessage(error)}`; }
 }
 
-/** What the interface shows while the model is starting: which dates were understood and what was found. */
 function recallNotes(result: RecallResult): string[] {
   const count = (n: number) => `${n} conversation${n === 1 ? "" : "s"}`;
   const notes = result.refs.map((ref) => {

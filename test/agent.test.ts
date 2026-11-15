@@ -19,7 +19,6 @@ const searchCall = (id: string, args: Record<string, unknown>): ToolCall => ({
 
 type Step = { text?: string; toolCalls?: ToolCall[] };
 
-/** A model that replays scripted turns and records what it was sent. */
 function scriptedLlm(steps: Step[], enrichment: unknown = { summary: "s", topics: [], claims: [] }) {
   const requests: StreamRequest[] = [];
   const jsonPrompts: string[] = [];
@@ -44,7 +43,7 @@ function harness(llm: Llm, search: SearchProvider, clock: Clock, store = new Mem
   const events: AgentEvent[] = [];
   const ask = async (message: string, sessionId = "s1") => {
     events.length = 0;
-    // Scripted orchestration tests use a positive editorial review; adversarial reviews are separate.
+
     const verifier = { json: async () => ({ status: "approved", issues: [] }) };
     await runTurn({ llm, search, store, clock, enricher, verifier }, { sessionId, message, tz: TZ }, (e) => events.push(e));
     await enricher.idle();
@@ -82,7 +81,7 @@ test("searches in one round run in parallel and share one numbering", async () =
     async search(query) {
       started.push(query);
       if (started.length === 2) release();
-      await bothStarted; // would hang here if the searches ran one after another
+      await bothStarted;
       const host = query.query.split(" ")[0];
       return [{ url: `https://${host}.com/pricing`, title: `${host} pricing`, text: "plans", publishedDate: "2026-11-05" }];
     },
@@ -122,7 +121,7 @@ test("a failed search is reported to the model instead of failing the turn", asy
   const events = await ask("q");
   assert.ok(events.some((e) => e.type === "search" && e.state === "failed"));
   assert.ok(events.some((e) => e.type === "done"));
-  assert.match(requests[1]!.messages.at(-1)!.content as string, /Search failed \(timeout\)/);
+  assert.match(requests[1]!.messages.at(-1)!.content as string, /Search failed\./);
 });
 
 test("after the allowed search rounds the model is made to answer", async () => {
@@ -139,7 +138,7 @@ test("a model error surfaces as an error event and nothing is stored", async () 
   const llm: Llm = { stream: async () => Promise.reject(new Error("401 bad key")), json: async () => ({}) };
   const { ask, store } = harness(llm, { search: async () => [] }, fixedClock("2026-11-11T10:00:00+05:30"));
   const events = await ask("q");
-  assert.deepEqual(events.at(-1), { type: "error", message: "401 bad key" });
+  assert.deepEqual(events.at(-1), { type: "error", code: "turn_failed", message: "The answer was interrupted. Please try again." });
   assert.equal(store.count(), 0);
 });
 
@@ -149,7 +148,6 @@ test("a week later: the old claim is recalled, re-checked, and the new claim lin
     search: async () => [{ url: "https://neon.com/pricing", title: "Neon pricing", text: "Launch $25/month" }],
   };
 
-  // Tuesday 3 November: the original answer, whose claim the memory step records.
   const first = scriptedLlm(
     [{ toolCalls: [searchCall("a", { query: "neon pricing" })] }, { text: "Neon Launch is $19/month [1]." }],
     {
@@ -162,7 +160,6 @@ test("a week later: the old claim is recalled, re-checked, and the new claim lin
   const [original] = store.claimsFor(1);
   assert.equal(original!.sourceUrl, "https://neon.com/pricing");
 
-  // Wednesday 11 November, a new chat.
   const second = scriptedLlm(
     [{ toolCalls: [searchCall("b", { query: "neon launch plan price" })] }, { text: "It changed: $19 → $25 [1]." }],
     {
@@ -176,12 +173,11 @@ test("a week later: the old claim is recalled, re-checked, and the new claim lin
     "new-chat",
   );
 
-  // The model saw the dated conversation and the exact claim to re-check.
   const memory = second.requests[0]!.messages.find(m => m.role === "user" && m.content.startsWith("UNTRUSTED MEMORY RECORDS"))!;
   const context = JSON.parse((memory.content as string).split("\n").slice(1).join("\n")) as string;
   assert.match(context, /"Last Tuesday" → Tue 3 Nov 2026\. \(It could also mean Tue 10 Nov 2026, but there are no conversations then\.\)/);
   assert.match(context, new RegExp(`\\(C${original!.id}\\) Neon · Launch plan price: \\$19/month`));
-  // The memory step was told about the prior claim so it could link to it.
+
   assert.match(second.jsonPrompts[0]!, new RegExp(`id ${original!.id}: Neon · Launch plan price: \\$19/month`));
 
   const [updated] = store.claimsFor(2);
@@ -315,7 +311,10 @@ test("uncertain historical details do not become a capture-access refusal", asyn
   const clock: Clock = { now: () => new Date("2020-11-03T09:00Z"), simulated: true };
   const { ask, store } = harness(llm, { search: async () => [{ url: "https://example.com", title: "Live", text: "$500" }] }, clock);
   await ask("What was the price?");
-  assert.equal(store.episode(1)!.answer, "The exact price at the selected date is uncertain.");
+  assert.ok(store.episode(1)!.answer.endsWith("The exact price at the selected date is uncertain."));
+  assert.match(store.episode(1)!.answer, /Treat the following as unverified/);
+  assert.equal(store.episode(1)!.quality, "explicitly_unverified");
+  assert.doesNotMatch(store.episode(1)!.answer, /Snapshot|preserved evidence|archive access/);
   assert.equal(store.sourcesFor(1).length, 0);
 });
 
@@ -384,7 +383,9 @@ test("simulation web failures do not expose the discontinued capture-access mess
   assert.ok(failed?.type === "search");
   assert.match(failed.message!, /A web lookup could not be completed/);
   assert.doesNotMatch(JSON.stringify(events), /HTTP 403|Snapshot|preserved evidence/);
-  assert.equal(store.episode(1)!.answer, "I could not verify that.");
+  assert.ok(store.episode(1)!.answer.endsWith("I could not verify that."));
+  assert.match(store.episode(1)!.answer, /Treat the following as unverified/);
+  assert.equal(store.episode(1)!.quality, "explicitly_unverified");
   assert.equal(store.sourcesFor(1).length, 0);
   store.close();
 });

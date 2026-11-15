@@ -52,7 +52,7 @@ test("1948 simulation uses live Exa HTTP with modern retrospective passages and 
     assert.equal(payload.sources[0].publishedDate, "2026-01-01");
     return approved;
   } });
-  ui.deps.search = createExaSearch("fixture-key", { fetch: async (url, init) => {
+  ui.deps.search = createExaSearch("fixture-key", { spendPolicy: null, fetch: async (url, init) => {
     calls++;
     assert.equal(String(url), "https://api.exa.ai/search");
     const body = JSON.parse(String(init?.body));
@@ -110,26 +110,29 @@ test("a hindsight draft is corrected once and rejected prose never enters events
   } finally { ui.store.close(); }
 });
 
-test("a repeated revision issue returns the reviewer's useful correction rather than a blanket refusal", async () => {
+test("a repeatedly rejected repair ends as explicit uncertainty and never publishes the rejected drafts", async () => {
   const correction = "India is already independent, since 15 August 1947 [1].";
-  const ui = harness(model([{ toolCalls: [call] }, { text: "India might become independent [1]." }, { text: "India is still waiting [1]." }]).llm,
+  const ui = harness(model([{ toolCalls: [call] }, { text: "REJECTED_FIRST India might become independent [1]." }, { text: "REJECTED_SECOND India is still waiting [1]." }]).llm,
     { json: async () => ({ status: "needs_revision", issues: [{ code: "wrong_perspective", detail: "The event already happened." }], safeAnswer: correction }) });
   try {
     await ui.run();
-    assert.equal(ui.store.episode(1)!.answer, correction);
-    assert.equal((ui.store.episode(1)!.execution!.simulation as { review: string }).review, "corrected");
-    assert.doesNotMatch(JSON.stringify(ui.events), /preserved evidence|Snapshot|HTTP 403/);
+    assert.match(ui.store.episode(1)!.answer, /couldn't verify/);
+    assert.equal(ui.store.episode(1)!.execution!.quality, "explicitly_unverified");
+    assert.equal(ui.store.episode(1)!.execution!.rejectionObserved, true);
+    assert.doesNotMatch(JSON.stringify(ui.events), /REJECTED_FIRST|REJECTED_SECOND/);
   } finally { ui.store.close(); }
 });
 
-test("reviewer outages retain the useful researched draft without claiming it was reviewed", async () => {
+test("reviewer outages disclose that the researched draft remains unverified", async () => {
   const ui = harness(model().llm, { json: async () => { throw new Error("PRIVATE_REVIEW_FAILURE"); } });
   try {
     await ui.run();
-    assert.equal(ui.store.episode(1)!.answer, answer);
+    assert.ok(ui.store.episode(1)!.answer.endsWith(answer));
+    assert.match(ui.store.episode(1)!.answer, /Treat the following as unverified/);
+    assert.equal(ui.store.episode(1)!.execution!.quality, "explicitly_unverified");
     assert.equal((ui.store.episode(1)!.execution!.simulation as { review: string }).review, "unavailable");
     assert.ok(ui.events.some(event => event.type === "verification" && event.state === "unavailable"));
-    assert.doesNotMatch(JSON.stringify(ui.events), /PRIVATE_REVIEW_FAILURE|could not verify|Snapshot/);
+    assert.doesNotMatch(JSON.stringify(ui.events), /PRIVATE_REVIEW_FAILURE|Snapshot/);
   } finally { ui.store.close(); }
 });
 
@@ -140,7 +143,8 @@ test("a web service failure never becomes a Snapshot access error or discards hi
   ui.deps.search = { search: async () => { throw new Error("Exa responded 403. PRIVATE_ERROR"); } };
   try {
     await ui.run();
-    assert.equal(ui.store.episode(1)!.answer, useful);
+    assert.ok(ui.store.episode(1)!.answer.endsWith(useful));
+    assert.match(ui.store.episode(1)!.answer, /Treat the following as unverified/);
     assert.ok(ui.events.some(event => event.type === "search" && event.state === "failed"));
     assert.doesNotMatch(JSON.stringify(ui.events), /PRIVATE_ERROR|403|Snapshot|preserved evidence|access/);
     assert.match(scripted.requests[1]!.messages.at(-1)!.content!, /Give a useful answer/);
@@ -204,7 +208,8 @@ test("selected future dates still use live research and are recorded as simulati
   ui.deps.clock = { now: () => new Date("2080-01-01T00:00:00Z"), simulated: true };
   try {
     await ui.run();
-    assert.equal(ui.store.episode(1)!.answer, scenario);
+    assert.ok(ui.store.episode(1)!.answer.endsWith(scenario));
+    assert.match(ui.store.episode(1)!.answer, /Treat the following as unverified/);
     assert.equal((ui.store.episode(1)!.execution!.simulation as { mode: string }).mode, "era");
   } finally { ui.store.close(); }
 });
@@ -225,6 +230,6 @@ test("generation errors never disclose provider detail in simulation", async () 
   try {
     await ui.run();
     assert.equal(ui.store.count(), 0);
-    assert.deepEqual(ui.events.at(-1), { type: "error", message: "The answer was interrupted. Please try again." });
+    assert.deepEqual(ui.events.at(-1), { type: "error", code: "turn_failed", message: "The answer was interrupted. Please try again." });
   } finally { ui.store.close(); }
 });

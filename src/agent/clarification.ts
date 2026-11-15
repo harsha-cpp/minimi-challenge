@@ -25,7 +25,6 @@ export interface ClarificationPort {
   create(input: { sessionId: string; message: string; time: TurnTime; question: ClarificationQuestion }): ClarificationCard;
 }
 
-/** An opportunity to ask, never a random quota or a mandatory planner request. */
 export function canClarify(message: string, simulated: boolean): boolean {
   const policy = turnPolicy(message, simulated);
   if (!["lookup", "verify"].includes(policy.intent)) return false;

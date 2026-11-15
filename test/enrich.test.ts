@@ -24,7 +24,7 @@ test("background extraction concurrency is bounded without blocking raw episode 
   } };
   const enricher = new Enricher(llm, store);
   for (let i = 0; i < 4; i++) {
-    const id = store.saveEpisode({ sessionId: "s", askedAt: i, tz: "UTC", question: "q", answer: "answer", sources: [] });
+    const id = store.saveEpisode({ sessionId: "s", askedAt: i, tz: "UTC", question: "q", answer: "answer", sources: [{ n: 1, title: "Source", url: "https://example.com" }] });
     enricher.schedule(id, { question: "q", answer: "answer", sources: [{ n: 1, title: "Source", url: "https://example.com" }], priorClaims: [] });
   }
   assert.equal(store.count(), 4);

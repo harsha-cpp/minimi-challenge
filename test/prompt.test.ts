@@ -132,3 +132,13 @@ test("aggregate evidence budget includes metadata and JSON escaping over all rou
   assert.ok(characters <= PROMPT_LIMITS.toolChars);
   assert.equal(characters, window.stats.toolChars);
 });
+
+// These are questions about a remembered preference, rather than external factual lookups.
+test("remembered say/give/select preferences do not inherit external lookup quality", () => {
+  for (const question of ["What database did I say I prefer, and what monthly prototype budget did I give you?", "Which database did I select earlier?", "What budget did I give you?"]) {
+    assert.equal(turnPolicy(question, false).intent, "recall");
+  }
+  assert.equal(turnPolicy("Which database should I select for a new prototype?", false).intent, "lookup");
+  assert.equal(turnPolicy("What budget should I give a new project?", false).intent, "lookup");
+  assert.equal(turnPolicy("What database did I select earlier, and is its price still correct?", false).intent, "verify");
+});

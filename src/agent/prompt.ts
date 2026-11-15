@@ -1,10 +1,5 @@
 import type { ToolDefinition } from "../llm.ts";
 
-/**
- * Fixed text only. Everything that changes per turn is assembled separately,
- * so this prefix stays identical
- * across requests and provider-side prompt caching can reuse it.
- */
 export const SYSTEM_PROMPT = `You are asof, a chat assistant with one tool: web_search. You talk with one person across many days.
 
 # Answering
@@ -80,6 +75,8 @@ export const WEB_SEARCH_TOOL: ToolDefinition = {
           type: "array", maxItems: 5, items: { type: "string" },
           description: "Read these exact public HTTP(S) source URLs through Exa instead of searching. Use for remembered sources or deeper evidence. Omit for discovery searches.",
         },
+        content: { type: "string", enum: ["highlights", "full"], description: "Start with highlights. If a required table/list or qualification is missing, read full text from one or two selected URLs. Full reads remain bounded; cite exact supporting passages." },
+        profile: { type: "string", enum: ["fact", "direct", "verification", "comparison", "complete-list", "historical", "research"], description: "Match retrieval depth to the task. Prefer authoritative sources; escalate only for missing facets or conflicting evidence." },
         freshness: {
           type: "string", enum: ["standard", "fresh"],
           description: "Use fresh to verify current prices, versions, availability, or prior claims. Era simulation also researches the live web; the selected date governs which historical events belong in the answer.",
