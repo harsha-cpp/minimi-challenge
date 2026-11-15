@@ -1,5 +1,6 @@
-// The whole interface: no framework and no build step, so `npm run dev` has nothing to compile.
+
 import { citationTextNodes } from "./citations.js";
+import { readTurn } from "./recovery.js";
 
 const $ = (id) => document.getElementById(id);
 const el = (tag, className, text) => {
@@ -15,13 +16,13 @@ const isMacPlatform = /Mac|iPhone|iPad|iPod/.test(navigator.platform)
 const composeShortcut = isMacPlatform
   ? { label: "⌘E", aria: "Meta+E", title: "Command+E to focus" }
   : { label: "Ctrl+E", aria: "Control+E", title: "Control+E to focus" };
-// Preview storage is local to this origin and never touches the original app.
-function savedSession() { try { return localStorage.getItem("asof.preview.session.v2"); } catch { return null; } }
+
+function savedSession() { try { return sessionStorage.getItem("asof.preview.session.v2"); } catch { return null; } }
 let sessionId = savedSession() || crypto.randomUUID();
-function rememberSession() { try { localStorage.setItem("asof.preview.session.v2", sessionId); } catch {} }
+function rememberSession() { try { sessionStorage.setItem("asof.preview.session.v2", sessionId); } catch {} }
 rememberSession();
 let inFlight = null;
-// The agent's clock can differ from this machine's; keep the difference and tick locally.
+
 let clockOffset = 0;
 let simulated = false;
 let clockSaving = false;
@@ -33,9 +34,9 @@ const dayLabel = (date) => date.toLocaleDateString("en-GB", { weekday: "short", 
 const timeLabel = (date) => date.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
 const seconds = (ms) => (ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)} s`);
 
-// ---- clock ----------------------------------------------------------------
-
+let latestState;
 function applyState(state) {
+  latestState = state;
   clockOffset = new Date(state.now).getTime() - Date.now();
   simulated = state.simulated;
   clarificationsEnabled = Boolean(state.features?.clarifications);
@@ -56,7 +57,6 @@ function drawStamp() {
   stamp.classList.toggle("simulated", simulated);
 }
 
-/** Redraws the stamp on each second of the agent's clock, re-aiming every time so it never drifts or skips. */
 function tick() {
   drawStamp();
   setTimeout(tick, 1000 - ((Date.now() + clockOffset) % 1000));
@@ -72,7 +72,7 @@ async function setClock(now) {
     const response = await fetch("/api/clock", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ now }),
+      body: JSON.stringify({ now, sessionId }),
     });
     const state = await response.json();
     if (!response.ok) throw new Error(state.error || "The date could not be changed. Please try again.");
@@ -94,13 +94,11 @@ function showClockError(message) {
   $("clock-error").hidden = !message;
 }
 
-// The calendar in the clock popover. `picked` is the chosen day; `shown` is the month on screen.
 let picked = new Date();
 let shown = new Date();
 let calendarView = "days";
 let firstYear = 1900;
 
-// setFullYear preserves years below 100, which Date's constructor treats as 1900–1999.
 function calendarDate(year, month, day = 1, hour = 0, minute = 0) {
   const date = new Date(0);
   date.setFullYear(year, month, day);
@@ -120,7 +118,6 @@ function drawCalendar() {
   $("cal-year").textContent = String(year);
   $("cal-year").setAttribute("aria-label", `Choose year, ${year}`);
 
-  // Weeks start on Monday, matching how the agent reads "last week".
   const cells = ["M", "T", "W", "T", "F", "S", "S"].map((letter) => el("span", "", letter));
   const blanks = (calendarDate(year, month).getDay() + 6) % 7;
   for (let i = 0; i < blanks; i++) cells.push(el("span"));
@@ -147,7 +144,7 @@ function choosePeriod(year, month) {
   const next = calendarDate(year, month);
   if (next.getFullYear() < 1 || next.getFullYear() > 9999) return;
   shown = next;
-  // Every navigation path updates the submitted date and clamps to a valid day.
+
   const lastDay = calendarDate(shown.getFullYear(), shown.getMonth() + 1, 0).getDate();
   picked = calendarDate(shown.getFullYear(), shown.getMonth(), Math.min(picked.getDate(), lastDay));
   showClockError("");
@@ -196,13 +193,10 @@ function shiftMonth(by) {
   choosePeriod(shown.getFullYear(), shown.getMonth() + by);
 }
 
-// The time of day in the clock popover, as minutes since midnight. One number
-// means stepping past :55 carries into the next hour with no special cases.
 let pickedMinutes = 0;
 const DAY_MINUTES = 24 * 60;
 const twoDigits = (n) => String(n).padStart(2, "0");
 
-/** `keepTyping` leaves the fields alone while someone is mid-keystroke in one of them. */
 function drawTime(keepTyping = false) {
   const hour = twoDigits(Math.floor(pickedMinutes / 60));
   const minute = twoDigits(pickedMinutes % 60);
@@ -215,7 +209,6 @@ function drawTime(keepTyping = false) {
   }
 }
 
-/** The arrows move an hour, or to the next five-minute mark; `fine` (the arrow keys) moves one minute. */
 function stepTime(unit, direction, fine = false) {
   let next = pickedMinutes + direction * (unit === "hour" ? 60 : 1);
   if (unit === "minute" && !fine) {
@@ -236,17 +229,17 @@ for (const spin of document.querySelectorAll(".spin")) {
     input.value = digits;
     if (!digits) return;
     const value = Math.min(Number(digits), highest);
-    // Out-of-range input is corrected as it is typed: "75" minutes shows as "59" straight away.
+
     if (Number(digits) > highest) input.value = String(highest);
     pickedMinutes = unit === "hour" ? value * 60 + (pickedMinutes % 60) : Math.floor(pickedMinutes / 60) * 60 + value;
     drawTime(true);
-    // The hour is complete after two digits, or after one that cannot begin a longer hour ("7"): move on to minutes.
+
     if (unit === "hour" && (digits.length === 2 || value > 2)) {
       input.value = twoDigits(value);
       $("clock-minute").focus();
     }
   });
-  // Leaving a field pads it: "7" becomes "07".
+
   input.addEventListener("blur", () => drawTime());
   input.addEventListener("keydown", (event) => {
     if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
@@ -257,7 +250,7 @@ for (const spin of document.querySelectorAll(".spin")) {
 
   for (const arrow of spin.querySelectorAll("button")) {
     const step = () => stepTime(unit, Number(arrow.dataset.step));
-    // Press to step once; keep holding to run.
+
     let pressed = false;
     arrow.addEventListener("pointerdown", () => {
       pressed = true;
@@ -269,13 +262,13 @@ for (const spin of document.querySelectorAll(".spin")) {
         clearInterval(repeat);
         arrow.removeEventListener("pointerup", stop);
         arrow.removeEventListener("pointerleave", stop);
-        // Sliding off the arrow cancels the press, so no click will follow to clear the flag.
+
         if (event.type === "pointerleave") pressed = false;
       };
       arrow.addEventListener("pointerup", stop);
       arrow.addEventListener("pointerleave", stop);
     });
-    // A click that no press already handled is the keyboard (Enter or Space on the focused arrow).
+
     arrow.addEventListener("click", () => {
       if (!pressed) step();
       pressed = false;
@@ -335,8 +328,6 @@ $("clock").addEventListener("submit", (event) => {
   setClock(target.toISOString());
 });
 $("clock-reset").addEventListener("click", () => setClock(null));
-
-// ---- reading, evidence and saved conversations ----------------------------
 
 const emptyTemplate = $("empty").cloneNode(true);
 const entries = [];
@@ -565,6 +556,7 @@ function showClarification(view, card) {
 }
 function submitClarification(view, selection) {
   if (inFlight) return;
+  view.idempotencyKey = null; view.turnId = null; view.turnStatus = null; view.requestBody = null;
   view.awaitingClarification = false; view.submittedSelection = selection; pendingView = null;
   const option = "optionId" in selection ? view.card.options.find(option => option.id === selection.optionId) : null;
   const answer = { answer: option ? `${option.label}: ${option.detail}` : "text" in selection ? selection.text : "Use your best judgment and state reasonable assumptions.", skipped: Boolean(selection.skip) };
@@ -580,35 +572,86 @@ function showActions(view, failed = false) {
   }));
   view.actions.append(buttonAction("Edit question", () => { $("input").value = view.question; $("compose-context").textContent = "Editing an earlier question · sends as a new entry"; $("compose-context").hidden = false; fitInput(); $("input").focus(); }));
   view.actions.append(buttonAction(failed ? "Retry question ↗" : "Ask again", () => { if (inFlight) return notify("Finish or stop the current answer first.");
+    if (failed && view.turnId && !["failed", "interrupted", "missing"].includes(view.turnStatus)) return checkSaved(view).catch(error => notify(error.message));
+    if (failed && ["failed", "interrupted"].includes(view.turnStatus)) { view.idempotencyKey = null; view.turnId = null; view.requestBody = null; }
+    if (failed && view.clarificationExpired) return send(view.question);
     if (failed && view.clarificationId && view.submittedSelection) return send(view.question, { view, clarification: { id: view.clarificationId, selection: view.submittedSelection } });
-    send(view.question); }));
+    send(view.question, failed ? { view } : {}); }));
   if (!failed && view.isEra) view.actions.append(buttonAction("Re-check now ↗", () => recheck(view.question, view.at)));
 }
 function completeEntry(view, timings, cited) {
-  view.cited = cited;
+  view.cited = cited; view.turnStatus = "completed"; clearPendingTurn(view);
   view.steps.hidden = true;
   paintView(view);
   const sources = view.dataSources.filter(source => cited.includes(source.n));
   renderSources(view.sources, sources, { at: view.at, episodeId: view.episodeId });
-  view.status.textContent = `${sources.length} source${sources.length === 1 ? "" : "s"}${timings?.totalMs != null ? ` · ${seconds(timings.totalMs)}` : ""} · Saved to Ledger`;
+  view.status.textContent = `${sources.length} source${sources.length === 1 ? "" : "s"}${timings?.totalMs != null ? ` · ${seconds(timings.totalMs)}` : ""} · Saved to Ledger${view.quality === "explicitly_unverified" ? " · Unverified" : view.quality === "supported_partial" ? " · Partially supported" : ""}`;
   view.status.classList.add("is-complete");
   showActions(view);
 }
 
+function rememberPendingTurn(view) {
+  try { sessionStorage.setItem("asof.pending.turn", JSON.stringify({ sessionId: view.requestBody?.sessionId ?? sessionId, requestBody: view.requestBody, turnId: view.turnId, question: view.question, at: view.at, isEra: view.isEra, idempotencyKey: view.idempotencyKey })); } catch {}
+}
+function clearPendingTurn(view) {
+  try { const saved = JSON.parse(sessionStorage.getItem("asof.pending.turn") || "null"); if (saved && (view.idempotencyKey && saved.idempotencyKey === view.idempotencyKey || view.turnId && saved.turnId === view.turnId)) sessionStorage.removeItem("asof.pending.turn"); } catch {}
+}
+async function checkSaved(view, signal) {
+  const result = await readTurn(view.turnId ?? { idempotencyKey: view.idempotencyKey }, fetch, signal);
+  if (!result.turn) {
+    view.turnStatus = "missing"; view.steps.hidden = true;
+    view.status.textContent = "No saved answer was found. Retry will use the same request key.";
+    view.answer.replaceChildren(el("p", "failure", view.status.textContent)); showActions(view, true); return;
+  }
+  view.turnId = result.turn.id; rememberPendingTurn(view);
+  view.turnStatus = result.turn.status;
+  view.steps.hidden = true;
+  if (result.turn.status === "completed") {
+    const existing = entries.find(item => item !== view && item.episodeId === result.episode.id);
+    if (existing) { view.entry.remove(); entries.splice(entries.indexOf(view), 1); clearPendingTurn(view); return; }
+    view.episodeId = result.episode.id; view.text = result.episode.answer; view.quality = result.episode.quality;
+    view.dataSources = result.sources ?? []; paintView(view); completeEntry(view, null, view.dataSources.map(source => source.n)); return;
+  }
+  if (result.turn.status === "running") {
+    view.status.textContent = "Your answer is still running. Check its saved status below.";
+    view.actions.replaceChildren(buttonAction("Check saved answer ↗", () => checkSaved(view).catch(error => notify(error.message)))); view.actions.hidden = false; return;
+  }
+  clearPendingTurn(view);
+  view.status.textContent = "This attempt ended before an answer was saved. You can retry your question.";
+  view.answer.replaceChildren(el("p", "failure", view.status.textContent)); showActions(view, true);
+}
+async function restorePendingTurn() {
+  let saved; try { saved = JSON.parse(sessionStorage.getItem("asof.pending.turn") || "null"); } catch { return; }
+  if (!saved || saved.sessionId !== sessionId) return;
+  const view = addEntry(saved.question, { at: saved.at, simulated: saved.isEra, restored: true });
+  view.turnId = saved.turnId; view.idempotencyKey = saved.idempotencyKey; view.requestBody = saved.requestBody;
+  try { await checkSaved(view); } catch (error) { view.status.textContent = error.message; view.turnStatus = "running"; showActions(view, true); }
+}
 async function send(message, options = {}) {
   if (inFlight || !message.trim()) return;
   const view = options.view ?? addEntry(message.trim());
-  view.text = ""; view.answer.replaceChildren(); view.actions.hidden = true;
+  view.text = ""; view.dataSources = []; view.answer.replaceChildren(); view.actions.hidden = true;
   view.details.hidden = false;
   view.status.classList.remove("is-complete", "is-interrupted");
+  const requestStarted = performance.now();
+  const noteRender = () => {
+    if (!view.text || view.firstRenderMs != null) return; view.firstRenderMs = Math.round(performance.now() - requestStarted);
+    if (view.turnId) fetch(`/api/turns/${encodeURIComponent(view.turnId)}/render`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ firstRenderMs: view.firstRenderMs }) }).catch(() => {});
+  };
+  view.firstRenderMs = null;
   const abort = new AbortController(); inFlight = abort; setBusy(true);
-  const asOf = view.isEra ? view.at : undefined;
+  const asOf = view.isEra ? new Date(view.at).toISOString() : undefined;
+  view.idempotencyKey ??= crypto.randomUUID();
+  view.requestBody ??= { sessionId, message: message.trim(), tz, mode: view.isEra ? "era" : "live", asOf,
+    ...(options.clarification ? { clarification: options.clarification } : {}) };
+  rememberPendingTurn(view);
   $("compose-context").hidden = true;
-  let frame = 0, completed = false;
+  let frame = 0, completed = false, reader;
   const searches = new Map(); let reviewLine;
   stage(view, 0, "Finding the sources behind your answer…");
   const handle = event => {
-    if (event.type === "clarification") showClarification(view, event.card);
+    if (event.type === "turn") { view.turnId = event.turnId; view.turnStatus = "running"; rememberPendingTurn(view); }
+    else if (event.type === "clarification") { clearPendingTurn(view); showClarification(view, event.card); }
     else if (event.type === "recall") for (const note of event.notes) traceLine(view.trace, "memory", note);
     else if (event.type === "search") {
       const line = searches.get(event.id) ?? traceLine(view.trace, "search", event.query); searches.set(event.id, line); line.className = event.state;
@@ -621,40 +664,52 @@ async function send(message, options = {}) {
     } else if (event.type === "sources") view.dataSources = event.sources;
     else if (event.type === "text") {
       stage(view, 2, "Preparing your answer…"); view.text += event.delta;
-      frame ||= requestAnimationFrame(() => { frame = 0; paintView(view); });
+      frame ||= requestAnimationFrame(() => { frame = 0; paintView(view); noteRender(); });
     } else if (event.type === "retract") { view.text = ""; paintView(view); }
     else if (event.type === "done") {
-      completed = true; view.episodeId = event.episodeId;
+      completed = true; view.episodeId = event.episodeId; view.quality = event.quality; view.turnId = event.turnId ?? view.turnId;
       view.timings.textContent = `Recall ${seconds(event.timings.recallMs)} · ${event.timings.searches} searches · ${event.timings.modelCalls} model calls${event.timings.verificationMs ? ` · review ${seconds(event.timings.verificationMs)}` : ""} · total ${seconds(event.timings.totalMs)}`;
       completeEntry(view, event.timings, event.cited);
     } else if (event.type === "error") throw new Error(displayError(event.message));
   };
   try {
-    const response = await fetch("/api/chat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sessionId, message: message.trim(), tz, asOf, ...(options.clarification ? { clarification: options.clarification } : {}) }), signal: abort.signal });
+    const response = await fetch("/api/chat", { method: "POST", headers: { "content-type": "application/json", "idempotency-key": view.idempotencyKey }, body: JSON.stringify(view.requestBody), signal: abort.signal });
+    const durableId = response.headers.get("x-turn-id");
+    if (durableId) { view.turnId = durableId; view.turnStatus = "running"; rememberPendingTurn(view); }
+    if (response.status === 202) {
+      await checkSaved(view, abort.signal); completed = view.turnStatus === "completed"; return;
+    }
     if (!response.ok) {
       const failure = await response.json();
       if (failure.code === "clarification_unavailable") {
-        view.clarificationId = null; view.submittedSelection = null;
+        view.clarificationId = null; view.submittedSelection = null; view.clarificationExpired = true;
         view.clarification.replaceChildren();
       }
       throw new Error(failure.error ?? "The request could not be completed.");
     }
-    const reader = response.body.pipeThrough(new TextDecoderStream()).getReader(); let buffer = "";
+    reader = response.body.pipeThrough(new TextDecoderStream()).getReader(); let buffer = "";
     for (;;) {
       const { value, done } = await reader.read(); if (done) break; buffer += value;
+      if (buffer.length > 262_144) throw new Error("The answer stream exceeded its buffer limit. Check the saved answer.");
       const batches = buffer.split("\n\n"); buffer = batches.pop();
       for (const raw of batches) if (raw.startsWith("data: ")) handle(JSON.parse(raw.slice(6)));
     }
     if (!completed && !view.awaitingClarification && !abort.signal.aborted) throw new Error("The connection ended before the answer was saved. You can retry your question.");
   } catch (error) {
-    cancelAnimationFrame(frame); frame = 0; view.steps.hidden = true;
+    cancelAnimationFrame(frame); frame = 0;
+    if (view.turnId || view.idempotencyKey) {
+      if (view.turnId && abort.signal.aborted) { try { await fetch(`/api/turns/${encodeURIComponent(view.turnId)}`, { method: "POST" }); } catch {} }
+      try { await checkSaved(view); if (view.turnStatus === "completed") { completed = true; return; } if (["running", "missing", "failed", "interrupted"].includes(view.turnStatus)) return; } catch {}
+    }
+    view.steps.hidden = true;
     view.status.classList.remove("is-complete"); view.status.classList.add("is-interrupted");
     view.status.textContent = abort.signal.aborted ? "Stopped. You can edit or retry your question." : "The answer was interrupted. Your question is still here.";
     if (!abort.signal.aborted) view.answer.replaceChildren(el("p", "failure", displayError(error.message)));
     showActions(view, true);
   } finally {
+    await reader?.cancel().catch(() => {});
     cancelAnimationFrame(frame);
-    if (completed) paintView(view);
+    if (completed) { paintView(view); requestAnimationFrame(noteRender); }
     if (inFlight === abort) { inFlight = null; setBusy(false);
       if (view.awaitingClarification) view.clarification.querySelector("h3")?.focus({ preventScroll: true });
     }
@@ -699,13 +754,14 @@ async function recheck(question, at) {
 async function restoreSession(id, scroll = false) {
   const response = await fetch(`/api/sessions/${encodeURIComponent(id)}`);
   if (!response.ok) throw new Error("This saved conversation could not be loaded.");
-  const { episodes } = await response.json();
+  const { episodes, conversation } = await response.json();
+  if (conversation) applyState({ ...latestState, now: new Date(conversation.viewpointAt ?? Date.now()).toISOString(), simulated: conversation.viewpointAt !== null });
   if (!episodes.length) return false;
   resetThread(); sessionId = id; rememberSession();
   for (const item of episodes) {
     const { episode, sources } = item;
     const view = addEntry(episode.question, { at: episode.askedAt, simulated: Boolean(episode.execution?.time?.simulated ?? episode.execution?.simulation), episodeId: episode.id, restored: true });
-    view.text = episode.answer; view.dataSources = sources;
+    view.text = episode.answer; view.dataSources = sources; view.quality = episode.quality;
     if (episode.execution?.clarification) choiceSummary(view, episode.execution.clarification);
     completeEntry(view, null, sources.map(source => source.n));
     view.details.hidden = true;
@@ -749,8 +805,16 @@ function drawLedger() {
 }
 async function openLedger() {
   showDialog($("ledger")); $("ledger-body").replaceChildren(el("p", "ledger-empty", "Opening your record…"));
-  try { const response = await fetch("/api/memory"); if (!response.ok) throw new Error(); ({ episodes: ledgerEpisodes } = await response.json()); drawLedger(); }
+  try { const response = await fetch("/api/memory"); if (!response.ok) throw new Error(); const page = await response.json(); ledgerEpisodes = page.episodes; drawLedger(); addLedgerPage(page.nextCursor); }
   catch { $("ledger-body").replaceChildren(el("p", "ledger-empty", "The Ledger could not be loaded. Close it and try again.")); }
+}
+function addLedgerPage(cursor) {
+  if (!cursor) return;
+  const more = buttonAction("Load more entries", async () => {
+    more.disabled = true;
+    try { const response = await fetch(`/api/memory?cursor=${cursor}`); if (!response.ok) throw new Error(); const page = await response.json(); ledgerEpisodes.push(...page.episodes); drawLedger(); addLedgerPage(page.nextCursor); }
+    catch { more.disabled = false; notify("More entries could not be loaded."); }
+  }); $("ledger-body").append(more);
 }
 $("open-ledger").addEventListener("click", openLedger);
 $("close-ledger").addEventListener("click", () => closeDialog($("ledger")));
@@ -800,6 +864,6 @@ document.addEventListener("keydown", event => {
 document.addEventListener("pointerdown", event => { if (!$("clock").hidden && !event.target.closest("#clock, #stamp, #composer-era-bar")) toggleClock(false); });
 
 paintComposeShortcut();
-applyState(await (await fetch("/api/state")).json());
-try { await restoreSession(sessionId); await restorePending(sessionId); } catch { notify("Saved conversation could not be restored. Your Ledger is still available."); }
+applyState(await (await fetch(`/api/state?sessionId=${encodeURIComponent(sessionId)}`)).json());
+try { await restoreSession(sessionId); await restorePending(sessionId); await restorePendingTurn(); } catch { notify("Saved conversation could not be restored. Your Ledger is still available."); }
 setBusy(false); tick();
