@@ -386,6 +386,11 @@ function sourceHref(source) {
   try { const url = new URL(value); return /^(https?|http):$/.test(url.protocol) ? url.href : "#"; } catch { return "#"; }
 }
 function displayAnswer(text) {
+  // Presentation compatibility only: leave the saved record and fact-specific uncertainty intact.
+  const legacyPreface = "I could not verify this answer against the available evidence. Treat the following as unverified.";
+  for (const separator of ["\n\n", "\r\n\r\n"]) {
+    if (text.startsWith(legacyPreface + separator)) { text = text.slice(legacyPreface.length + separator.length); break; }
+  }
   return /^\s*I could not verify this as of \S+\.[\s\S]*(?:Exa Snapshot|preserved evidence|cited historical evidence|fully verified answer)/i.test(text)
     ? "This older answer used a retired simulation mode. Re-check it to research this date again." : text;
 }
@@ -567,7 +572,7 @@ function showActions(view, failed = false) {
   view.actions.replaceChildren(); view.actions.hidden = false;
   if (!failed) view.actions.append(buttonAction("Copy answer", async () => {
     const citations = view.dataSources.filter(source => view.cited?.includes(source.n)).map(source => `[${source.n}] ${source.title} — ${sourceHref(source)}`).join("\n");
-    try { await navigator.clipboard.writeText(`${view.text}${citations ? `\n\nSources\n${citations}` : ""}`); notify("Answer and source links copied."); }
+    try { await navigator.clipboard.writeText(`${displayAnswer(view.text)}${citations ? `\n\nSources\n${citations}` : ""}`); notify("Answer and source links copied."); }
     catch { notify("Copy is unavailable in this browser. Select the answer text to copy it."); }
   }));
   view.actions.append(buttonAction("Edit question", () => { $("input").value = view.question; $("compose-context").textContent = "Editing an earlier question · sends as a new entry"; $("compose-context").hidden = false; fitInput(); $("input").focus(); }));

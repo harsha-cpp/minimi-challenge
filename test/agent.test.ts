@@ -324,8 +324,7 @@ test("uncertain historical details do not become a capture-access refusal", asyn
   const clock: Clock = { now: () => new Date("2020-11-03T09:00Z"), simulated: true };
   const { ask, store } = harness(llm, { search: async () => [{ url: "https://example.com", title: "Live", text: "$500" }] }, clock);
   await ask("What was the price?");
-  assert.ok(store.episode(1)!.answer.endsWith("The exact price at the selected date is uncertain."));
-  assert.match(store.episode(1)!.answer, /Treat the following as unverified/);
+  assert.equal(store.episode(1)!.answer, "The exact price at the selected date is uncertain.");
   assert.equal(store.episode(1)!.quality, "explicitly_unverified");
   assert.doesNotMatch(store.episode(1)!.answer, /Snapshot|preserved evidence|archive access/);
   assert.equal(store.sourcesFor(1).length, 0);
@@ -396,8 +395,7 @@ test("simulation web failures do not expose the discontinued capture-access mess
   assert.ok(failed?.type === "search");
   assert.match(failed.message!, /A web lookup could not be completed/);
   assert.doesNotMatch(JSON.stringify(events), /HTTP 403|Snapshot|preserved evidence/);
-  assert.ok(store.episode(1)!.answer.endsWith("I could not verify that."));
-  assert.match(store.episode(1)!.answer, /Treat the following as unverified/);
+  assert.equal(store.episode(1)!.answer, "I could not verify that.");
   assert.equal(store.episode(1)!.quality, "explicitly_unverified");
   assert.equal(store.sourcesFor(1).length, 0);
   store.close();

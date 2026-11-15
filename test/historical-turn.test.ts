@@ -123,12 +123,12 @@ test("a repeatedly rejected repair ends as explicit uncertainty and never publis
   } finally { ui.store.close(); }
 });
 
-test("reviewer outages disclose that the researched draft remains unverified", async () => {
+test("reviewer outages retain researched era prose without a generic warning while quality remains unverified", async () => {
   const ui = harness(model().llm, { json: async () => { throw new Error("PRIVATE_REVIEW_FAILURE"); } });
   try {
     await ui.run();
-    assert.ok(ui.store.episode(1)!.answer.endsWith(answer));
-    assert.match(ui.store.episode(1)!.answer, /Treat the following as unverified/);
+    assert.equal(ui.store.episode(1)!.answer, answer);
+    assert.deepEqual(ui.events.filter(event => event.type === "text"), [{ type: "text", delta: answer }]);
     assert.equal(ui.store.episode(1)!.execution!.quality, "explicitly_unverified");
     assert.equal((ui.store.episode(1)!.execution!.simulation as { review: string }).review, "unavailable");
     assert.ok(ui.events.some(event => event.type === "verification" && event.state === "unavailable"));
@@ -143,8 +143,9 @@ test("a web service failure never becomes a Snapshot access error or discards hi
   ui.deps.search = { search: async () => { throw new Error("Exa responded 403. PRIVATE_ERROR"); } };
   try {
     await ui.run();
-    assert.ok(ui.store.episode(1)!.answer.endsWith(useful));
-    assert.match(ui.store.episode(1)!.answer, /Treat the following as unverified/);
+    assert.equal(ui.store.episode(1)!.answer, useful);
+    assert.deepEqual(ui.events.filter(event => event.type === "text"), [{ type: "text", delta: useful }]);
+    assert.equal(ui.store.episode(1)!.quality, "explicitly_unverified");
     assert.ok(ui.events.some(event => event.type === "search" && event.state === "failed"));
     assert.doesNotMatch(JSON.stringify(ui.events), /PRIVATE_ERROR|403|Snapshot|preserved evidence|access/);
     assert.match(scripted.requests[1]!.messages.at(-1)!.content!, /Give a useful answer/);
@@ -233,8 +234,9 @@ test("selected future dates still use live research and are recorded as simulati
   ui.deps.clock = { now: () => new Date("2080-01-01T00:00:00Z"), simulated: true };
   try {
     await ui.run();
-    assert.ok(ui.store.episode(1)!.answer.endsWith(scenario));
-    assert.match(ui.store.episode(1)!.answer, /Treat the following as unverified/);
+    assert.equal(ui.store.episode(1)!.answer, scenario);
+    assert.deepEqual(ui.events.filter(event => event.type === "text"), [{ type: "text", delta: scenario }]);
+    assert.equal(ui.store.episode(1)!.quality, "explicitly_unverified");
     assert.equal((ui.store.episode(1)!.execution!.simulation as { mode: string }).mode, "era");
   } finally { ui.store.close(); }
 });

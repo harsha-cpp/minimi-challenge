@@ -348,15 +348,14 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
         }
         if (review.status === "approved") {
           quality = review.quality ?? (citedNumbers(answer).length ? "supported" : "explicitly_unverified");
-          if (quality === "explicitly_unverified") {
-            // A quality label is not a visible qualification, and an empty claim list cannot bless assertions.
-            answer = requestContext.anchor ? UNVERIFIED_REFERENCE_ANSWER : policy.requireVerificationEvidence ? UNVERIFIED_ANSWER
-              : `I could not verify this answer against the available evidence. Treat the following as unverified.\n\n${answer}`;
+          if (quality === "explicitly_unverified" && (requestContext.anchor || policy.requireVerificationEvidence)) {
+            // Explicit verification cannot bless unchecked assertions with an empty claim list.
+            answer = requestContext.anchor ? UNVERIFIED_REFERENCE_ANSWER : UNVERIFIED_ANSWER;
           }
-        } else if (review.status === "unavailable" && !rejectionObserved) {
-          // Preserve a researched draft only with an explicit disclosure that support was not checked.
-          answer = requestContext.anchor ? UNVERIFIED_REFERENCE_ANSWER
-            : `I could not verify this answer against the available evidence. Treat the following as unverified.\n\n${answer}`;
+        } else if (review.status === "unavailable" && !rejectionObserved
+          && (requestContext.anchor || policy.requireVerificationEvidence)) {
+          // Verification outages remain unresolved; unanchored era drafts keep their own wording and quality state.
+          answer = requestContext.anchor ? UNVERIFIED_REFERENCE_ANSWER : UNVERIFIED_ANSWER;
         }
       }
       if (requestContext.anchor && quality === "supported_partial") {

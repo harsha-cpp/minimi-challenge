@@ -20,11 +20,12 @@ const rejected = (safeAnswer: unknown = null) => ({ status: "needs_revision", is
 ], safeAnswer });
 
 function harness(options: { lookup?: "none" | "empty" | "failed" | "irrelevant"; reviews?: unknown[]; simulated?: boolean;
-  repair?: "error" | "timeout" | string; saveFailure?: boolean; question?: string } = {}) {
+  repair?: "error" | "timeout" | string; saveFailure?: boolean; question?: string; draft?: string } = {}) {
   const store = new MemoryStore(":memory:");
   const events: AgentEvent[] = [];
   let generations = 0, checks = 0, lookups = 0;
-  const drafts = options.lookup === "none" ? [{ text: answer, toolCalls: [] }] : [{ text: "", toolCalls: [call] }, { text: answer, toolCalls: [] }];
+  const draft = options.draft ?? answer;
+  const drafts = options.lookup === "none" ? [{ text: draft, toolCalls: [] }] : [{ text: "", toolCalls: [call] }, { text: draft, toolCalls: [] }];
   const llm: Llm = {
     json: async () => ({}),
     async stream(request) {
@@ -51,7 +52,7 @@ function harness(options: { lookup?: "none" | "empty" | "failed" | "irrelevant";
     return [hit];
   } }, enricher: { schedule() {} }, reviewTimeoutMs: 5, repairTimeoutMs: 5 };
   if (options.saveFailure) store.saveEpisode = () => { throw new Error("disk full"); };
-  const run = () => runTurn(deps, { message: options.question ?? "Verify the current price.", sessionId: "s", tz: "UTC" }, event => {
+  const run = () => runTurn(deps, { message: options.question ?? "Verify the current Acme price.", sessionId: "s", tz: "UTC" }, event => {
     if (event.type === "text") assert.equal(store.count(), 1, "factual prose must already be committed");
     events.push(event);
   });
@@ -94,6 +95,25 @@ test("current verification requires explicit support/applicability checks, then 
     assert.equal(h.counts().checks, 1);
   } finally { h.store.close(); }
 });
+
+for (const unavailable of [new Error("PRIVATE_REVIEW_FAILURE"), "timeout"]) {
+  test(`current verification review ${unavailable instanceof Error ? "outage" : "timeout"} cannot publish an unchecked Verified draft`, async () => {
+    const h = harness({ reviews: [unavailable], draft: "Verified: the current price is $25 monthly [1]." });
+    const keepAlive = setTimeout(() => {}, 100);
+    try {
+      await h.run();
+      const saved = h.store.episode(1)!;
+      assert.equal(saved.quality, "explicitly_unverified");
+      assert.match(saved.answer, /couldn't verify/);
+      assert.doesNotMatch(saved.answer, /Verified:|\$25|Treat the following as unverified/);
+      const prose = h.events.filter(event => event.type === "text").map(event => event.delta).join("");
+      assert.equal(prose, saved.answer);
+      assert.doesNotMatch(prose, /I could not verify this answer against the available evidence/);
+      assert.deepEqual(h.counts(), { generations: 2, checks: 1, lookups: 1 });
+      assert.ok(h.events.some(event => event.type === "done" && event.quality === "explicitly_unverified"));
+    } finally { clearTimeout(keepAlive); h.store.close(); }
+  });
+}
 
 for (const malformed of [{ status: "approved", issues: [] }, { ...approved, claimChecks: [] },
   { ...approved, claimChecks: [{ claim: "Price is $25", sourceNumbers: [1], supported: false, applicable: true }] },

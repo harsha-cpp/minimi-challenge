@@ -355,6 +355,55 @@ test("preview restores a saved conversation after reload and new chat starts a s
   } finally { ui.dom.window.close(); }
 });
 
+test("restored legacy answers omit only the leading generic preface from presentation and copied text", async () => {
+  const preface = "I could not verify this answer against the available evidence. Treat the following as unverified.";
+  const answer = "The route opened in 1947 [1]. Its exact 1948 fare remains uncertain.";
+  for (const separator of ["\n\n", "\r\n\r\n"]) {
+    const saved = Object.freeze({ id: 18, sessionId: "legacy-preface", askedAt: Date.parse("1948-01-14T12:00:00Z"),
+      question: "Tell me about the route in 1948", answer: `${preface}${separator}${answer}`,
+      quality: "explicitly_unverified", sources: [{ n: 1, title: "Route history", url: "https://example.com/route" }] });
+    const ui = await mount({ savedSession: saved.sessionId, memoryEpisodes: [saved] });
+    const copies: string[] = [];
+    Object.defineProperty(ui.window.navigator, "clipboard", { value: { writeText: async (text: string) => { copies.push(text); } } });
+    try {
+      const visible = ui.window.document.querySelector(".answer")!.textContent!;
+      assert.equal(visible.includes(preface), false);
+      assert.match(visible, /The route opened in 1947 \[1\]\. Its exact 1948 fare remains uncertain\./);
+      assert.match(ui.window.document.querySelector(".answer-status")!.textContent!, /Unverified/);
+      [...ui.window.document.querySelectorAll<HTMLButtonElement>(".answer-actions button")].find(button => button.textContent === "Copy answer")!.click();
+      await nextTurn();
+      assert.deepEqual(copies, [`${answer}\n\nSources\n[1] Route history — https://example.com/route`]);
+      assert.match(ui.window.document.getElementById("toast")!.textContent!, /Answer and source links copied/);
+      assert.equal(saved.answer, `${preface}${separator}${answer}`, "presentation must not rewrite the saved answer");
+      assert.equal(saved.quality, "explicitly_unverified");
+      assert.equal(ui.chatRequests.length, 0, "restoring and copying must not regenerate the answer");
+    } finally { ui.dom.window.close(); }
+  }
+});
+
+test("legacy preface cleanup preserves quoted text and fact-specific uncertainty", async () => {
+  const preface = "I could not verify this answer against the available evidence. Treat the following as unverified.";
+  for (const answer of [
+    `> ${preface}\n\nThat quoted wording was in the previous answer.`,
+    `The previous answer said:\n\n${preface}\n\nIts claim remains uncertain.`,
+    "I could not verify the exact 1948 railway fare. The opening date is supported.",
+  ]) {
+    const ui = await mount({ savedSession: "preserved-uncertainty", memoryEpisodes: [{ id: 19,
+      sessionId: "preserved-uncertainty", askedAt: Date.parse("1948-01-14T12:00:00Z"), question: "A saved question",
+      answer, quality: "explicitly_unverified", sources: [] }] });
+    const copies: string[] = [];
+    Object.defineProperty(ui.window.navigator, "clipboard", { value: { writeText: async (text: string) => { copies.push(text); } } });
+    try {
+      const visible = ui.window.document.querySelector(".answer")!.textContent!;
+      assert.ok(visible.includes(answer.includes(preface) ? preface : "I could not verify the exact 1948 railway fare."));
+      assert.match(ui.window.document.querySelector(".answer-status")!.textContent!, /Unverified/);
+      [...ui.window.document.querySelectorAll<HTMLButtonElement>(".answer-actions button")].find(button => button.textContent === "Copy answer")!.click();
+      await nextTurn();
+      assert.deepEqual(copies, [answer]);
+    } finally { ui.dom.window.close(); }
+  }
+});
+
 test("citation inspector uses the saved passage and preserves a direct original-source link", async () => {
   const ui = await mount({ savedSession: "evidence-session", memoryEpisodes: [{
     id: 12, sessionId: "evidence-session", askedAt: Date.parse("1948-01-14T12:00:00Z"), question: "Evidence?",
@@ -574,5 +623,52 @@ test("refresh recovers a saved request key without generation and does not dupli
     assert.equal(ui.chatRequests.length, 0); assert.equal(ui.window.document.querySelectorAll("#thread .entry").length, 1);
     assert.ok(ui.turnRequests.includes("/api/turns/by-key/original-key")); assert.equal(ui.window.sessionStorage.getItem("asof.pending.turn"), null);
     assert.match(ui.window.document.querySelector(".answer-status")!.textContent!, /Unverified/);
+  } finally { ui.dom.window.close(); }
+});
+
+test("changing the viewpoint keeps the model conversation and sends its verification follow-up with the same session", async () => {
+  const clockRequests: Array<{ now: string | null; sessionId: string }> = [];
+  const modelAnswer = "We discussed Kimi and Claude coding benchmarks.";
+  const ui = await mount({ savedSession: "model-chat", date: new Date(2026, 10, 15, 14, 2),
+    memoryEpisodes: [{ id: 3, sessionId: "cricket-chat", askedAt: Date.parse("2026-05-15T09:00:00Z"),
+      question: "Verify the IPL winners.", answer: "IPL winners: Rajasthan Royals in 2008." }],
+    post: async body => {
+      clockRequests.push(body as { now: string | null; sessionId: string });
+      return Response.json({ now: body.now, simulated: true, missing: [], model: "test", episodes: 2,
+        features: { clarifications: false } });
+    },
+    chatReplies: [
+      [{ type: "text", delta: modelAnswer }, { type: "done", episodeId: 10, quality: "explicitly_unverified", cited: [],
+        timings: { recallMs: 0, searches: 0, modelCalls: 1, totalMs: 20 } }],
+      [{ type: "text", delta: "The Kimi and Claude claims need applicable evidence." },
+        { type: "done", episodeId: 11, quality: "explicitly_unverified", cited: [],
+          timings: { recallMs: 0, searches: 1, modelCalls: 2, totalMs: 20 } }],
+    ],
+  });
+  try {
+    const input = ui.window.document.getElementById("input") as HTMLTextAreaElement;
+    input.value = "How do Kimi and Claude compare for coding?";
+    ui.button("#send").click(); await flushChat();
+    assert.equal(ui.chatRequests[0]!.mode, "live");
+    ui.open(); ui.choose("month", 4); ui.travel(); await flushChat();
+    assert.equal(clockRequests[0]!.sessionId, "model-chat");
+    assert.match(ui.window.document.querySelector("#thread")!.textContent!, /Kimi and Claude coding benchmarks/);
+    input.value = "verify your claims now";
+    ui.button("#send").click(); await flushChat();
+
+    assert.equal(ui.chatRequests.length, 2);
+    assert.equal(ui.chatRequests[0]!.sessionId, "model-chat");
+    assert.equal(ui.chatRequests[1]!.sessionId, "model-chat");
+    assert.equal(ui.chatRequests[1]!.mode, "era");
+    assert.equal(ui.chatRequests[1]!.message, "verify your claims now");
+    const selected = Date.parse(clockRequests[0]!.now!);
+    const requested = Date.parse(String(ui.chatRequests[1]!.asOf));
+    assert.ok(requested >= selected && requested - selected < 60_000,
+      "the new request uses the selected viewpoint; the display clock may keep advancing within that minute");
+    assert.notEqual(ui.chatKeys[0], ui.chatKeys[1]);
+    assert.equal(ui.window.sessionStorage.getItem("asof.preview.session.v2"), "model-chat");
+    assert.equal(ui.window.document.querySelectorAll("#thread .entry").length, 2);
+    assert.match(ui.window.document.querySelector("#thread")!.textContent!, /Viewpoint changed/i);
+    assert.doesNotMatch(ui.window.document.querySelector("#thread")!.textContent!, /IPL|Rajasthan/);
   } finally { ui.dom.window.close(); }
 });
