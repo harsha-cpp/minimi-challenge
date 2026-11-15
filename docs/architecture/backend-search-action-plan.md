@@ -1,6 +1,6 @@
 # Backend and search improvement plan
 
-Companion to the [15 November 2026 architecture review](backend-search-review-2026-11-15.md). Findings F01–F14 refer to that review. This is proposed work, not a list of shipped capabilities.
+Companion to the [15 November 2026 architecture review](backend-search-review-2026-11-15.md). Findings F01–F14 refer to that review. The engineering implementation and validation status are tracked in the [implementation record](backend-search-implementation.md). The acceptance gates below remain the release contract; proposed empirical targets are not measured results.
 
 ## Objective and sequence
 
@@ -8,36 +8,38 @@ Build an answer engine whose factual support, completion state, latency and cost
 
 The order is **correctness → visibility into performance → workload control and recovery → measured retrieval improvement → release validation**. Begin telemetry early so later decisions have a baseline. Owner isolation moves ahead of every other shared-hosting step if shared deployment is imminent.
 
-Planning assumption: one experienced backend engineer, access to a product decision-maker and part-time human evaluation support. Allow roughly **6–8 weeks**, with substantial uncertainty in labeling and live-provider iteration. Estimates below are engineering days, overlap where indicated, and are not commitments. Calendar speed depends more on testing and labels than on writing the adapters.
+The original calendar estimates are retired. Work follows dependencies and acceptance gates. Implementation has preserved the single-service TypeScript/Exa/SQLite structure and added the contracts below incrementally.
 
-| Stage | Proposed window | Deliverable | Exit gate |
-| --- | --- | --- | --- |
-| A | Week 1 | Correctness contract and minimal traces | Reproduced P1 cases have regression coverage and pass repaired behavior |
-| B | Weeks 2–3 | Workload limits, bounded recall, durable turns/jobs | Overload, disconnect, duplicate and restart drills pass |
-| C | Weeks 3–5 | Evidence allocation and task-specific retrieval experiments | Held-out quality improves within latency/cost constraints |
-| D | Weeks 5–8 | Calibrated evaluation and operational release | Quality, recovery, ownership and workload gates pass |
+| Stage | Deliverable | Exit gate |
+| --- | --- | --- |
+| A | Correctness contract and minimal traces | Reproduced P1 cases have regression coverage and pass repaired behavior |
+| B | Workload limits, bounded recall, durable turns/jobs | Overload, disconnect, duplicate and restart drills pass |
+| C | Evidence allocation and task-specific retrieval experiments | Held-out quality improves within latency/cost constraints |
+| D | Calibrated evaluation and operational release | Quality, recovery, ownership and workload gates pass |
+
+Engineering drills for A/B and operational checks are implemented. C/D empirical quality, calibration and live-workload gates remain explicit prerequisites for release; see the implementation record for their current status.
 
 ## Ordered implementation backlog
 
-| ID | Change and affected modules | Effort | Dependencies | Concrete acceptance |
-| --- | --- | ---: | --- | --- |
-| A1 | Preserve review rejection separately from correction validity; explicit review/outcome states (`agent/simulation`, `agent/run`) — F02 | 1–2d | None | Invalid `[99]`, empty/oversized correction, second-review failure and timeout cannot erase a negative verdict; supported uncertainty remains allowed |
-| A2 | Enforce evidence requirements for verification; separate factual assertions from uncertainty and transformations (`agent/prepare`, `agent/run`) — F01 | 2–3d | A1 | Zero/failed/irrelevant searches cannot yield an unqualified verified answer; cited-but-unsupported claims are rejected or qualified |
-| A3 | Normalize adapter completion and usage contracts; explicit output and tool-argument bounds (`llm`, `llm/responses`) — F04/F05 | 1–2d | None | EOF/length/filter/error cases do not become completed answers; successful paths work in both API modes |
-| A4 | Turn IDs and bounded stage telemetry; count successes, failures, cancellations, usage and missing usage — F12 | 1–2d | A3 for full usage | Every terminal outcome has a trace; logs do not contain raw prompts/keys by default; server emission and client rendering are named separately |
-| B1 | SQL-bounded recall with cutoff-aware candidates; bounded date queries and batched ledger pagination — F03/F13 | 2–3d | None | 100k-record broad-term/date tests avoid unbounded ID binding; future records cannot crowd out eligible records; measure disk-backed p95/event-loop delay |
-| B2 | Turn/model admission, fair bounded queues, output/token/spend caps, deadline reserve and foreground priority — F05 | 2–3d | A3/A4 | A 100-request mock burst stays within limits; rejected work does not hit providers; queued cancellation releases capacity; final synthesis cannot starve |
-| B3 | Durable turn identity, idempotency and completion recovery; EOF/backpressure handling (`server`, `agent/run`, `memory/store`, UI client) — F06 | 2–3d | A4 | Retry after commit returns the same episode; duplicate in-flight key shares/rejects consistently; same key with different input conflicts; slow clients have bounded buffers |
-| B4 | Persist conversation mode/viewpoint, actual creation time and sequence; explicit request time policy — F07 | 1–2d | B3 | Independent tabs/conversations do not alter each other; backward viewpoint does not reorder conversation; concurrent same-session turns have defined sequencing |
-| B5 | Transactional outbox, stable claim identity, bounded answer indexing, worker lease/retry/drain — F11 | 2–3d | B3 | Crash after answer commit resumes work once; retries preserve claim links; simulated answer-only terms are searchable as conversation, not verified facts |
-| C1 | Deduplicate evidence before charging budget; round-level facet packing and reserved follow-up capacity — F08 | 1–2d | A2/A4 | Repeated observations consume only a short reference; later decisive evidence is admitted; source numbers remain stable; total budget stays bounded |
-| C2 | Retrieval profiles, bounded full-text source expansion and structured freshness metadata — F09/F10 | 2–3d | C1/A4 | Complete-list/table cases improve; unsupported mode/filter combinations are rejected before HTTP; primary-source and freshness behavior is observable |
-| C3 | Versioned evaluation data, retrieval/admission/citation traces, calibrated human/automated scoring — F12 | 3–5d plus labeling | A4; start data work in A | Human reference labels are hidden from generation; frozen and live tracks are separate; quality metrics are computed at the correct stage |
-| D1 | Owner-scoped storage/routes/recall and local/hosted request-origin policy — F07 | 2–4d | B4; mandatory before sharing | Cross-owner ledger/detail/recall/turn recovery tests fail access; ownership comes from authenticated context, not submitted session IDs |
-| D2 | CI, migration/restore drills, readiness, shutdown, retention and runtime/dependency policy — F13 | 2–3d | B3/B5 | Fresh install and upgrade pass; restore into a clean instance works; shutdown stops admission and safely recovers leased work |
-| D3 | Quarantine legacy temporal contracts and annotate superseded plans; provider upper-bound contract fix — F14 | 0.5–1d | None | Active path has no accidental archive gate; upper-bound fixture is rejected; test categories and authoritative docs agree |
+| ID | Change and affected modules | Dependencies | Concrete acceptance |
+| --- | --- | --- | --- |
+| A1 | Preserve review rejection separately from correction validity; explicit review/outcome states (`agent/simulation`, `agent/run`) — F02 | None | Invalid `[99]`, empty/oversized correction, second-review failure and timeout cannot erase a negative verdict; supported uncertainty remains allowed |
+| A2 | Enforce evidence requirements for verification; separate factual assertions from uncertainty and transformations (`agent/prepare`, `agent/run`) — F01 | A1 | Zero/failed/irrelevant searches cannot yield an unqualified verified answer; cited-but-unsupported claims are rejected or qualified |
+| A3 | Normalize adapter completion and usage contracts; explicit output and tool-argument bounds (`llm`, `llm/responses`) — F04/F05 | None | EOF/length/filter/error cases do not become completed answers; successful paths work in both API modes |
+| A4 | Turn IDs and bounded stage telemetry; count successes, failures, cancellations, usage and missing usage — F12 | A3 for full usage | Every terminal outcome has a trace; logs do not contain raw prompts/keys by default; server emission and client rendering are named separately |
+| B1 | SQL-bounded recall with cutoff-aware candidates; bounded date queries and batched ledger pagination — F03/F13 | None | 100k-record broad-term/date tests avoid unbounded ID binding; future records cannot crowd out eligible records; measure disk-backed p95/event-loop delay |
+| B2 | Turn/model admission, fair bounded queues, output/token/spend caps, deadline reserve and foreground priority — F05 | A3/A4 | A 100-request mock burst stays within limits; rejected work does not hit providers; queued cancellation releases capacity; final synthesis cannot starve |
+| B3 | Durable turn identity, idempotency and completion recovery; EOF/backpressure handling (`server`, `agent/run`, `memory/store`, UI client) — F06 | A4 | Retry after commit returns the same episode; duplicate in-flight key shares/rejects consistently; same key with different input conflicts; slow clients have bounded buffers |
+| B4 | Persist conversation mode/viewpoint, actual creation time and sequence; explicit request time policy — F07 | B3 | Independent tabs/conversations do not alter each other; backward viewpoint does not reorder conversation; concurrent same-session turns have defined sequencing |
+| B5 | Transactional outbox, stable claim identity, bounded answer indexing, worker lease/retry/drain — F11 | B3 | Crash after answer commit resumes work once; retries preserve claim links; simulated answer-only terms are searchable as conversation, not verified facts |
+| C1 | Deduplicate evidence before charging budget; round-level facet packing and reserved follow-up capacity — F08 | A2/A4 | Repeated observations consume only a short reference; later decisive evidence is admitted; source numbers remain stable; total budget stays bounded |
+| C2 | Retrieval profiles, bounded full-text source expansion and structured freshness metadata — F09/F10 | C1/A4 | Complete-list/table cases improve; unsupported mode/filter combinations are rejected before HTTP; primary-source and freshness behavior is observable |
+| C3 | Versioned evaluation data, retrieval/admission/citation traces, calibrated human/automated scoring — F12 | A4; start data work in A | Human reference labels are hidden from generation; frozen and live tracks are separate; quality metrics are computed at the correct stage |
+| D1 | Owner-scoped storage/routes/recall and local/hosted request-origin policy — F07 | B4; mandatory before sharing | Cross-owner ledger/detail/recall/turn recovery tests fail access; ownership comes from authenticated context, not submitted session IDs |
+| D2 | CI, migration/restore drills, readiness, shutdown, retention and runtime/dependency policy — F13 | B3/B5 | Fresh install and upgrade pass; restore into a clean instance works; shutdown stops admission and safely recovers leased work |
+| D3 | Quarantine legacy temporal contracts and annotate superseded plans; provider upper-bound contract fix — F14 | None | Active path has no accidental archive gate; upper-bound fixture is rejected; test categories and authoritative docs agree |
 
-The estimates total more than a single short sprint. Do not bundle the entire table into one architectural rewrite. Each row should be a reviewable change with its own validation evidence.
+Each item has its own modules and validation evidence in the implementation record. Completing deterministic engineering checks does not waive held-out quality, human calibration, live-load or deployment recovery gates.
 
 ## Contracts to settle in Stage A
 
@@ -154,6 +156,6 @@ Before deployment, restore a backup into a fresh instance and validate counts, f
 
 Keep one service and local SQLite until measurements justify moving CPU/database work off the event loop or adopting a shared database. Multiple application hosts require coordinated ownership, admission, durable jobs and cache policy as well as shared storage; copying a WAL database to a network filesystem is not that design. [SQLite WAL](https://www.sqlite.org/wal.html).
 
-## First reviewable delivery
+## Implementation and release evidence
 
-Start with A1–A4 and the F03 SQL-bound failure: preserve negative findings, enforce verification evidence policy, reject truncated output, capture stage/usage data, and remove unbounded recall candidates. Include before/after diagnostic outputs and the unchanged ordinary-chat fast path's measurements. The next delivery establishes recovery and workload controls. Retrieval experiments begin once their benefit and cost can be measured.
+The [implementation record](backend-search-implementation.md) maps each backlog item to code, regressions and remaining empirical checks. Use [the evaluation protocol](../evaluation.md) for blinded labels, paired retrieval experiments and release evidence; use [operations](../operations.md) for clean-instance restore and deployment configuration. A passing mock or frozen regression is evidence for the behavior it tests. It cannot establish provider throughput, current factual quality, commercial superiority or a production release pass.

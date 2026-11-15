@@ -1,5 +1,7 @@
 # Backend and web search architecture review — 15 November 2026
 
+> Historical review of the pre-fix implementation. Current repairs and validation are tracked in the [implementation record](backend-search-implementation.md); the reproduced behavior below is not a description of the repaired code.
+
 ## Decision
 
 **Keep the modular monolith and repair its execution and evidence contracts before adding search complexity.** The project has a credible prototype foundation. It is not yet a dependable shared service, and the available measurements do not establish competitive search quality. Its main weaknesses are unenforced grounding, incomplete failure handling, unbounded model admission, and an evaluation system that cannot yet distinguish retrieval failures from synthesis failures.
