@@ -1,0 +1,29 @@
+[Unit]
+Description=asof chat service
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=asof
+Group=asof
+WorkingDirectory=/opt/asof/app
+EnvironmentFile=/etc/asof/identity.conf
+ExecStart=/usr/local/bin/node /opt/asof/app/deploy/azure/start.mjs
+Restart=on-failure
+RestartSec=15
+KillMode=mixed
+TimeoutStopSec=45
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/asof/app/data
+MemoryMax=3G
+TasksMax=256
+
+[Install]
+WantedBy=multi-user.target

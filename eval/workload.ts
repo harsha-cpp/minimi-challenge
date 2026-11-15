@@ -102,8 +102,8 @@ export function parseWorkloadArgs(args: string[]): WorkloadOptions {
     return n;
   };
   const loads = (values.get("--loads") ?? "1,4,8").split(",").map(Number);
-  if (!loads.length || new Set(loads).size !== loads.length || loads.some((n) => ![1, 4, 8].includes(n)))
-    throw new Error("--loads must select distinct values from 1,4,8.");
+  if (!loads.length || new Set(loads).size !== loads.length || loads.some((n) => ![1, 4, 5, 8].includes(n)))
+    throw new Error("--loads must select distinct values from 1,4,5,8.");
   const cache = values.get("--cache") ?? "cold";
   if (cache !== "cold" && cache !== "warm") throw new Error("--cache must be cold or warm.");
   const warmupTurns = integer("--warmup-turns", cache === "warm" ? 8 : 0, 0, 1000);

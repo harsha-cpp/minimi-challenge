@@ -187,6 +187,8 @@ test("workload CLI is dry by default and live/preflight requires both absolute c
   assert.equal(options.live, false);
   assert.equal(options.preflight, false);
   assert.deepEqual(options.loads, [1, 4, 8]);
+  assert.deepEqual(parseWorkloadArgs(["--loads", "5"]).loads, [5]);
+  assert.throws(() => parseWorkloadArgs(["--loads", "5,5"]));
   assert.equal(options.turnsPerLoad, 8);
   assert.equal(plan.offeredTurns, 24);
   assert.equal(plan.labelsSuppliedToGeneration, false);

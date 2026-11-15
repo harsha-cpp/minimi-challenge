@@ -4,6 +4,8 @@
 
 The declared mix contains eight deterministic conversation, supplied-text transformation, conversation recall, lookup, verification and historical-perspective tasks. The database includes a known Project Cedar conversation and bounded synthetic planning records. These are conversation history, not hidden scoring labels. No human reference answers or adjudication labels are sent to generation. This harness measures workload and protocol behavior; answer correctness, citation entailment and completeness require separate evaluation.
 
+The harness also accepts `--loads 5` for a five-user deployment comparison. Defaults remain 1/4/8.
+
 ## Planning and preflight
 
 ```sh
