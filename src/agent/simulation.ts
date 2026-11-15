@@ -136,7 +136,9 @@ export async function reviewSimulationAnswer(input: SimulationReviewInput): Prom
   const finish = (status: SimulationReview["status"], issues: SimulationIssue[] = [], extras: Pick<SimulationReview, "reason" | "safeAnswer" | "quality"> = {}): SimulationReview =>
     ({ status, issues, ...extras, ms: Math.round(performance.now() - started), modelCalls });
   input.signal?.throwIfAborted();
-  const timeoutMs = input.timeoutMs ?? 10_000;
+  // Claim-by-claim current checks can exceed the shorter editorial era review window.
+  // The parent turn deadline still bounds the whole operation.
+  const timeoutMs = input.timeoutMs ?? (input.kind === "verification" || input.reference ? 25_000 : 10_000);
   const researchedAt = input.researchedAt ?? new Date();
   if (!Number.isFinite(input.viewpoint.getTime()) || !Number.isFinite(researchedAt.getTime())
     || !input.question.trim() || !input.answer.trim() || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30_000) {

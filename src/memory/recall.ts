@@ -39,6 +39,8 @@ export interface RecallScope {
   sessionId?: string;
   allowCrossSession?: boolean;
   disabled?: boolean;
+  /** Only explicit personal-memory requests may fall back to recent records without topic terms. */
+  allowRecent?: boolean;
 }
 
 const STOPWORDS = new Set(
@@ -46,7 +48,8 @@ const STOPWORDS = new Set(
    correct could did do does for from had has have how i if in into is it its just know me more most my no not of on
    or our out over question said say since so something still tell than that the their them then there these they
    this to told up us was we were what when whether which who why will with would you your answer answered
-   verify verification verified recheck rechecking confirm confirmed claims claim claimed claiming statements statement assertions assertion now current currently fact facts check checks checked checking`.split(/\s+/),
+   verify verification verified recheck rechecking confirm confirmed claims claim claimed claiming statements statement assertions assertion now current currently fact facts check checks checked checking
+   earlier previously discuss discussed discussion discussions chat chats conversation conversations talk talked`.split(/\s+/),
 );
 
 function topicTerms(message: string, temporal: TemporalRef[]): string[] {
@@ -133,6 +136,10 @@ export function recall(
       .sort((a, b) => coverage.get(b.id)! - coverage.get(a.id)! || b.askedAt - a.askedAt)
       .slice(0, RELATED_LIMIT);
     related = present(episodes);
+  } else if (scope.allowRecent === true && !terms.length && !refs.length) {
+    const recent = sessionId === undefined ? store.recent(RELATED_LIMIT + inChat.size, now.getTime(), ownerId)
+      : store.sessionHistory(sessionId, RELATED_LIMIT + inChat.size, now.getTime(), ownerId);
+    related = present(recent.filter(episode => !inChat.has(episode.id)).slice(0, RELATED_LIMIT));
   }
 
   return { refs, related, ms: performance.now() - started,

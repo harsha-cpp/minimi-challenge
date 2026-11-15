@@ -512,6 +512,24 @@ test("Re-check now returns to the present and sends the dated original question 
     assert.equal(ui.chatRequests.length, 1);
     assert.match(String(ui.chatRequests[0]!.message), /Who leads India.*14 Jan 1948.*current sources/);
     assert.equal(ui.chatRequests[0]!.asOf, undefined);
+    assert.equal(ui.chatRequests[0]!.recheckEpisodeId, 13);
+  } finally { ui.dom.window.close(); }
+});
+
+test("Ledger re-check opens the selected answer's conversation instead of checking the active chat", async () => {
+  const ui = await mount({ savedSession: "active", memoryEpisodes: [{ id: 15, sessionId: "chosen", askedAt: Date.parse("2020-01-01T00:00:00Z"),
+    question: "Selected subject", answer: "Selected answer", sources: [] }], chatEvents: [
+    { type: "text", delta: "An updated answer." },
+    { type: "done", episodeId: 16, cited: [], timings: { recallMs: 0, searches: 1, modelCalls: 2, totalMs: 20 } },
+  ] });
+  try {
+    ui.button("#open-ledger").click(); await nextTurn();
+    [...ui.window.document.querySelectorAll<HTMLButtonElement>(".ledger-entry-actions button")].find(button => button.textContent === "Re-check now")!.click();
+    await nextTurn(); await nextTurn();
+    assert.equal(ui.chatRequests[0]!.sessionId, "chosen");
+    assert.equal(ui.chatRequests[0]!.recheckEpisodeId, 15);
+    assert.equal(ui.chatRequests[0]!.mode, "live");
+    assert.match(String(ui.chatRequests[0]!.message), /Selected subject/);
   } finally { ui.dom.window.close(); }
 });
 

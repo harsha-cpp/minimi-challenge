@@ -197,6 +197,21 @@ test("local Host and Origin policy rejects cross-site reads/writes before storag
   } finally { await app.shutdown(); }
 });
 
+test("re-check IDs are owner/session scoped and are part of the idempotent request", async () => {
+  const access: AccessPolicy = { mode: "hosted", allowedOrigins: ["https://asof.example.com"], ownerTokens: { alice: "a".repeat(40), bob: "b".repeat(40) } };
+  const app = await start(model(), { access });
+  const headers = { host: "asof.example.com", authorization: `Bearer ${access.ownerTokens.alice}` };
+  const add = (ownerId: string, sessionId: string) => app.store.saveEpisode({ ownerId, sessionId, askedAt: Date.now() - 1000, tz: "UTC", question: "Original", answer: "An earlier answer.", sources: [] });
+  try {
+    const first = add("alice", "chat"), second = add("alice", "chat"), foreign = add("bob", "chat"), otherChat = add("alice", "other");
+    const body = { sessionId: "chat", message: "Re-check this answer", mode: "live", tz: "UTC" };
+    for (const id of [foreign, otherChat, 999999]) assert.equal((await app.post("/api/chat", { ...body, recheckEpisodeId: id }, headers)).status, 404);
+    assert.equal((await app.post("/api/chat", { ...body, recheckEpisodeId: 1.5 }, headers)).status, 400);
+    await events(await app.post("/api/chat", { ...body, recheckEpisodeId: first }, { ...headers, "idempotency-key": "selected" }));
+    assert.equal((await app.post("/api/chat", { ...body, recheckEpisodeId: second }, { ...headers, "idempotency-key": "selected" })).status, 409);
+  } finally { await app.shutdown(); }
+});
+
 test("hosted identity is authenticated, owner-scoped on every detail/recall/recovery route", async () => {
   const access: AccessPolicy = { mode: "hosted", allowedOrigins: ["https://asof.example.com"], ownerTokens: { alice: "a".repeat(40), bob: "b".repeat(40) } };
   validateAccessPolicy(access); const app = await start(model(), { access });

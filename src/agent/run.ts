@@ -56,6 +56,7 @@ export interface TurnInput {
 
   asOf?: Date;
   clarification?: ClarificationAnswer;
+  recheckEpisodeId?: number;
 }
 
 export interface Timings {
@@ -105,7 +106,11 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
     const durable = input.turnId ? store.getTurn(input.turnId, input.ownerId) : null;
     if (durable && durable.sessionId !== sessionId) throw new Error("Conversation context does not match this turn.");
     const prior = store.currentConversationHistory(sessionId, HISTORY_TURNS, input.ownerId, durable?.sequence);
-    const requestContext = resolveRequestContext({ message, sessionId, ownerId: input.ownerId, history: prior });
+    const target = input.recheckEpisodeId === undefined ? undefined : store.episode(input.recheckEpisodeId, input.ownerId);
+    if (input.recheckEpisodeId !== undefined && (!target || target.sessionId !== sessionId
+      || (durable && (target.sequence ?? target.id) >= durable.sequence))) throw new Error("The selected answer is unavailable in this conversation.");
+    if (target && !prior.some(episode => episode.id === target.id)) prior.push(target);
+    const requestContext = resolveRequestContext({ message, sessionId, ownerId: input.ownerId, history: prior, ...(target ? { targetEpisode: target } : {}) });
     policy = turnPolicy(message, simulated, requestContext);
     buffered = policy.requireSimulationReview || policy.requireVerificationEvidence;
     const contextMetadata = requestContextMetadata(requestContext);
@@ -133,9 +138,27 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
     }
     const recalled = recall(store, message, now, tz, history.ids, input.ownerId, {
       sessionId, allowCrossSession: crossConversationMemory, disabled: requestContext.memoryScope === "none",
+      allowRecent: requestContext.memoryScope === "explicit_memory",
     });
     recordStage("history_recall", performance.now() - recallStarted);
     emit({ type: "recall", notes: recallNotes(recalled), ms: Math.round(recalled.ms) });
+
+    const matchingRecords = recalled.refs.length
+      ? recalled.refs.flatMap(ref => ref.hits.flatMap(hit => hit.episodes.map(item => item.episode)))
+      : [...prior, ...recalled.related.map(item => item.episode)];
+    if (requestContext.memoryScope === "explicit_memory" && !matchingRecords.some(episode =>
+      episode.answer !== UNVERIFIED_ANSWER && episode.answer !== UNVERIFIED_REFERENCE_ANSWER
+      && episode.execution?.memoryLookup !== "no_match" && (episode.execution?.requestContext as { kind?: string } | undefined)?.kind !== "missing_reference")) {
+      const answer = "I couldn't find a matching earlier discussion in the history available to this browser. If you used another browser or cleared its cookies, that history won't appear here. Paste the earlier answer or tell me the topic, and I can check it using current sources.";
+      const episodeId = store.saveEpisode({ sessionId, ownerId: input.ownerId, turnId: input.turnId,
+        quality: "non_factual", createdAt: Date.parse(time.receivedAt), askedAt: now.getTime(), tz,
+        question: message, answer, sources: [], execution: { time, quality: "non_factual", intent: "recall",
+          requestContext: contextMetadata, memoryLookup: "no_match", searches: 0, modelCalls: 0 } });
+      emit({ type: "text", delta: answer });
+      emit({ type: "done", episodeId, turnId: input.turnId, quality: "non_factual", cited: [],
+        timings: { recallMs: Math.round(recalled.ms), firstTokenMs: elapsed(), totalMs: elapsed(), searches: 0, modelCalls: 0 } });
+      return;
+    }
 
     const cleanMemory: RecallResult = { ...recalled,
       refs: recalled.refs.map(ref => ({ ...ref, hits: ref.hits.map(hit => ({ ...hit,

@@ -595,7 +595,7 @@ function showActions(view, failed = false) {
     if (failed && view.clarificationExpired) return send(view.question);
     if (failed && view.clarificationId && view.submittedSelection) return send(view.question, { view, clarification: { id: view.clarificationId, selection: view.submittedSelection } });
     send(view.question, failed ? { view } : {}); }));
-  if (!failed && view.isEra) view.actions.append(buttonAction("Re-check now ↗", () => recheck(view.question, view.at)));
+  if (!failed && view.isEra) view.actions.append(buttonAction("Re-check now ↗", () => recheck(view.episodeId)));
 }
 function completeEntry(view, timings, cited) {
   view.cited = cited; view.turnStatus = "completed"; clearPendingTurn(view);
@@ -663,6 +663,7 @@ async function send(message, options = {}) {
   const asOf = view.isEra ? new Date(view.at).toISOString() : undefined;
   view.idempotencyKey ??= crypto.randomUUID();
   view.requestBody ??= { sessionId, message: message.trim(), tz, mode: view.isEra ? "era" : "live", asOf,
+    ...(options.recheckEpisodeId ? { recheckEpisodeId: options.recheckEpisodeId } : {}),
     ...(options.clarification ? { clarification: options.clarification } : {}) };
   rememberPendingTurn(view);
   $("compose-context").hidden = true;
@@ -765,11 +766,18 @@ $("new-chat").addEventListener("click", newChat);
 document.querySelector(".wordmark").addEventListener("click", event => { event.preventDefault(); newChat(); });
 $("composer-era").addEventListener("click", () => toggleClock($("clock").hidden));
 for (const id of ["header-now", "composer-now"]) $(id).addEventListener("click", () => setClock(null));
-async function recheck(question, at) {
+async function recheck(episodeId) {
   if (inFlight) return notify("Finish or stop the current answer first.");
-  closeDialog($("ledger"));
-  if (!await setClock(null)) return notify("The date could not be updated. Try again.");
-  send(`Re-check your answer to “${question}” from ${dayLabel(new Date(at))} using current sources. What is still correct, and what has changed?`);
+  try {
+    const response = await fetch(`/api/episodes/${episodeId}`);
+    if (!response.ok) throw new Error("The saved answer could not be loaded. Open its conversation and try again.");
+    const { episode } = await response.json();
+    if (!episode || !Number.isSafeInteger(episode.id)) throw new Error("The saved answer could not be loaded.");
+    if (sessionId !== episode.sessionId && !await restoreSession(episode.sessionId, true)) throw new Error("The saved conversation could not be loaded.");
+    closeDialog($("ledger"));
+    if (!await setClock(null)) return notify("The date could not be updated. Try again.");
+    send(`Re-check your answer to “${episode.question}” from ${dayLabel(new Date(episode.askedAt))} using current sources. What is still correct, and what has changed?`, { recheckEpisodeId: episode.id });
+  } catch (error) { notify(error.message); }
 }
 
 async function restoreSession(id, scroll = false) {
@@ -821,7 +829,7 @@ function drawLedger() {
     item.append(buttonAction(episode.question, () => openConversation(episode), "ledger-question"));
     if (episode.summary) item.append(el("p", "ledger-summary", episode.summary));
     const actions = el("div", "ledger-entry-actions");
-    actions.append(buttonAction("Open conversation ↗", () => openConversation(episode)), buttonAction("Re-check now", () => recheck(episode.question, episode.askedAt))); item.append(actions); body.append(item);
+    actions.append(buttonAction("Open conversation ↗", () => openConversation(episode)), buttonAction("Re-check now", () => recheck(episode.id))); item.append(actions); body.append(item);
   }
 }
 async function openLedger() {

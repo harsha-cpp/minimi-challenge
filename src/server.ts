@@ -132,6 +132,12 @@ export function createApplication(options: { config?: Config; store?: MemoryStor
     let message = typeof body.message === "string" ? body.message.trim() : "";
     if ((!body.clarification && (!message || message.length > 8000)) || !validSession(body.sessionId)) throw new RequestError("Expected a session ID and a message of 1 to 8000 characters.", 400);
     const sessionId = body.sessionId;
+    const recheckEpisodeId = body.recheckEpisodeId;
+    if (recheckEpisodeId !== undefined) {
+      if (!Number.isSafeInteger(recheckEpisodeId) || Number(recheckEpisodeId) < 1 || body.clarification !== undefined) throw new RequestError("Invalid saved answer reference.", 400);
+      const target = store.episode(Number(recheckEpisodeId), ownerId);
+      if (!target || target.sessionId !== sessionId) throw new RequestError("Saved answer not found in this conversation.", 404);
+    }
     let asOf: Date | undefined;
     if (body.asOf !== undefined && body.asOf !== null) {
       const parsed = parseInstant(body.asOf); if (!parsed) throw new RequestError("asOf must be a real ISO timestamp with a timezone.", 400); asOf = parsed;
@@ -172,7 +178,8 @@ export function createApplication(options: { config?: Config; store?: MemoryStor
       const tz = resumed?.card.time.tz ?? validTimeZone(typeof body.tz === "string" ? body.tz : undefined);
       const key = req.headers["idempotency-key"] ?? body.idempotencyKey ?? randomUUID();
       if (typeof key !== "string" || !/^[a-zA-Z0-9_.:-]{1,128}$/.test(key)) throw new RequestError("Invalid idempotency key.", 400);
-      const requestHash = createHash("sha256").update(JSON.stringify({ sessionId, message, tz, mode: effectiveMode, asOf: effectiveViewpoint, clarification: clarification ?? null })).digest("hex");
+      const requestHash = createHash("sha256").update(JSON.stringify({ sessionId, message, tz, mode: effectiveMode, asOf: effectiveViewpoint, clarification: clarification ?? null,
+        ...(recheckEpisodeId !== undefined ? { recheckEpisodeId } : {}) })).digest("hex");
       const begun = store.beginTurn({ ownerId, sessionId, idempotencyKey: key, requestHash, viewpointAt: effectiveViewpoint, mode: effectiveMode });
       turn = begun.turn;
       if (begun.created) requestControllers.set(turn.id, abort);
@@ -203,7 +210,8 @@ export function createApplication(options: { config?: Config; store?: MemoryStor
           const requestDeps: Deps = { ...deps, store, clock: { now: () => new Date(effectiveViewpoint ?? Date.now()), simulated: effectiveMode === "era" },
             questions: questionPort, search: withProfile(deps.search, retrievalProfile(message, { simulated: effectiveMode === "era", verify: policy.requireVerificationEvidence }), config.retrievalProfiles) };
           await runWithModelContext({ ownerId, turnId: turn!.id, budget: budget(), deadlineAt, deadlineReserveMs: Math.min(12_000, Math.floor(config.limits.turnTimeoutMs / 3)) },
-            () => runTurn(requestDeps, { ownerId, turnId: turn!.id, sessionId, message, tz, asOf: effectiveViewpoint === null ? undefined : new Date(effectiveViewpoint), clarification, deadlineAt, signal }, event => {
+            () => runTurn(requestDeps, { ownerId, turnId: turn!.id, sessionId, message, tz, asOf: effectiveViewpoint === null ? undefined : new Date(effectiveViewpoint), clarification,
+              ...(recheckEpisodeId !== undefined ? { recheckEpisodeId: Number(recheckEpisodeId) } : {}), deadlineAt, signal }, event => {
               if (event.type === "text") serverEmission();
               if (event.type === "done") { outcome = "completed"; trace.quality = event.quality; count(`quality_${event.quality}`); if (resumed) questions.finish(resumed.card.id, event.episodeId); }
               if (event.type === "clarification") outcome = "clarification_required";

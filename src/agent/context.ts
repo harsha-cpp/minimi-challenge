@@ -26,6 +26,8 @@ export interface RequestContextInput {
   ownerId?: string;
   /** Actual durable predecessors, not recall matches or records selected by viewpoint date. */
   history: Episode[];
+  /** Explicit UI selection, loaded from the owner-scoped store rather than supplied answer text. */
+  targetEpisode?: Episode;
 }
 
 const object = (value: unknown): Record<string, unknown> | undefined => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
@@ -119,10 +121,17 @@ function anchorFor(episode: Episode, ownerId: string): ConversationAnchor | unde
 }
 
 export function resolveRequestContext(input: RequestContextInput): RequestContext {
+  const ownerId = input.ownerId ?? "local";
+  if (input.targetEpisode) {
+    const target = input.targetEpisode;
+    const anchor = target.sessionId === input.sessionId && (target.ownerId ?? "local") === ownerId
+      && Number.isSafeInteger(target.id) && target.id > 0 ? anchorFor(target, ownerId) : undefined;
+    return anchor ? { kind: "conversation_reference", memoryScope: "none", anchor }
+      : { kind: "missing_reference", memoryScope: "none" };
+  }
   if (explicitPersonalMemory(input.message)) return { kind: "standalone", memoryScope: "explicit_memory" };
   if (!implicitReference(input.message)) return { kind: "standalone", memoryScope: "none" };
   const missing: RequestContext = { kind: "missing_reference", memoryScope: "none" };
-  const ownerId = input.ownerId ?? "local";
   const scoped = input.history.filter(episode => episode.sessionId === input.sessionId && (episode.ownerId ?? "local") === ownerId);
   if (scoped.some(episode => !Number.isSafeInteger(episode.id) || episode.id <= 0 || sequence(episode) === null)) return missing;
   const history = scoped.sort((left, right) => sequence(right)! - sequence(left)!);
