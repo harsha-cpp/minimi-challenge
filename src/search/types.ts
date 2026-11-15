@@ -1,19 +1,25 @@
+export type RetrievalProfile = "fact" | "direct" | "verification" | "comparison" | "complete-list" | "historical" | "research";
+
 export interface SearchQuery {
+  profile?: RetrievalProfile;
+  mode?: "auto" | "lite";
+  content?: "highlights" | "full";
+  locale?: string;
+  policyVersion?: string;
   query: string;
-  /** Publication filter, not evidence of when a page changed. */
+
   publishedAfter?: string;
-  /** URL discovery date filter only; never proof of historical page contents. */
+
   publishedBefore?: string;
   domains?: string[];
-  /** Exact historical cutoff. Never substitute live content for a missing snapshot. */
+
   asOf?: Date;
-  /** Read known sources through Exa Contents. */
+
   urls?: string[];
-  /** Fresh requests bypass the completed-result cache. */
+
   freshness?: "standard" | "fresh";
 }
 
-/** Provenance of an operator-reviewed, immutable historical source version. */
 export interface TemporalProvenance {
   documentId: string;
   availableAt: string;
@@ -21,7 +27,7 @@ export interface TemporalProvenance {
   provenanceKind: "primary-source" | "archive" | "revision";
   provenanceUrl: string;
   reviewed: boolean;
-  /** Archive capture/revision instant, or digitization time for an original primary source. */
+
   capturedAt?: string;
 }
 
@@ -32,14 +38,22 @@ export interface SearchHit {
   text: string;
   provider?: string;
   requestId?: string;
-  /** Real acquisition time, even when the conversation clock is simulated. */
+
   retrievedAt?: string;
-  /** Requested cutoff, not a provider-confirmed capture date. */
+
   snapshotAsOf?: string;
   contentHash?: string;
   method?: "search" | "contents";
+  rank?: number;
+  freshness?: {
+    requested: "standard" | "fresh" | "snapshot" | "index";
+    acquisition: "live" | "cached" | "unknown";
+    contentFetchedAt?: string;
+    ageStatus: "known" | "unknown";
+  };
+  retrieval?: { profile: RetrievalProfile; mode: "auto" | "lite"; content: "highlights" | "full"; policyVersion: string; providerCostDollars?: number; providerCostScope?: "request" };
   temporal?: TemporalProvenance;
-  /** Validated URL-version retrieval; not an operator's manual corpus review. */
+
   archive?: {
     provider: "wayback";
     capturedAt: string;

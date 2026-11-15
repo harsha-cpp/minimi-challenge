@@ -1,7 +1,7 @@
 import type { SearchHit, SearchProvider } from "./types.ts";
+import { recordStage } from "../runtime/telemetry.ts";
 import { normalizeQuery } from "./validate.ts";
 
-/** Bounded LRU + single-flight. Each subscriber owns its own cancellation. */
 export function withCache(provider: SearchProvider, ttlMs = 300_000, maxEntries = 256): SearchProvider {
   const cache = new Map<string, { until: number; hits: SearchHit[] }>();
   const pending = new Map<string, { controller: AbortController; result: Promise<SearchHit[]>; users: number }>();
@@ -9,15 +9,17 @@ export function withCache(provider: SearchProvider, ttlMs = 300_000, maxEntries 
     async search(input, signal) {
       signal?.throwIfAborted();
       const query = normalizeQuery(input);
-      const key = JSON.stringify([query.query, query.publishedAfter, query.publishedBefore, query.domains, query.urls, query.asOf?.toISOString(), query.freshness]);
+      const key = JSON.stringify([query.query, query.publishedAfter, query.publishedBefore, query.domains, query.urls, query.asOf?.toISOString(), query.freshness, query.profile, query.mode, query.content, query.locale, query.policyVersion]);
       const cached = cache.get(key);
       if (cached) {
         cache.delete(key);
         if (cached.until > Date.now() && query.freshness !== "fresh") {
+          recordStage("search_cache", 0, { hit: true });
           cache.set(key, cached);
           return structuredClone(cached.hits);
         }
       }
+      recordStage("search_cache", 0, { hit: false });
       let flight = pending.get(key);
       if (!flight) {
         const controller = new AbortController();
