@@ -20,7 +20,7 @@ Ordinary text streams provisionally over SSE. Verification and factual simulatio
 
 ## Why this architecture
 
-One modular service and local SQLite keep transactions, recovery and deployment understandable. Full-text recall avoids an extra retrieval service; explicit model, search and clock interfaces make failures reproducible in tests. The hosted demo runs behind HTTPS on one Azure VM, with credentials fetched through managed identity and daily private database backups. The tradeoff is a single-host design with lexical recall and external-provider latency. Multiple application instances would need shared storage and coordination.
+One modular service and local SQLite keep transactions, recovery and deployment understandable. Full-text recall avoids an extra retrieval service; explicit model, search and clock interfaces make failures reproducible in tests. The public demo runs behind HTTPS on one Azure VM, with credentials fetched through managed identity and daily private database backups. A signed browser cookie gives each visitor separate memory without a login; private owner access stays authenticated. The tradeoff is a single-host design with lexical recall and external-provider latency. Multiple application instances would need shared storage and coordination.
 
 I rejected mandatory planning agents and provider federation because they add calls and failure paths before demonstrating a quality gain. I deferred embeddings and distributed services until recall misses or measured load justify them. Snapshot-only retrieval was too restrictive for arbitrary historical questions: era simulation uses live retrospective sources to reconstruct a viewpoint, while acknowledging that hindsight can still slip through.
 

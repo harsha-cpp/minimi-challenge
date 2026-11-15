@@ -42,7 +42,9 @@ export function loadConfig(): Config {
   };
   const access: AccessPolicy = { mode: (env("DEPLOYMENT_MODE") || "local") as AccessPolicy["mode"],
     allowedOrigins: env("ALLOWED_ORIGINS").split(",").filter(Boolean).map(value => value.trim()),
-    ownerTokens: env("OWNER_TOKENS") ? JSON.parse(env("OWNER_TOKENS")) : {} };
+    ownerTokens: env("OWNER_TOKENS") ? JSON.parse(env("OWNER_TOKENS")) : {},
+    ...(env("PUBLIC_DEMO") === "1" ? { publicSessionSecret: env("PUBLIC_SESSION_SECRET") } : {}) };
+  if (env("PUBLIC_DEMO") && !["0", "1"].includes(env("PUBLIC_DEMO"))) throw new Error("PUBLIC_DEMO must be 0 or 1.");
   validateAccessPolicy(access);
   if (access.mode === "hosted" && (price("INPUT_DOLLARS_PER_MILLION") === null || price("OUTPUT_DOLLARS_PER_MILLION") === null)) throw new Error("Hosted mode requires explicit model input/output prices for spend admission.");
   const searchAttemptDollars = price("SEARCH_MAX_ATTEMPT_DOLLARS");

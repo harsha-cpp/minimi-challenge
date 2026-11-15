@@ -38,6 +38,36 @@ async function start(llm = model(), override?: Partial<Config>) {
 }
 const events = async (response: Response): Promise<Array<Record<string, any>>> => (await response.text()).split("\n\n").filter(line => line.startsWith("data: ")).map(line => JSON.parse(line.slice(6)));
 
+test("public homepage issues private browser histories without exposing existing owner data", async () => {
+  const access: AccessPolicy = { mode: "hosted", allowedOrigins: ["https://asof.example.com"], ownerTokens: { alice: "a".repeat(40) }, publicSessionSecret: "s".repeat(43) };
+  const app = await start(model(), { access });
+  const host = { host: "asof.example.com" }, origin = "https://asof.example.com";
+  const body = { sessionId: "same-session", message: "Hello", mode: "live", tz: "UTC" };
+  try {
+    await events(await app.post("/api/chat", body, { ...host, authorization: `Bearer ${access.ownerTokens.alice}` }));
+    const home = await wireFetch(app.base + "/", { headers: host });
+    assert.equal(home.status, 200); assert.equal(home.headers.get("cache-control"), "no-store");
+    const cookie = home.headers.get("set-cookie")!.split(";")[0]!;
+    const otherHome = await wireFetch(app.base + "/", { headers: host });
+    const otherCookie = otherHome.headers.get("set-cookie")!.split(";")[0]!;
+    assert.notEqual(cookie, otherCookie);
+    const first = await events(await app.post("/api/chat", body, { ...host, origin, cookie, "idempotency-key": "guest-turn" }));
+    const done = first.find(event => event.type === "done")!; assert.ok(done);
+    const memory = await wireFetch(app.base + "/api/memory", { headers: { ...host, cookie } });
+    assert.equal((await memory.json()).episodes.length, 1);
+    const otherMemory = await wireFetch(app.base + "/api/memory", { headers: { ...host, cookie: otherCookie } });
+    assert.equal((await otherMemory.json()).episodes.length, 0);
+    assert.equal((await wireFetch(app.base + `/api/turns/${done.turnId}`, { headers: { ...host, cookie: otherCookie } })).status, 404);
+    assert.equal((await wireFetch(app.base + "/api/memory", { headers: host })).status, 401);
+    assert.equal((await wireFetch(app.base + "/", { headers: { ...host, cookie } })).headers.get("set-cookie"), null);
+    assert.equal((await app.post("/api/chat", body, { ...host, cookie })).status, 403);
+    assert.equal((await wireFetch(app.base + "/", { headers: { host: "attacker.example" } })).status, 403);
+    assert.equal((await wireFetch(app.base + "/", { headers: { ...host, authorization: "Bearer invalid" } })).status, 401);
+    const replay = await events(await app.post("/api/chat", body, { ...host, origin, cookie, "idempotency-key": "guest-turn" }));
+    assert.equal(replay.find(event => event.type === "done")!.recovered, true);
+  } finally { await app.shutdown(); }
+});
+
 test("real-provider readiness refuses missing pricing controls before creating funded work", async () => {
   let walletOperations = 0;
   const policy: ProviderSpendingPolicy = { store: { reserve() { walletOperations++; throw new Error("must not reserve"); },

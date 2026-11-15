@@ -1,6 +1,6 @@
 # Azure deployment
 
-Status: the hosted demo was deployed on 15 November 2026 in subscription ending `838b`, resource group `minimi-challenge`, tagged `owner=harsha`. [Open the demo](https://asof-f2gl2x6yvy64q.centralindia.cloudapp.azure.com/). Access tokens are shared privately. The VM now owns the authoritative conversation database and provider wallet. Local provider credentials have been disabled to avoid competing spending histories. This is a functioning demo; the latency and independent quality release gates below remain open.
+Status: the hosted demo was deployed on 15 November 2026 in subscription ending `838b`, resource group `minimi-challenge`, tagged `owner=harsha`. [Open the public demo](https://asof-f2gl2x6yvy64q.centralindia.cloudapp.azure.com/) without signing in. Each browser gets a separate signed guest cookie; private owner history remains available through `/login`. The VM now owns the authoritative conversation database and provider wallet. Local provider credentials have been disabled to avoid competing spending histories. This is a functioning demo; the latency and independent quality release gates below remain open.
 
 ## Deployed footprint and estimate
 
@@ -88,6 +88,8 @@ The matching VM diagnostic also completed 20/20 turns with zero errors or reject
 The workload uses its own loopback server and isolated conversation DB while charging the authoritative provider wallet. A separate public HTTPS test completed a cited SQLite verification in **12,756 ms**, with one search and three model calls. Anonymous memory access was rejected, cross-owner turn access returned 404, and replaying the idempotency key returned the saved answer. These are functional checks, not independent factual adjudication. Private target artifacts are retained in `.context/azure-plan/target-report.json` and `.context/azure-plan/public-smoke.json`.
 
 A real browser signed in through the access-token form, submitted a short response request, displayed the answer and showed it saved to the ledger. The service also passed readiness after a supervised restart. The restore drill downloaded all three backup files, checked their hashes and SQLite integrity, then restored the conversation snapshot with the application CLI: 26 episodes, 52 sources, no integrity issues and no interrupted turns.
+
+The subsequent public-access change passed 432 tests and type checking locally, plus 13 access/server tests in an isolated directory on the VM. `PUBLIC_DEMO=1` and a random `PUBLIC_SESSION_SECRET` in Key Vault enable automatic guest sessions. Keep that secret stable across releases so visitors can return to their own history. Private owner tokens continue to work, and all guests share the existing provider spending ceiling. Guest cookies isolate data; they are not an abuse-prevention or per-person spending system.
 
 ## Routine operations
 

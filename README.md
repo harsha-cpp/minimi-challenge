@@ -4,7 +4,7 @@ A chat agent with one tool, **web search**, and a memory of what it told you and
 
 asof connects the current conversation to fresh web research. Ask a question, come back later, and check whether the answer still holds. Follow-ups stay anchored to the current chat, even when the viewpoint changes. Other conversations are recalled only when you explicitly ask for personal memory; their claims are reference records rather than verified evidence.
 
-**Live demo:** [Open asof](https://asof-f2gl2x6yvy64q.centralindia.cloudapp.azure.com/). Sign in with the access token supplied separately by the project owner.
+**Live demo:** [Open asof](https://asof-f2gl2x6yvy64q.centralindia.cloudapp.azure.com/). No sign-in required. Each browser has its own chat history; return in the same browser to revisit earlier answers.
 
 [Design decisions](DESIGN.md) · [Architecture](docs/architecture/README.md) · [Evaluation](docs/evaluation.md)
 
@@ -189,7 +189,7 @@ Imported history is a JSON array of objects with `at` (an ISO timestamp), `quest
 
 ## Hosting
 
-Run one service process on one host with local SQLite storage. For a hosted demo, keep provider credentials in server-side secrets, terminate HTTPS at a proxy that supports unbuffered SSE, and configure `DEPLOYMENT_MODE=hosted`, exact `ALLOWED_ORIGINS`, and distinct `OWNER_TOKENS`. Reviewer access tokens are separate from provider API keys.
+Run one service process on one host with local SQLite storage. For hosting, keep provider credentials in server-side secrets, terminate HTTPS at a proxy that supports unbuffered SSE, and configure `DEPLOYMENT_MODE=hosted`, exact `ALLOWED_ORIGINS`, and distinct private `OWNER_TOKENS`. To open the demo without sign-in, enable `PUBLIC_DEMO=1` with a random `PUBLIC_SESSION_SECRET`. Each browser receives its own signed history cookie. Clearing that cookie or using another browser starts a separate history. Private owner login remains available at `/login`.
 
 Follow the [operations guide](docs/operations.md) before exposing the service.
 

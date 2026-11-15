@@ -17,7 +17,7 @@ import { validTimeZone } from "./time/zone.ts";
 import { parseInstant } from "./time/instant.ts";
 import { QuestionStore, QuestionConflict } from "./memory/questions.ts";
 import { parseSelection, type ClarificationAnswer } from "./agent/clarification.ts";
-import { AccessError, ownerForToken, requestOwner } from "./runtime/access.ts";
+import { AccessError, createGuestSession, ownerForToken, requestOwner } from "./runtime/access.ts";
 import { SseChannel } from "./runtime/sse.ts";
 import { defaultProviderSpending, type ProviderSpendingPolicy } from "./runtime/provider-spending.ts";
 import { providerConfigurationIssues } from "./runtime/provider-readiness.ts";
@@ -244,8 +244,14 @@ export function createApplication(options: { config?: Config; store?: MemoryStor
     }
     let ownerId: string;
     try { ownerId = requestOwner(req, config.access); }
-    catch (error) { if (error instanceof AccessError && error.status === 401 && path === "/") { res.writeHead(302, { location: "/login" }).end(); return; } throw error; }
-    if (req.method === "GET" && STATIC[path]) { const [file, type] = STATIC[path]; res.writeHead(200, { "content-type": type, "cache-control": "no-cache" }).end(await readFile(root + file)); return; }
+    catch (error) {
+      if (!(error instanceof AccessError) || error.status !== 401 || path !== "/" || req.method !== "GET" || req.headers.authorization !== undefined) throw error;
+      if (!config.access.publicSessionSecret) { res.writeHead(302, { location: "/login" }).end(); return; }
+      const guest = createGuestSession(config.access);
+      ownerId = guest.ownerId;
+      res.setHeader("set-cookie", guest.cookie);
+    }
+    if (req.method === "GET" && STATIC[path]) { const [file, type] = STATIC[path]; res.writeHead(200, { "content-type": type, "cache-control": path === "/" ? "no-store" : "no-cache" }).end(await readFile(root + file)); return; }
     const sessionId = url.searchParams.get("sessionId");
     if (req.method === "GET" && path === "/api/state") return sendJson(res, 200, state(ownerId, validSession(sessionId) ? sessionId : undefined));
     if (req.method === "GET" && path === "/api/metrics" && config.access.mode === "local") return sendJson(res, 200, { counters, turns: turns.stats, models: models.stats, quota: quota.stats, jobs: store.memoryJobCounts(), sqlite: store.metrics, eventLoop: { p95Ms: eventLoop.percentile(95) / 1e6, maxMs: eventLoop.max / 1e6 } });
