@@ -1,3 +1,4 @@
+import { recordStage } from "../runtime/telemetry.ts";
 import type { SearchProvider } from "./types.ts";
 
 export function withConcurrency(provider: SearchProvider, max = 4, maxQueued = 64): SearchProvider {
@@ -7,6 +8,7 @@ export function withConcurrency(provider: SearchProvider, max = 4, maxQueued = 6
   return {
     async search(query, signal) {
       signal?.throwIfAborted();
+      const queuedAt = performance.now();
       if (active >= max) {
         if (queue.length >= maxQueued) throw new Error("Search is busy; try again shortly.");
         await new Promise<void>((resolve, reject) => {
@@ -20,6 +22,7 @@ export function withConcurrency(provider: SearchProvider, max = 4, maxQueued = 6
           signal?.addEventListener("abort", abort, { once: true });
         });
       } else active++;
+      recordStage("search_slot_wait", performance.now() - queuedAt, { active, queued: queue.length });
       try {
         signal?.throwIfAborted();
         return await provider.search(query, signal);

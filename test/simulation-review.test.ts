@@ -52,10 +52,10 @@ test("unavailable citations cannot be approved by a compliant reviewer", async (
   assert.equal(check.requests.length, 0);
 });
 
-test("a correction cannot introduce a fabricated citation", async () => {
+test("a fabricated correction citation cannot erase the negative verdict", async () => {
   const check = checker({ status: "needs_revision", issues: [{ code: "missing_citation", detail: "Use the provided history source." }], safeAnswer: "India became independent [99]." });
   const result = await ask(check.llm);
-  assert.equal(result.status, "unavailable");
+  assert.equal(result.status, "needs_revision");
   assert.equal(result.reason, "invalid_review_output");
   assert.equal(result.safeAnswer, undefined);
 });
@@ -85,16 +85,17 @@ test("malformed or internally inconsistent review output remains a soft review f
     { status: "needs_revision", issues: [] }, { status: "needs_revision", issues: [{ code: "invented", detail: "Unknown issue" }] },
     { status: "needs_revision", issues: [{ code: "unsupported_claim", detail: "" }] }]) {
     const result = await ask(checker(raw).llm);
-    assert.equal(result.status, "unavailable");
+    assert.equal(result.status, raw && !Array.isArray(raw) && raw.status === "needs_revision" ? "needs_revision" : "unavailable");
     assert.equal(result.reason, "invalid_review_output");
-    assert.deepEqual(result.issues, []);
+    if (result.status === "unavailable") assert.deepEqual(result.issues, []);
+    else assert.ok(result.issues.length > 0);
   }
 });
 
-test("a model-requested revision must include a bounded usable corrected answer", async () => {
-  for (const safeAnswer of [undefined, null, "", "a".repeat(6001)]) {
+test("a negative verdict survives an absent, empty or oversized correction", async () => {
+  for (const safeAnswer of [undefined, null, "", "a".repeat(6001), "a".repeat(20_000)]) {
     const result = await ask(checker({ status: "needs_revision", issues: [{ code: "wrong_perspective", detail: "Correct the date." }], safeAnswer }).llm);
-    assert.equal(result.status, "unavailable");
+    assert.equal(result.status, "needs_revision");
     assert.equal(result.reason, "invalid_review_output");
     assert.equal(result.safeAnswer, undefined);
   }

@@ -5,34 +5,49 @@ import { test } from "node:test";
 import createDOMPurify from "dompurify";
 import { JSDOM } from "jsdom";
 import { marked } from "marked";
+import { readTurn } from "../public/recovery.js";
 import { citationTextNodes } from "../public/citations.js";
 
 const html = readFileSync(new URL("../public/index.html", import.meta.url), "utf8");
-const app = readFileSync(new URL("../public/app.js", import.meta.url), "utf8").replace('import { citationTextNodes } from "./citations.js";\n', "");
+const app = readFileSync(new URL("../public/app.js", import.meta.url), "utf8").replace('import { citationTextNodes } from "./citations.js";\n', "").replace('import { readTurn } from "./recovery.js";\n', "");
 
-async function mount(options: { date?: Date; post?: (body: { now: string | null }) => Promise<Response>; chatEvents?: Array<Record<string, unknown>>; chatReplies?: Array<Array<Record<string, unknown>> | { status: number; error: string; code: string }>; pendingCard?: Record<string, unknown>; memoryEpisodes?: Array<Record<string, unknown>>; savedSession?: string } = {}) {
+async function mount(options: { date?: Date; post?: (body: { now: string | null }) => Promise<Response>; chatEvents?: Array<Record<string, unknown>>; chatReplies?: Array<Array<Record<string, unknown>> | { status: number; error: string; code: string }>; pendingCard?: Record<string, unknown>; memoryEpisodes?: Array<Record<string, unknown>>; savedSession?: string; turnReplies?: Array<Record<string, unknown>>; pendingTurn?: Record<string, unknown>; chatBeforeHeadersFailure?: boolean } = {}) {
   const dom = new JSDOM(html, { url: "http://localhost:3000/", runScripts: "outside-only", pretendToBeVisual: true });
   const { window } = dom;
-  if (options.savedSession) window.localStorage.setItem("asof.preview.session.v2", options.savedSession);
+  if (options.savedSession) window.sessionStorage.setItem("asof.preview.session.v2", options.savedSession);
+  if (options.pendingTurn) window.sessionStorage.setItem("asof.pending.turn", JSON.stringify(options.pendingTurn));
   const state = { now: (options.date ?? new Date(2026, 10, 13, 15, 0)).toISOString(), simulated: false, missing: [], model: "test", episodes: 0, features: { clarifications: Boolean(options.pendingCard) } };
   const requests: Array<{ now: string | null }> = [];
   const chatRequests: Array<Record<string, unknown>> = [];
+  const chatKeys: string[] = [];
+  const turnRequests: string[] = [];
+  let turnReads = 0;
   window.HTMLElement.prototype.scrollIntoView = () => {};
-  Object.assign(window, { marked, DOMPurify: createDOMPurify(window), citationTextNodes, TextDecoderStream,
+  Object.assign(window, { marked, DOMPurify: createDOMPurify(window), citationTextNodes, readTurn, TextDecoderStream,
     fetch: async (path: string, init?: RequestInit) => {
-      if (path === "/api/state") return Response.json(state);
+      if (path.startsWith("/api/turns/")) {
+        turnRequests.push(path);
+        if (init?.method === "POST") return Response.json({ ok: true });
+        const reply = options.turnReplies?.[Math.min(turnReads++, (options.turnReplies?.length ?? 1) - 1)];
+        if (!reply) throw new Error("No recovery response configured");
+        return Response.json(reply, { status: typeof reply.status === "number" ? reply.status : 200 });
+      }
+      if (path.startsWith("/api/state")) return Response.json(state);
       if (path.endsWith("/clarification")) return Response.json({ card: options.pendingCard ?? null });
       if (path.startsWith("/api/sessions/")) return Response.json({ episodes: (options.memoryEpisodes ?? []).filter(episode => episode.sessionId === path.split("/").at(-1)).map(episode => ({ episode, sources: episode.sources ?? [] })) });
       if (path.startsWith("/api/episodes/")) { const episode = options.memoryEpisodes?.find(episode => String(episode.id) === path.split("/").at(-1)); return Response.json({ episode, sources: episode?.sources ?? [] }); }
       if (path === "/api/chat" && (options.chatEvents || options.chatReplies)) {
         chatRequests.push(JSON.parse(String(init?.body)));
+        chatKeys.push((init!.headers as Record<string, string>)["idempotency-key"]!);
+        if (options.chatBeforeHeadersFailure && chatRequests.length === 1) throw new TypeError("Lost response before headers");
         const reply = options.chatReplies?.[chatRequests.length - 1] ?? options.chatEvents ?? [];
         return Array.isArray(reply) ? new Response(reply.map(event => `data: ${JSON.stringify(event)}\n\n`).join("")) : Response.json(reply, { status: reply.status });
       }
       if (path === "/api/memory" && options.memoryEpisodes) return Response.json({ episodes: options.memoryEpisodes });
       assert.equal(path, "/api/clock");
       const body = JSON.parse(String(init?.body)) as { now: string | null };
-      requests.push(body);
+      assert.equal(typeof (body as any).sessionId, "string");
+      requests.push({ now: body.now });
       if (options.post) return options.post(body);
       return Response.json({ ...state, now: body.now ?? new Date().toISOString(), simulated: body.now !== null });
     },
@@ -44,7 +59,7 @@ async function mount(options: { date?: Date; post?: (body: { now: string | null 
     button(`#cal-options button[data-value="${value}"]`).click();
   };
   const form = window.document.getElementById("clock") as HTMLFormElement;
-  return { dom, window, requests, chatRequests, form, button, choose, open: () => button("#stamp").click(), travel: () => button('#clock button[type="submit"]').click() };
+  return { dom, window, requests, chatRequests, chatKeys, turnRequests, form, button, choose, open: () => button("#stamp").click(), travel: () => button('#clock button[type="submit"]').click() };
 }
 
 test("month navigation submits the visible month without requiring a second day click", async () => {
@@ -331,13 +346,62 @@ test("preview restores a saved conversation after reload and new chat starts a s
   }] });
   try {
     assert.match(ui.window.document.querySelector("#thread")!.textContent!, /A saved answer/);
-    assert.equal(ui.window.localStorage.getItem("asof.preview.session.v2"), "saved-session");
+    assert.equal(ui.window.sessionStorage.getItem("asof.preview.session.v2"), "saved-session");
     ui.button("#new-chat").click();
     assert.ok(ui.window.document.querySelector("#empty"));
-    assert.notEqual(ui.window.localStorage.getItem("asof.preview.session.v2"), "saved-session");
+    assert.notEqual(ui.window.sessionStorage.getItem("asof.preview.session.v2"), "saved-session");
     ui.button("#stamp").click();
     assert.equal(ui.form.hidden, false, "date action still works after restoring the empty state");
   } finally { ui.dom.window.close(); }
+});
+
+test("restored legacy answers omit only the leading generic preface from presentation and copied text", async () => {
+  const preface = "I could not verify this answer against the available evidence. Treat the following as unverified.";
+  const answer = "The route opened in 1947 [1]. Its exact 1948 fare remains uncertain.";
+  for (const separator of ["\n\n", "\r\n\r\n"]) {
+    const saved = Object.freeze({ id: 18, sessionId: "legacy-preface", askedAt: Date.parse("1948-01-14T12:00:00Z"),
+      question: "Tell me about the route in 1948", answer: `${preface}${separator}${answer}`,
+      quality: "explicitly_unverified", sources: [{ n: 1, title: "Route history", url: "https://example.com/route" }] });
+    const ui = await mount({ savedSession: saved.sessionId, memoryEpisodes: [saved] });
+    const copies: string[] = [];
+    Object.defineProperty(ui.window.navigator, "clipboard", { value: { writeText: async (text: string) => { copies.push(text); } } });
+    try {
+      const visible = ui.window.document.querySelector(".answer")!.textContent!;
+      assert.equal(visible.includes(preface), false);
+      assert.match(visible, /The route opened in 1947 \[1\]\. Its exact 1948 fare remains uncertain\./);
+      assert.match(ui.window.document.querySelector(".answer-status")!.textContent!, /Unverified/);
+      [...ui.window.document.querySelectorAll<HTMLButtonElement>(".answer-actions button")].find(button => button.textContent === "Copy answer")!.click();
+      await nextTurn();
+      assert.deepEqual(copies, [`${answer}\n\nSources\n[1] Route history — https://example.com/route`]);
+      assert.match(ui.window.document.getElementById("toast")!.textContent!, /Answer and source links copied/);
+      assert.equal(saved.answer, `${preface}${separator}${answer}`, "presentation must not rewrite the saved answer");
+      assert.equal(saved.quality, "explicitly_unverified");
+      assert.equal(ui.chatRequests.length, 0, "restoring and copying must not regenerate the answer");
+    } finally { ui.dom.window.close(); }
+  }
+});
+
+test("legacy preface cleanup preserves quoted text and fact-specific uncertainty", async () => {
+  const preface = "I could not verify this answer against the available evidence. Treat the following as unverified.";
+  for (const answer of [
+    `> ${preface}\n\nThat quoted wording was in the previous answer.`,
+    `The previous answer said:\n\n${preface}\n\nIts claim remains uncertain.`,
+    "I could not verify the exact 1948 railway fare. The opening date is supported.",
+  ]) {
+    const ui = await mount({ savedSession: "preserved-uncertainty", memoryEpisodes: [{ id: 19,
+      sessionId: "preserved-uncertainty", askedAt: Date.parse("1948-01-14T12:00:00Z"), question: "A saved question",
+      answer, quality: "explicitly_unverified", sources: [] }] });
+    const copies: string[] = [];
+    Object.defineProperty(ui.window.navigator, "clipboard", { value: { writeText: async (text: string) => { copies.push(text); } } });
+    try {
+      const visible = ui.window.document.querySelector(".answer")!.textContent!;
+      assert.ok(visible.includes(answer.includes(preface) ? preface : "I could not verify the exact 1948 railway fare."));
+      assert.match(ui.window.document.querySelector(".answer-status")!.textContent!, /Unverified/);
+      [...ui.window.document.querySelectorAll<HTMLButtonElement>(".answer-actions button")].find(button => button.textContent === "Copy answer")!.click();
+      await nextTurn();
+      assert.deepEqual(copies, [answer]);
+    } finally { ui.dom.window.close(); }
+  }
 });
 
 test("citation inspector uses the saved passage and preserves a direct original-source link", async () => {
@@ -498,5 +562,113 @@ test("expired clarification can restart the original question without retrying t
     assert.equal(ui.chatRequests[2]!.message, clarificationCard.message);
     assert.equal(ui.chatRequests[2]!.clarification, undefined);
     assert.equal(ui.window.document.querySelectorAll("#thread .entry").length, 2);
+  } finally { ui.dom.window.close(); }
+});
+
+const recoveredTurn = { turn: { id: "durable-1", status: "completed" }, episode: { id: 17, answer: "The committed answer [1].", quality: "supported" }, sources: [{ n: 1, title: "Official", url: "https://example.com/official" }] };
+
+test("lost done recovers the durable answer without a second generation", async () => {
+  const ui = await mount({ chatEvents: [{ type: "turn", turnId: "durable-1" }, { type: "text", delta: "Provisional answer" }], turnReplies: [recoveredTurn] });
+  try {
+    (ui.window.document.getElementById("input") as HTMLTextAreaElement).value = "What is the answer?";
+    ui.button("#send").click(); await flushChat();
+    assert.equal(ui.chatRequests.length, 1); assert.ok(ui.turnRequests.includes("/api/turns/durable-1"));
+    assert.match(ui.window.document.querySelector(".answer")!.textContent!, /The committed answer/);
+    assert.match(ui.window.document.querySelector(".answer-status")!.textContent!, /Saved to Ledger/);
+    assert.equal(ui.window.sessionStorage.getItem("asof.pending.turn"), null);
+    assert.equal(ui.window.document.querySelector(".failure"), null);
+  } finally { ui.dom.window.close(); }
+});
+
+test("lost response headers recover by the key saved before POST", async () => {
+  const ui = await mount({ chatEvents: [], chatBeforeHeadersFailure: true, turnReplies: [recoveredTurn] });
+  try {
+    (ui.window.document.getElementById("input") as HTMLTextAreaElement).value = "What is the answer?";
+    ui.button("#send").click(); await flushChat();
+    assert.equal(ui.chatRequests.length, 1);
+    assert.ok(ui.turnRequests.includes(`/api/turns/by-key/${ui.chatKeys[0]}`));
+    assert.match(ui.window.document.querySelector(".answer-status")!.textContent!, /Saved to Ledger/);
+  } finally { ui.dom.window.close(); }
+});
+
+test("still-running recovery offers a read-only check and never silently regenerates", async () => {
+  const ui = await mount({ chatEvents: [{ type: "turn", turnId: "durable-1" }], turnReplies: [{ turn: { id: "durable-1", status: "running" } }, recoveredTurn] });
+  try {
+    (ui.window.document.getElementById("input") as HTMLTextAreaElement).value = "What is the answer?";
+    ui.button("#send").click(); await flushChat();
+    assert.equal(ui.chatRequests.length, 1); assert.match(ui.window.document.querySelector(".answer-status")!.textContent!, /still running/);
+    const check = [...ui.window.document.querySelectorAll<HTMLButtonElement>(".answer-actions button")].find(button => /Check saved answer/.test(button.textContent!))!;
+    check.click(); await flushChat(); assert.equal(ui.chatRequests.length, 1);
+    assert.match(ui.window.document.querySelector(".answer")!.textContent!, /committed answer/);
+  } finally { ui.dom.window.close(); }
+});
+
+test("a request never received by the server is manually retried with its original idempotency key", async () => {
+  const ui = await mount({ chatReplies: [[], [{ type: "turn", turnId: "durable-1" }, { type: "text", delta: "Saved retry." }, { type: "done", turnId: "durable-1", episodeId: 17, quality: "non_factual", cited: [], timings: { recallMs: 0, searches: 0, modelCalls: 1, totalMs: 1 } }]], chatBeforeHeadersFailure: true, turnReplies: [{ status: 404 }] });
+  try {
+    (ui.window.document.getElementById("input") as HTMLTextAreaElement).value = "Hello";
+    ui.button("#send").click(); await flushChat();
+    assert.equal(ui.chatRequests.length, 1);
+    assert.match(ui.window.document.querySelector(".answer-status")!.textContent!, /No saved answer/);
+    [...ui.window.document.querySelectorAll<HTMLButtonElement>(".answer-actions button")].find(button => /Retry question/.test(button.textContent!))!.click(); await flushChat();
+    assert.equal(ui.chatRequests.length, 2); assert.equal(ui.chatKeys[0], ui.chatKeys[1]); assert.deepEqual(ui.chatRequests[0], ui.chatRequests[1]);
+    assert.equal(ui.window.document.querySelectorAll("#thread .entry").length, 1);
+    assert.match(ui.window.document.querySelector(".answer")!.textContent!, /Saved retry/);
+  } finally { ui.dom.window.close(); }
+});
+
+test("refresh recovers a saved request key without generation and does not duplicate a restored episode", async () => {
+  const ui = await mount({ savedSession: "restore-session", pendingTurn: { sessionId: "restore-session", question: "Original question", at: "2026-11-15T10:00:00Z", isEra: false, idempotencyKey: "original-key", requestBody: { sessionId: "restore-session", message: "Original question", mode: "live", tz: "UTC" } }, memoryEpisodes: [{ id: 17, sessionId: "restore-session", askedAt: Date.parse("2026-11-15T10:00:00Z"), question: "Original question", answer: recoveredTurn.episode.answer, quality: "explicitly_unverified", sources: [] }], turnReplies: [recoveredTurn] });
+  try {
+    assert.equal(ui.chatRequests.length, 0); assert.equal(ui.window.document.querySelectorAll("#thread .entry").length, 1);
+    assert.ok(ui.turnRequests.includes("/api/turns/by-key/original-key")); assert.equal(ui.window.sessionStorage.getItem("asof.pending.turn"), null);
+    assert.match(ui.window.document.querySelector(".answer-status")!.textContent!, /Unverified/);
+  } finally { ui.dom.window.close(); }
+});
+
+test("changing the viewpoint keeps the model conversation and sends its verification follow-up with the same session", async () => {
+  const clockRequests: Array<{ now: string | null; sessionId: string }> = [];
+  const modelAnswer = "We discussed Kimi and Claude coding benchmarks.";
+  const ui = await mount({ savedSession: "model-chat", date: new Date(2026, 10, 15, 14, 2),
+    memoryEpisodes: [{ id: 3, sessionId: "cricket-chat", askedAt: Date.parse("2026-05-15T09:00:00Z"),
+      question: "Verify the IPL winners.", answer: "IPL winners: Rajasthan Royals in 2008." }],
+    post: async body => {
+      clockRequests.push(body as { now: string | null; sessionId: string });
+      return Response.json({ now: body.now, simulated: true, missing: [], model: "test", episodes: 2,
+        features: { clarifications: false } });
+    },
+    chatReplies: [
+      [{ type: "text", delta: modelAnswer }, { type: "done", episodeId: 10, quality: "explicitly_unverified", cited: [],
+        timings: { recallMs: 0, searches: 0, modelCalls: 1, totalMs: 20 } }],
+      [{ type: "text", delta: "The Kimi and Claude claims need applicable evidence." },
+        { type: "done", episodeId: 11, quality: "explicitly_unverified", cited: [],
+          timings: { recallMs: 0, searches: 1, modelCalls: 2, totalMs: 20 } }],
+    ],
+  });
+  try {
+    const input = ui.window.document.getElementById("input") as HTMLTextAreaElement;
+    input.value = "How do Kimi and Claude compare for coding?";
+    ui.button("#send").click(); await flushChat();
+    assert.equal(ui.chatRequests[0]!.mode, "live");
+    ui.open(); ui.choose("month", 4); ui.travel(); await flushChat();
+    assert.equal(clockRequests[0]!.sessionId, "model-chat");
+    assert.match(ui.window.document.querySelector("#thread")!.textContent!, /Kimi and Claude coding benchmarks/);
+    input.value = "verify your claims now";
+    ui.button("#send").click(); await flushChat();
+
+    assert.equal(ui.chatRequests.length, 2);
+    assert.equal(ui.chatRequests[0]!.sessionId, "model-chat");
+    assert.equal(ui.chatRequests[1]!.sessionId, "model-chat");
+    assert.equal(ui.chatRequests[1]!.mode, "era");
+    assert.equal(ui.chatRequests[1]!.message, "verify your claims now");
+    const selected = Date.parse(clockRequests[0]!.now!);
+    const requested = Date.parse(String(ui.chatRequests[1]!.asOf));
+    assert.ok(requested >= selected && requested - selected < 60_000,
+      "the new request uses the selected viewpoint; the display clock may keep advancing within that minute");
+    assert.notEqual(ui.chatKeys[0], ui.chatKeys[1]);
+    assert.equal(ui.window.sessionStorage.getItem("asof.preview.session.v2"), "model-chat");
+    assert.equal(ui.window.document.querySelectorAll("#thread .entry").length, 2);
+    assert.match(ui.window.document.querySelector("#thread")!.textContent!, /Viewpoint changed/i);
+    assert.doesNotMatch(ui.window.document.querySelector("#thread")!.textContent!, /IPL|Rajasthan/);
   } finally { ui.dom.window.close(); }
 });

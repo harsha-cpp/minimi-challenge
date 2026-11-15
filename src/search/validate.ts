@@ -1,4 +1,5 @@
 import { isIP } from "node:net";
+import { validateCapabilities } from "./profiles.ts";
 import type { SearchQuery } from "./types.ts";
 
 export function publicUrl(value: string): URL {
@@ -48,12 +49,20 @@ export function normalizeQuery(input: SearchQuery): SearchQuery {
   });
   if (input.urls && (input.urls.length > 5 || input.urls.some(u => typeof u !== "string"))) throw new Error("Expected at most 5 source URLs.");
   const urls = input.urls?.map(canonicalUrl);
-  return {
+  if (input.profile !== undefined && !["fact", "direct", "verification", "comparison", "complete-list", "historical", "research"].includes(input.profile)) throw new Error("Unknown retrieval profile.");
+  if (input.mode !== undefined && !["auto", "lite"].includes(input.mode)) throw new Error("Unknown search mode.");
+  if (input.content !== undefined && !["highlights", "full"].includes(input.content)) throw new Error("Unknown content policy.");
+  if (input.locale !== undefined && !/^[A-Z]{2}$/.test(input.locale)) throw new Error("Locale must be a two-letter country code.");
+  if (input.policyVersion !== undefined && !/^[a-zA-Z0-9_.-]{1,64}$/.test(input.policyVersion)) throw new Error("Invalid retrieval policy version.");
+  const normalized: SearchQuery = {
+    profile: input.profile, mode: input.mode, content: input.content, locale: input.locale, policyVersion: input.policyVersion,
     query: input.query.trim(), publishedAfter: input.publishedAfter, publishedBefore: input.publishedBefore,
     domains: domains?.length ? [...new Set(domains)].sort() : undefined,
     urls: urls?.length ? [...new Set(urls)].sort() : undefined,
     asOf: input.asOf, freshness: input.freshness ?? "standard",
   };
+  validateCapabilities(normalized);
+  return normalized;
 }
 
 export function matchesDomains(url: string, domains?: string[]): boolean {

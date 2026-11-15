@@ -1,0 +1,63 @@
+name: Backend release checks
+
+on:
+  pull_request:
+  push:
+    branches: [master, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backend-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: ${{ matrix.role }} (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - node: 22.16.0
+            role: Minimum API compatibility only
+          - node: 24.22.3
+            role: Production runtime baseline
+    env:
+      LLM_API_KEY: ""
+      LLM_MODEL: ""
+      EXA_API_KEY: ""
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - name: Report Node and bundled SQLite
+        run: node -p 'JSON.stringify({node:process.version,sqlite:process.versions.sqlite})'
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Audit runtime dependencies
+        run: npm audit --omit=dev --audit-level=high
+      - name: Check TypeScript
+        run: npm run typecheck
+      - name: Run correctness, workload, isolation and recovery drills
+        run: npm test
+      - name: Replay versioned frozen evidence
+        run: npm run eval:benchmark -- --out .context/ci-frozen.json
+      - name: Report live and calibration release gates
+        run: npm run eval:quality -- --out .context/ci-quality-release.json
+      - name: Retain frozen report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: frozen-evidence-node-${{ matrix.node }}
+          path: |
+            .context/ci-frozen.json
+            .context/ci-quality-release.json
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 14

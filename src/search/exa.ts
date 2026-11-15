@@ -1,10 +1,13 @@
 import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import type { SearchHit, SearchProvider } from "./types.ts";
+import { PROFILES, RETRIEVAL_POLICY_VERSION } from "./profiles.ts";
+import { recordStage } from "../runtime/telemetry.ts";
+import { currentModelContext } from "../llm/gateway.ts";
+import { defaultProviderSpending, ProviderBudgetError, type ProviderSpendingPolicy } from "../runtime/provider-spending.ts";
 import { canonicalUrl, matchesDomains, normalizeQuery, validDay } from "./validate.ts";
 
-const RESULTS = 5;
-const EXCERPT_CHARS = 2500;
+export const EXA_MAX_ATTEMPTS = 2;
 const MAX_RESPONSE_BYTES = 2_000_000;
 const RETRYABLE = new Set([429, 500, 502, 503, 504]);
 
@@ -13,14 +16,22 @@ const object = (value: unknown): JsonObject => value && typeof value === "object
 const string = (value: unknown): string | undefined => typeof value === "string" ? value : undefined;
 
 export interface ExaOptions {
+  /** null is permitted only with an injected test transport. */
+  spendPolicy?: ProviderSpendingPolicy | null;
 
   fetch?: typeof fetch;
   timeoutMs?: number;
   retryDelayMs?: number;
+  /** Operator-declared maximum for one complete provider HTTP attempt; no provider price is assumed. */
+  maxAttemptCostDollars?: number | null;
 }
 
 export function createExaSearch(apiKey: string, options: ExaOptions = {}): SearchProvider {
+  if (options.spendPolicy === null && !options.fetch) throw new Error("Disabling provider accounting requires an injected test transport.");
+  const spendPolicy = options.spendPolicy === null ? null : options.spendPolicy ?? defaultProviderSpending();
   const http = options.fetch ?? fetch;
+  const attemptBound = options.maxAttemptCostDollars ?? spendPolicy?.exaAttemptMaxDollars ?? null;
+  if (attemptBound !== null && (!Number.isFinite(attemptBound) || attemptBound <= 0)) throw new Error("Exa attempt-cost bound must be positive.");
   return {
     async search(input, callerSignal) {
       callerSignal?.throwIfAborted();
@@ -28,45 +39,103 @@ export function createExaSearch(apiKey: string, options: ExaOptions = {}): Searc
       const deadline = AbortSignal.timeout(options.timeoutMs ?? 20_000);
       const signal = callerSignal ? AbortSignal.any([callerSignal, deadline]) : deadline;
       const method = query.urls ? "contents" : "search";
+      const profile = query.profile ?? "fact";
+      const policy = PROFILES[profile];
+      const excerptChars = query.content === "full" ? 12_000 : policy.excerptChars;
       const freshness = query.asOf
         ? { snapshotAsOf: query.asOf.toISOString() }
-        : { maxAgeHours: query.freshness === "fresh" ? 0 : 24 };
+        : query.mode === "lite" ? {} : { maxAgeHours: query.freshness === "fresh" ? 0 : 24 };
       const contents = {
-        highlights: { maxCharacters: EXCERPT_CHARS, ...(query.urls ? { query: query.query } : {}) },
+        ...(query.content === "full" ? { text: { maxCharacters: excerptChars } } : { highlights: { maxCharacters: excerptChars, ...(query.urls ? { query: query.query } : {}) } }),
         ...freshness,
       };
       const body = query.urls ? { ids: query.urls, ...contents } : {
-        query: query.query, type: "auto", numResults: RESULTS,
+        query: query.query, type: query.mode ?? "auto", numResults: policy.results,
+        ...(query.locale ? { userLocation: query.locale } : {}),
         startPublishedDate: query.publishedAfter ? `${query.publishedAfter}T00:00:00.000Z` : undefined,
         endPublishedDate: query.asOf?.toISOString() ?? (query.publishedBefore ? `${query.publishedBefore}T23:59:59.999Z` : undefined), includeDomains: query.domains, contents,
       };
       let response: Response | undefined;
-      for (let attempt = 0; attempt < 2; attempt++) {
+      let data: JsonObject = {};
+      for (let attempt = 0; attempt < EXA_MAX_ATTEMPTS; attempt++) {
         signal.throwIfAborted();
+        const budget = currentModelContext()?.budget;
+        let reservation: ReturnType<NonNullable<typeof budget>["reserveExternal"]> | undefined;
+        let globalHold: ReturnType<ProviderSpendingPolicy["store"]["reserve"]> | undefined;
         try {
-          response = await http(`https://api.exa.ai/${method}`, {
-            method: "POST", headers: { "content-type": "application/json", "x-api-key": apiKey },
-            body: JSON.stringify(body), signal,
-          });
-        } catch (error) {
-          signal.throwIfAborted();
-          if (attempt) throw new Error("Exa network request failed.", { cause: error });
+          reservation = budget?.reserveExternal(attemptBound);
+          if (spendPolicy) {
+            if (attemptBound === null) throw new ProviderBudgetError("An explicit Exa attempt-cost bound is required before paid retrieval.");
+            const active = currentModelContext();
+            globalHold = spendPolicy.store.reserve({ provider: "exa", maxDollars: attemptBound,
+              stage: method, turnId: active?.turnId, ownerId: active?.ownerId, policyVersion: "exa-attempt-bound-v1" });
+          }
+        }
+        catch (error) {
+          reservation?.cancel();
+          globalHold?.cancelBeforeStart();
+          recordStage("search_provider_admission", 0, { outcome: "budget_rejected", method });
+          throw error;
+        }
+        recordStage("search_provider_started", 0, { attempt: attempt + 1, method, reservedCostDollars: attemptBound, costKnown: false,
+          externalCall: budget?.snapshot.externalCalls ?? null });
+        const attemptStarted = performance.now();
+        let actualCost: number | null = null;
+        let networkError = false;
+        let failure: unknown;
+        let failed = false;
+        let status: number | string = "network_error";
+        let providerStarted = false;
+        try {
+          try {
+            signal.throwIfAborted();
+            globalHold?.markStarted();
+            providerStarted = true;
+            response = await http(`https://api.exa.ai/${method}`, {
+              method: "POST", headers: { "content-type": "application/json", "x-api-key": apiKey },
+              body: JSON.stringify(body), signal,
+            });
+          } catch (error) { networkError = true; throw error; }
+          status = response.status;
+          if (response.ok) data = object(await readJson(response));
+          else {
+            // Error responses may report billed work; consume a bounded payload before retrying.
+            try { data = object(await readJson(response)); } catch { data = {}; }
+          }
+          actualCost = requestCost(data);
+        } catch (error) { failure = error; failed = true; }
+        finally {
+          try {
+            if (providerStarted) globalHold?.settle(actualCost); else globalHold?.cancelBeforeStart();
+          } finally {
+            try { if (providerStarted) reservation?.settle(actualCost); else reservation?.cancel(); }
+            finally {
+            const snapshot = budget?.snapshot;
+            recordStage("search_provider_attempt", performance.now() - attemptStarted, {
+              attempt: attempt + 1, status, method, costDollars: actualCost, costKnown: actualCost !== null,
+              reservedCostDollars: attemptBound, spendEstimateUsd: snapshot?.spendUsd ?? null,
+              unknownExternalUsage: snapshot?.unknownExternalUsage ?? (actualCost === null ? 1 : 0),
+            });
+            }
+          }
+        }
+        signal.throwIfAborted();
+        if (failed) {
+          if (!providerStarted) throw failure;
+          if (!networkError) throw failure;
+          if (attempt) throw new Error("Exa network request failed.", { cause: failure });
           await delay(options.retryDelayMs ?? 200, undefined, { signal });
           continue;
         }
-        if (response.ok) break;
-        await response.body?.cancel();
-
-        if (attempt || !RETRYABLE.has(response.status)) throw new Error(`Exa responded ${response.status}.`);
-        const header = response.headers.get("retry-after");
+        if (response!.ok) break;
+        if (attempt || !RETRYABLE.has(response!.status)) throw new Error(`Exa responded ${response!.status}.`);
+        const header = response!.headers.get("retry-after");
         const retryMs = header === null ? options.retryDelayMs ?? 200 :
           /^\d+(?:\.\d+)?$/.test(header) ? Number(header) * 1000 : Math.max(0, Date.parse(header) - Date.now());
-
-        if (!Number.isFinite(retryMs) || retryMs > 2000) throw new Error(`Exa responded ${response.status}; retry later.`);
+        if (!Number.isFinite(retryMs) || retryMs > 2000) throw new Error(`Exa responded ${response!.status}; retry later.`);
         await delay(retryMs, undefined, { signal });
       }
       if (!response?.ok) throw new Error("Exa request failed.");
-      const data = object(await readJson(response));
       signal.throwIfAborted();
       if (!Array.isArray(data.results)) throw new Error("Exa returned an invalid results payload.");
 
@@ -88,20 +157,33 @@ export function createExaSearch(apiKey: string, options: ExaOptions = {}): Searc
         const published = string(result.publishedDate);
         const publishedDate = published && validDay(published.slice(0, 10)) ? published.slice(0, 10) : undefined;
         if (query.publishedAfter && (!publishedDate || publishedDate < query.publishedAfter)) continue;
+        if (query.publishedBefore && (!publishedDate || publishedDate > query.publishedBefore)) continue;
+        if (query.urls && !query.urls.includes(url)) continue;
         if (query.asOf && publishedDate && publishedDate > query.asOf.toISOString().slice(0, 10)) continue;
         if (query.asOf && published && published.length > 10 && Date.parse(published) > query.asOf.getTime()) continue;
         const highlights = Array.isArray(result.highlights) ? result.highlights.filter((x): x is string => typeof x === "string") : [];
-        const text = (highlights.length ? highlights.join(" … ") : string(result.text) ?? "").replaceAll("\0", "").slice(0, EXCERPT_CHARS).trim();
+        const text = (query.content === "full" ? string(result.text) ?? "" : highlights.length ? highlights.join(" … ") : string(result.text) ?? "").replaceAll("\0", "").slice(0, excerptChars).trim();
         if (!text) continue;
         seen.add(url);
+        const providerStatus = (Array.isArray(data.statuses) ? data.statuses : []).find(item => [result.id, result.url].includes(object(item).id));
+        const acquisition = object(providerStatus).source;
+        const fetched = string(result.fetchedAt) ?? string(result.crawledAt);
+        const contentFetchedAt = fetched && Number.isFinite(Date.parse(fetched)) ? new Date(fetched).toISOString() : undefined;
+        const providerCost = requestCost(data);
         hits.push({
           url, title: (string(result.title) || url).slice(0, 300), publishedDate, text,
-          provider: "exa", method, retrievedAt, snapshotAsOf: query.asOf?.toISOString(),
+          provider: "exa", method, retrievedAt, snapshotAsOf: query.asOf?.toISOString(), rank: hits.length + 1,
+          freshness: { requested: query.asOf ? "snapshot" : query.mode === "lite" ? "index" : query.freshness ?? "standard",
+            acquisition: acquisition === "live" || acquisition === "cached" ? acquisition : "unknown",
+            contentFetchedAt, ageStatus: contentFetchedAt ? "known" : "unknown" },
+          retrieval: { profile, mode: query.mode ?? "auto", content: query.content ?? "highlights", policyVersion: query.policyVersion ?? RETRIEVAL_POLICY_VERSION,
+            ...(typeof providerCost === "number" && Number.isFinite(providerCost) && providerCost >= 0 ? { providerCostDollars: providerCost, providerCostScope: "request" as const } : {}) },
           requestId: string(data.requestId) ?? response.headers.get("x-request-id") ?? undefined,
           contentHash: createHash("sha256").update(text).digest("hex"),
         });
-        if (hits.length === RESULTS) break;
+        if (hits.length === policy.results) break;
       }
+      recordStage("search_result", 0, { results: hits.length, profile, mode: query.mode ?? "auto" });
       return hits;
     },
   };
@@ -127,4 +209,9 @@ async function readJson(response: Response): Promise<unknown> {
   } catch (error) {
     throw new Error("Could not read Exa evidence.", { cause: error });
   } finally { reader.releaseLock(); }
+}
+
+function requestCost(data: JsonObject): number | null {
+  const value = object(data.costDollars).total;
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
 }

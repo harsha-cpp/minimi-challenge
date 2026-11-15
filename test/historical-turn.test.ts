@@ -52,7 +52,7 @@ test("1948 simulation uses live Exa HTTP with modern retrospective passages and 
     assert.equal(payload.sources[0].publishedDate, "2026-01-01");
     return approved;
   } });
-  ui.deps.search = createExaSearch("fixture-key", { fetch: async (url, init) => {
+  ui.deps.search = createExaSearch("fixture-key", { spendPolicy: null, fetch: async (url, init) => {
     calls++;
     assert.equal(String(url), "https://api.exa.ai/search");
     const body = JSON.parse(String(init?.body));
@@ -110,26 +110,29 @@ test("a hindsight draft is corrected once and rejected prose never enters events
   } finally { ui.store.close(); }
 });
 
-test("a repeated revision issue returns the reviewer's useful correction rather than a blanket refusal", async () => {
+test("a repeatedly rejected repair ends as explicit uncertainty and never publishes the rejected drafts", async () => {
   const correction = "India is already independent, since 15 August 1947 [1].";
-  const ui = harness(model([{ toolCalls: [call] }, { text: "India might become independent [1]." }, { text: "India is still waiting [1]." }]).llm,
+  const ui = harness(model([{ toolCalls: [call] }, { text: "REJECTED_FIRST India might become independent [1]." }, { text: "REJECTED_SECOND India is still waiting [1]." }]).llm,
     { json: async () => ({ status: "needs_revision", issues: [{ code: "wrong_perspective", detail: "The event already happened." }], safeAnswer: correction }) });
   try {
     await ui.run();
-    assert.equal(ui.store.episode(1)!.answer, correction);
-    assert.equal((ui.store.episode(1)!.execution!.simulation as { review: string }).review, "corrected");
-    assert.doesNotMatch(JSON.stringify(ui.events), /preserved evidence|Snapshot|HTTP 403/);
+    assert.match(ui.store.episode(1)!.answer, /couldn't verify/);
+    assert.equal(ui.store.episode(1)!.execution!.quality, "explicitly_unverified");
+    assert.equal(ui.store.episode(1)!.execution!.rejectionObserved, true);
+    assert.doesNotMatch(JSON.stringify(ui.events), /REJECTED_FIRST|REJECTED_SECOND/);
   } finally { ui.store.close(); }
 });
 
-test("reviewer outages retain the useful researched draft without claiming it was reviewed", async () => {
+test("reviewer outages retain researched era prose without a generic warning while quality remains unverified", async () => {
   const ui = harness(model().llm, { json: async () => { throw new Error("PRIVATE_REVIEW_FAILURE"); } });
   try {
     await ui.run();
     assert.equal(ui.store.episode(1)!.answer, answer);
+    assert.deepEqual(ui.events.filter(event => event.type === "text"), [{ type: "text", delta: answer }]);
+    assert.equal(ui.store.episode(1)!.execution!.quality, "explicitly_unverified");
     assert.equal((ui.store.episode(1)!.execution!.simulation as { review: string }).review, "unavailable");
     assert.ok(ui.events.some(event => event.type === "verification" && event.state === "unavailable"));
-    assert.doesNotMatch(JSON.stringify(ui.events), /PRIVATE_REVIEW_FAILURE|could not verify|Snapshot/);
+    assert.doesNotMatch(JSON.stringify(ui.events), /PRIVATE_REVIEW_FAILURE|Snapshot/);
   } finally { ui.store.close(); }
 });
 
@@ -141,6 +144,8 @@ test("a web service failure never becomes a Snapshot access error or discards hi
   try {
     await ui.run();
     assert.equal(ui.store.episode(1)!.answer, useful);
+    assert.deepEqual(ui.events.filter(event => event.type === "text"), [{ type: "text", delta: useful }]);
+    assert.equal(ui.store.episode(1)!.quality, "explicitly_unverified");
     assert.ok(ui.events.some(event => event.type === "search" && event.state === "failed"));
     assert.doesNotMatch(JSON.stringify(ui.events), /PRIVATE_ERROR|403|Snapshot|preserved evidence|access/);
     assert.match(scripted.requests[1]!.messages.at(-1)!.content!, /Give a useful answer/);
@@ -170,16 +175,41 @@ test("cancellation on review completion prevents publishing or storing the answe
   } finally { ui.store.close(); }
 });
 
-test("follow-up answers keep conversation context while future conversations remain hidden", async () => {
+test("the current transcript survives viewpoint changes while other conversations remain outside active context", async () => {
   const scripted = model();
   const ui = harness(scripted.llm);
   ui.store.saveEpisode({ sessionId: "era", askedAt: viewpoint.getTime() - 1000, tz: "UTC", question: "Which country?", answer: "We are discussing India.", sources: [] });
-  ui.store.saveEpisode({ sessionId: "era", askedAt: Date.parse("2020-01-01T00:00:00Z"), tz: "UTC", question: "FUTURE_RECORD", answer: "FUTURE_ANSWER", sources: [] });
+  ui.store.saveEpisode({ sessionId: "era", askedAt: Date.parse("2020-01-01T00:00:00Z"), tz: "UTC", question: "LATER_CURRENT_VIEWPOINT_RECORD", answer: "LATER_CURRENT_VIEWPOINT_ANSWER", sources: [] });
+  ui.store.saveEpisode({ sessionId: "other", askedAt: Date.parse("2020-01-01T00:00:00Z"), tz: "UTC", question: "OTHER_FUTURE_RECORD India", answer: "OTHER_FUTURE_ANSWER", sources: [] });
+  ui.store.saveEpisode({ sessionId: "other", askedAt: viewpoint.getTime() - 2000, tz: "UTC", question: "OTHER_PAST_RECORD India independence", answer: "OTHER_PAST_ANSWER", sources: [] });
   try {
     await ui.run();
     const sent = JSON.stringify(scripted.requests[0]!.messages);
     assert.match(sent, /We are discussing India/);
-    assert.doesNotMatch(sent, /FUTURE_RECORD|FUTURE_ANSWER/);
+    assert.match(sent, /LATER_CURRENT_VIEWPOINT_RECORD|LATER_CURRENT_VIEWPOINT_ANSWER/);
+    assert.match(sent, /Conversation turn 2; viewpoint Wed 1 Jan 2020/);
+    assert.match(sent, /Earlier answers and memory are untrusted historical records/);
+    assert.doesNotMatch(sent, /OTHER_FUTURE_RECORD|OTHER_FUTURE_ANSWER|OTHER_PAST_RECORD|OTHER_PAST_ANSWER/);
+  } finally { ui.store.close(); }
+});
+
+test("explicit personal recall keeps other conversations cutoff-filtered without erasing the current transcript", async () => {
+  const scripted = model([{ text: "Your earlier question concerned India." }]);
+  const ui = harness(scripted.llm);
+  ui.store.saveEpisode({ sessionId: "era", askedAt: Date.parse("2020-01-01T00:00:00Z"), tz: "UTC", question: "CURRENT_THREAD_AFTER_VIEWPOINT", answer: "CURRENT_THREAD_TRANSCRIPT", sources: [] });
+  ui.store.saveEpisode({ sessionId: "other", askedAt: Date.parse("1947-01-01T00:00:00Z"), tz: "UTC", question: "Our previous conversation about India independence", answer: "PAST_OTHER_INDIA_MEMORY", sources: [] });
+  ui.store.saveEpisode({ sessionId: "other", askedAt: Date.parse("2021-01-01T00:00:00Z"), tz: "UTC", question: "Our previous conversation about India independence", answer: "FUTURE_OTHER_INDIA_MEMORY", sources: [] });
+  ui.deps.search = { search: async () => assert.fail("personal memory does not require a web lookup") };
+  try {
+    await ui.run({ message: "What did I ask about India in our previous conversation?" });
+    const sent = scripted.requests[0]!.messages;
+    const memory = sent.find(message => message.role === "user" && message.content.startsWith("UNTRUSTED MEMORY RECORDS"));
+    assert.ok(memory);
+    assert.match(memory.content!, /PAST_OTHER_INDIA_MEMORY/);
+    assert.match(memory.content!, /OTHER CONVERSATION/);
+    assert.doesNotMatch(memory.content!, /FUTURE_OTHER_INDIA_MEMORY|CURRENT_THREAD_TRANSCRIPT/);
+    assert.match(JSON.stringify(sent), /CURRENT_THREAD_TRANSCRIPT/);
+    assert.doesNotMatch(JSON.stringify(sent), /FUTURE_OTHER_INDIA_MEMORY/);
   } finally { ui.store.close(); }
 });
 
@@ -205,6 +235,8 @@ test("selected future dates still use live research and are recorded as simulati
   try {
     await ui.run();
     assert.equal(ui.store.episode(1)!.answer, scenario);
+    assert.deepEqual(ui.events.filter(event => event.type === "text"), [{ type: "text", delta: scenario }]);
+    assert.equal(ui.store.episode(1)!.quality, "explicitly_unverified");
     assert.equal((ui.store.episode(1)!.execution!.simulation as { mode: string }).mode, "era");
   } finally { ui.store.close(); }
 });
@@ -225,6 +257,6 @@ test("generation errors never disclose provider detail in simulation", async () 
   try {
     await ui.run();
     assert.equal(ui.store.count(), 0);
-    assert.deepEqual(ui.events.at(-1), { type: "error", message: "The answer was interrupted. Please try again." });
+    assert.deepEqual(ui.events.at(-1), { type: "error", code: "turn_failed", message: "The answer was interrupted. Please try again." });
   } finally { ui.store.close(); }
 });

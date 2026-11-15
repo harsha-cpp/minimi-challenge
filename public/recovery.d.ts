@@ -1,0 +1,1 @@
+export function readTurn(turnId: string | { idempotencyKey: string }, request?: typeof fetch, signal?: AbortSignal): Promise<{ turn: { id: string; status: "running" | "completed" | "failed" | "interrupted" } | null; episode?: { id: number; answer: string; quality?: string }; sources?: unknown[] }>;

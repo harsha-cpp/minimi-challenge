@@ -14,6 +14,15 @@ test("private comparison imports matching recordings and rejects a different his
     const first = run([]);
     assert.equal(first.status, 0, first.stderr);
     const report = JSON.parse(readFileSync(reportPath, "utf8"));
+    assert.ok(/^[a-f0-9]{64}$/.test(report.implementationHash));
+    assert.ok(Date.parse(report.sourceSnapshotAt) <= Math.min(...report.outcomes.map((row: { sample: { trace: { receivedAt: string } } }) => Date.parse(row.sample.trace.receivedAt))));
+    for (const row of report.outcomes) {
+      assert.ok(Array.isArray(row.sample.rawRetrieval), "raw provider batches are retained independently");
+      assert.ok(Array.isArray(row.sample.admittedEvidence), "packing observations have their own capture");
+      assert.equal(row.sample.trace.outcome, "completed");
+      assert.ok(row.sample.trace.stages.some((stage: { name: string }) => stage.name === "commit"));
+      assert.ok(row.sample.sources.every((source: { n: number }) => row.sample.admittedEvidence.some((admitted: { n: number }) => admitted.n === source.n)));
+    }
 
     const sample = { ...report.outcomes[0].sample, engine: "recording-parser-test-fixture", basis: "recorded" };
     writeFileSync(baselinePath, JSON.stringify([sample]));
@@ -29,4 +38,12 @@ test("private comparison imports matching recordings and rejects a different his
     assert.notEqual(rejected.status, 0);
     assert.match(rejected.stderr, /input hash does not match/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("live benchmark requires an explicit positive campaign cap before provider setup", () => {
+  for (const options of [[], ["--max-campaign-dollars", "0"]]) {
+    const run = spawnSync(process.execPath, ["--import", "tsx", "--disable-warning=ExperimentalWarning", "eval/benchmark.ts", "--live", ...options], { encoding: "utf8" });
+    assert.notEqual(run.status, 0);
+    assert.match(run.stderr, /explicit positive --max-campaign-dollars/);
+  }
 });

@@ -18,29 +18,33 @@ export class QuestionStore implements ClarificationPort {
   private active = new Set<string>();
   constructor(path: string) {
     this.db = new DatabaseSync(path);
-    this.db.exec(`PRAGMA busy_timeout = 5000;
+    this.db.exec(`PRAGMA busy_timeout = 250;
       CREATE TABLE IF NOT EXISTS clarification_questions (
         id TEXT PRIMARY KEY, session_id TEXT NOT NULL, message TEXT NOT NULL,
         time_json TEXT NOT NULL, question_json TEXT NOT NULL, created_at INTEGER NOT NULL,
         expires_at INTEGER NOT NULL, selection_json TEXT, episode_id INTEGER
       );
       CREATE INDEX IF NOT EXISTS questions_by_session ON clarification_questions(session_id, created_at);`);
+    if (!(this.db.prepare("PRAGMA table_info(clarification_questions)").all() as Array<{name:string}>).some(row => row.name === "owner_id")) {
+      this.db.exec("ALTER TABLE clarification_questions ADD COLUMN owner_id TEXT NOT NULL DEFAULT 'local'");
+    }
+    this.db.exec("CREATE INDEX IF NOT EXISTS questions_by_owner_session ON clarification_questions(owner_id, session_id, created_at)");
   }
-  create(input: { sessionId: string; message: string; time: TurnTime; question: ClarificationQuestion }): ClarificationCard {
+  create(input: { ownerId?: string; sessionId: string; message: string; time: TurnTime; question: ClarificationQuestion }): ClarificationCard {
     const id = randomUUID(), now = Date.now();
     this.db.prepare("DELETE FROM clarification_questions WHERE expires_at < ? AND episode_id IS NULL").run(now);
-    this.db.prepare(`INSERT INTO clarification_questions (id, session_id, message, time_json, question_json, created_at, expires_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)`).run(id, input.sessionId, input.message, JSON.stringify(input.time), JSON.stringify(input.question), now, now + 86_400_000);
+    this.db.prepare(`INSERT INTO clarification_questions (id, session_id, message, time_json, question_json, created_at, expires_at, owner_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(id, input.sessionId, input.message, JSON.stringify(input.time), JSON.stringify(input.question), now, now + 86_400_000, input.ownerId ?? "local");
     return { id, message: input.message, time: input.time, ...input.question };
   }
-  pending(sessionId: string): ClarificationCard | null {
-    const row = this.db.prepare("SELECT * FROM clarification_questions WHERE session_id = ? AND episode_id IS NULL AND expires_at >= ? ORDER BY created_at DESC, rowid DESC LIMIT 1").get(sessionId, Date.now());
+  pending(sessionId: string, ownerId = "local"): ClarificationCard | null {
+    const row = this.db.prepare("SELECT * FROM clarification_questions WHERE session_id = ? AND owner_id = ? AND episode_id IS NULL AND expires_at >= ? ORDER BY created_at DESC, rowid DESC LIMIT 1").get(sessionId, ownerId, Date.now());
     if (!row) return null;
     const saved = this.decode(row);
     return { ...saved.card, ...(saved.selection ? { selection: saved.selection } : {}) };
   }
-  begin(id: string, sessionId: string, selection: ClarificationSelection): SavedQuestion {
-    const row = this.db.prepare("SELECT * FROM clarification_questions WHERE id = ? AND session_id = ? AND expires_at >= ?").get(id, sessionId, Date.now());
+  begin(id: string, sessionId: string, selection: ClarificationSelection, ownerId = "local"): SavedQuestion {
+    const row = this.db.prepare("SELECT * FROM clarification_questions WHERE id = ? AND session_id = ? AND owner_id = ? AND expires_at >= ?").get(id, sessionId, ownerId, Date.now());
     if (!row) throw new QuestionConflict("This question has expired or belongs to another conversation. Ask your question again.", "clarification_unavailable");
     if (this.active.has(id)) throw new QuestionConflict("This answer is already being prepared. Please wait.", "clarification_in_progress");
     const saved = this.decode(row);

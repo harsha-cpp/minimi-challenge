@@ -1,4 +1,11 @@
+export type RetrievalProfile = "fact" | "direct" | "verification" | "comparison" | "complete-list" | "historical" | "research";
+
 export interface SearchQuery {
+  profile?: RetrievalProfile;
+  mode?: "auto" | "lite";
+  content?: "highlights" | "full";
+  locale?: string;
+  policyVersion?: string;
   query: string;
 
   publishedAfter?: string;
@@ -37,6 +44,14 @@ export interface SearchHit {
   snapshotAsOf?: string;
   contentHash?: string;
   method?: "search" | "contents";
+  rank?: number;
+  freshness?: {
+    requested: "standard" | "fresh" | "snapshot" | "index";
+    acquisition: "live" | "cached" | "unknown";
+    contentFetchedAt?: string;
+    ageStatus: "known" | "unknown";
+  };
+  retrieval?: { profile: RetrievalProfile; mode: "auto" | "lite"; content: "highlights" | "full"; policyVersion: string; providerCostDollars?: number; providerCostScope?: "request" };
   temporal?: TemporalProvenance;
 
   archive?: {

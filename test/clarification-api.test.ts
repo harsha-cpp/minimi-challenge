@@ -20,13 +20,13 @@ test("HTTP clarification round-trip pins the original era, validates choices and
     const body = JSON.parse(Buffer.concat(parts).toString());
     modelRequests.push(body);
     if (!body.stream) {
-      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ choices: [{ message: { content: '{"status":"approved","issues":[],"summary":"done","topics":[],"claims":[]}' } }] }));
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ choices: [{ finish_reason: "stop", message: { content: '{"status":"approved","issues":[],"summary":"done","topics":[],"claims":[]}' } }] }));
       return;
     }
     const canAsk = body.tools.some((tool: any) => tool.function.name === "ask_clarification");
     const delta = canAsk ? { tool_calls: [{ index: 0, id: "call-q", type: "function", function: { name: "ask_clarification", arguments: JSON.stringify(question) } }] } : { content: "Here is the political history, from your selected date." };
     res.writeHead(200, { "content-type": "text/event-stream" });
-    res.end(`data: ${JSON.stringify({ choices: [{ delta }] })}\n\ndata: [DONE]\n\n`);
+    res.end(`data: ${JSON.stringify({ choices: [{ delta, finish_reason: canAsk ? "tool_calls" : "stop" }] })}\n\ndata: [DONE]\n\n`);
   });
   fake.listen(0, "127.0.0.1"); await once(fake, "listening");
   const address = fake.address(); assert.ok(address && typeof address !== "string");
@@ -37,7 +37,21 @@ test("HTTP clarification round-trip pins the original era, validates choices and
   const post = (path: string, data: unknown) => fetch(`http://127.0.0.1:${port}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(data) });
   const sse = async (response: Response) => { assert.equal(response.status, 200); return (await response.text()).split("\n\n").filter(line => line.startsWith("data: ")).map(line => JSON.parse(line.slice(6))); };
   try {
-    child = spawn(process.execPath, ["--import", "tsx", "--disable-warning=ExperimentalWarning", "src/server.ts"], {
+    const mockBootstrap = `
+      import { createApplication } from './src/server.ts';
+      import { loadConfig } from './src/config.ts';
+      import { createLlm } from './src/llm.ts';
+      import { MemoryStore } from './src/memory/store.ts';
+      import { QuestionStore } from './src/memory/questions.ts';
+      import { SystemClock } from './src/clock.ts';
+      const config = loadConfig(), store = new MemoryStore(config.dbPath), questions = new QuestionStore(config.dbPath);
+      const llm = createLlm(config.llm, { spendPolicy: null, fetch: (...args) => fetch(...args) });
+      const app = createApplication({ config, store, questions, deps: { llm, verifier: llm, store, questions,
+        clock: new SystemClock(), search: { search: async () => { throw new Error('Unexpected lookup in a wire fixture'); } }, enricher: { schedule() {} } } });
+      app.server.listen(config.port, config.host);
+      process.once('SIGTERM', () => { void app.shutdown(); });
+    `;
+    child = spawn(process.execPath, ["--import", "tsx", "--disable-warning=ExperimentalWarning", "--input-type=module", "--eval", mockBootstrap], {
       env: { ...process.env, PORT: String(port), DB_PATH: join(directory, "memory.db"), AGENT_NOW: "", LLM_API_KEY: "wire-test", LLM_MODEL: "wire-test", LLM_FAST_MODEL: "wire-test", LLM_REASONING_EFFORT: "", LLM_API_MODE: "chat_completions", LLM_BASE_URL: `http://127.0.0.1:${address.port}/v1`, EXA_API_KEY: "unused-wire-test" }, stdio: ["ignore", "pipe", "pipe"],
     });
     child.stdout!.on("data", chunk => { logs += chunk; }); child.stderr!.on("data", chunk => { logs += chunk; });
@@ -50,7 +64,7 @@ test("HTTP clarification round-trip pins the original era, validates choices and
     assert.ok(ready, logs);
     const originalAt = "1948-01-14T12:00:00.000Z";
     const initial = await sse(await post("/api/chat", { sessionId: "wire-session", message: "Explain the history of India", asOf: originalAt, tz: "Asia/Kolkata" }));
-    assert.deepEqual(initial.map(event => event.type), ["recall", "clarification"]);
+    assert.deepEqual(initial.map(event => event.type), ["turn", "recall", "clarification"]);
     const card = initial.find(event => event.type === "clarification").card;
     assert.equal(card.time.effectiveAt, originalAt);
     assert.deepEqual((await (await fetch(`http://127.0.0.1:${port}/api/sessions/wire-session`)).json()).episodes, []);
@@ -59,7 +73,7 @@ test("HTTP clarification round-trip pins the original era, validates choices and
     assert.equal((await post("/api/chat", { sessionId: "wrong-session", clarification: { id: card.id, selection: { optionId: "a" } } })).status, 409);
     assert.equal((await post("/api/chat", { sessionId: "wire-session", clarification: { id: card.id, selection: { optionId: "a", text: "injected" } } })).status, 400);
     assert.equal((await post("/api/chat", { sessionId: "wire-session", clarification: { id: card.id, selection: { optionId: "d" } } })).status, 409);
-    await post("/api/clock", { now: "2020-01-01T00:00:00Z" });
+    await post("/api/clock", { sessionId: "other-tab", now: "2020-01-01T00:00:00Z" });
     const resumeBody = { sessionId: "wire-session", message: "tampered message", tz: "UTC", asOf: "2030-01-01T00:00:00Z", clarification: { id: card.id, selection: { optionId: "a" } } };
     const answer = await sse(await post("/api/chat", resumeBody));
     assert.ok(answer.some(event => event.type === "done"));
