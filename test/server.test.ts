@@ -10,6 +10,7 @@ import { MemoryStore } from "../src/memory/store.ts";
 import { QuestionStore } from "../src/memory/questions.ts";
 import { requestOwner, validateAccessPolicy, type AccessPolicy } from "../src/runtime/access.ts";
 import { SseChannel } from "../src/runtime/sse.ts";
+import type { ProviderSpendingPolicy } from "../src/runtime/provider-spending.ts";
 
 async function wireFetch(url: string, init: RequestInit = {}): Promise<Response> {
   if (!(init.headers as Record<string, string> | undefined)?.host) return fetch(url, init);
@@ -36,6 +37,29 @@ async function start(llm = model(), override?: Partial<Config>) {
   return { ...app, base, post };
 }
 const events = async (response: Response): Promise<Array<Record<string, any>>> => (await response.text()).split("\n\n").filter(line => line.startsWith("data: ")).map(line => JSON.parse(line.slice(6)));
+
+test("real-provider readiness refuses missing pricing controls before creating funded work", async () => {
+  let walletOperations = 0;
+  const policy: ProviderSpendingPolicy = { store: { reserve() { walletOperations++; throw new Error("must not reserve"); },
+    getSummary() { walletOperations++; throw new Error("must not read wallet"); } },
+    priceVersion: "unconfigured", modelPrices: {}, exaAttemptMaxDollars: null };
+  const settings = { ...config(), llm: { apiKey: "unused-local-fixture", model: "test-model" }, exaApiKey: "unused-local-fixture" };
+  const app = createApplication({ config: settings, spendingPolicy: policy });
+  app.server.listen(0, "127.0.0.1"); await once(app.server, "listening");
+  const address = app.server.address(); assert.ok(address && typeof address !== "string");
+  const base = `http://127.0.0.1:${address.port}`;
+  try {
+    assert.equal((await fetch(base + "/healthz")).status, 200);
+    const ready = await fetch(base + "/readyz"); assert.equal(ready.status, 503);
+    const state = await ready.json(); assert.equal(state.ready, false);
+    assert.ok(state.missing.includes("MODEL_DEPLOYMENT_PRICES_JSON"));
+    assert.ok(state.missing.includes("SEARCH_MAX_ATTEMPT_DOLLARS"));
+    const chat = await fetch(base + "/api/chat", { method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId: "unfunded", message: "Hello", mode: "live", tz: "UTC" }) });
+    assert.equal(chat.status, 503); assert.equal(walletOperations, 0);
+    assert.equal(app.store.count(), 0);
+  } finally { await app.shutdown(); }
+});
 
 test("HTTP idempotency, lost completion recovery, redacted traces and explicit client rendering", async () => {
   let calls = 0; const llm = model(); const stream = llm.stream; llm.stream = request => { calls++; return stream(request); };

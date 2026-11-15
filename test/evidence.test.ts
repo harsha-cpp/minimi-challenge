@@ -157,9 +157,9 @@ test("recall indexes only approved statement terms and preserves them through la
     const id = store.saveEpisode({ ...episode, question: "Leadership research", answer: "Mira Chen is chief executive [1]. Unapproved Sentinel is a draft detail.",
       sources: [source], verifiedStatements: [{ text: "Mira Chen is chief executive [1].", sourceNumbers: [1] }] });
     assert.equal(store.termCoverage(["Sentinel"]).size, 0, "the whole draft must never become audited search metadata");
-    assert.equal(recall(store, "Mira Chen", new Date("2020-01-01T00:00:00Z"), "UTC").related[0]!.episode.id, id);
+    assert.equal(recall(store, "Mira Chen", new Date("2020-01-01T00:00:00Z"), "UTC", new Set(), "local", { allowCrossSession: true }).related[0]!.episode.id, id);
     store.enrich(id, { summary: "Leadership research", topics: ["leadership"], claims: [] });
-    assert.equal(recall(store, "Mira Chen", new Date("2020-01-01T00:00:00Z"), "UTC").related[0]!.episode.id, id);
+    assert.equal(recall(store, "Mira Chen", new Date("2020-01-01T00:00:00Z"), "UTC", new Set(), "local", { allowCrossSession: true }).related[0]!.episode.id, id);
     assert.equal(store.termCoverage(["Sentinel"]).size, 0);
     assert.equal(store.verifiedStatementsFor(id)[0]!.text, "Mira Chen is chief executive [1].");
     assert.throws(() => store.saveEpisode({ ...episode, sources: [source], verifiedStatements: [

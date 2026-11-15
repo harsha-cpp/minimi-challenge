@@ -1,5 +1,5 @@
 {
-  "version": "pipeline-regression-v2",
+  "version": "pipeline-regression-v3",
   "fixtures": [
     {
       "id": "historical-price",
@@ -23,7 +23,7 @@
     },
     {
       "id": "memory-visibility",
-      "sha256": "0da1cfe10237edaa42e4e06f3b39231ce590c4208dd768bb2baefc3af9d8a850"
+      "sha256": "4c0b257c65df7939fbb27b722262fed680a7253b17fa9557b92686c73af92c9e"
     }
   ]
 }

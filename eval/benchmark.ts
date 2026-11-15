@@ -52,6 +52,8 @@ for (const item of dataset) {
   if (item.tz !== undefined) { try { new Intl.DateTimeFormat("en", { timeZone: item.tz }); } catch { throw new Error(`Invalid timezone for ${item.id}`); } }
   for (const grade of Object.values(item.sourceGrades ?? {})) if (!Number.isInteger(grade) || grade < 0 || grade > 3) throw new Error("Source grades must be 0 to 3.");
   for (const terms of [item.requiredFacts, item.forbiddenFacts]) if (terms !== undefined && (!Array.isArray(terms) || terms.some(t => typeof t !== "string"))) throw new Error("Fact labels must be arrays of strings.");
+  if (item.history !== undefined && (!Array.isArray(item.history) || item.history.some(past => !past
+    || past.scope !== undefined && !["conversation", "memory"].includes(past.scope)))) throw new Error("Invalid history scope.");
   ids.add(item.id);
 }
 if (datasetPath && !live) throw new Error("Custom datasets require --live; synthetic replay uses its versioned fixtures.");
@@ -59,9 +61,9 @@ if (datasetPath && !live) throw new Error("Custom datasets require --live; synth
 // Capture the code identity before constructing or invoking any paid provider adapter.
 const sourceSnapshotAt = new Date().toISOString();
 const implementationHash = createHash("sha256").update([
-    "src/agent/run.ts", "src/agent/citations.ts", "src/agent/simulation.ts", "src/agent/prompt.ts", "src/agent/prepare.ts", "src/agent/evidence.ts", "src/agent/clarification.ts",
-    "src/llm.ts", "src/llm/responses.ts", "src/llm/gateway.ts", "src/config.ts", "src/clock.ts",
-    "src/runtime/spend-store.ts", "src/runtime/provider-spending.ts", "src/runtime/telemetry.ts", "src/runtime/access.ts", "src/runtime/sse.ts",
+    "src/agent/run.ts", "src/agent/citations.ts", "src/agent/simulation.ts", "src/agent/prompt.ts", "src/agent/prepare.ts", "src/agent/context.ts", "src/agent/evidence.ts", "src/agent/clarification.ts",
+    "src/llm.ts", "src/llm/responses.ts", "src/llm/gateway.ts", "src/config.ts", "src/clock.ts", "src/server.ts",
+    "src/runtime/spend-store.ts", "src/runtime/provider-spending.ts", "src/runtime/provider-readiness.ts", "src/runtime/spend-scope.ts", "src/runtime/telemetry.ts", "src/runtime/access.ts", "src/runtime/sse.ts",
     "src/memory/store.ts", "src/memory/recall.ts", "src/memory/enrich.ts", "src/memory/questions.ts",
     "src/search/exa.ts", "src/search/cache.ts", "src/search/validate.ts", "src/search/limit.ts", "src/search/profiles.ts", "src/search/types.ts",
     "public/citations.js", "package-lock.json", "eval/benchmark.ts", "eval/benchmark/fixtures.ts", "eval/benchmark/score.ts", "eval/pilot/budget.ts",
@@ -122,7 +124,8 @@ for (const task of dataset) {
     for (const past of input.history ?? []) {
       const at = parseInstant(past.at);
       if (!at) throw new Error(`Invalid history timestamp for ${task.id}`);
-      store.saveEpisode({ sessionId: "benchmark", askedAt: at.getTime(), tz: "UTC", question: past.question, answer: past.answer, sources: [] });
+      store.saveEpisode({ sessionId: past.scope === "memory" ? "other-benchmark-conversation" : "benchmark",
+        askedAt: at.getTime(), tz: "UTC", question: past.question, answer: past.answer, sources: [] });
     }
     const now = task.asOf ? new Date(task.asOf) : new Date();
     const events: AgentEvent[] = [];
@@ -226,6 +229,11 @@ function fixtureDeps(fixture: Fixture): { llm: Llm; search: SearchProvider } {
       stream: async request => {
         if (request.messages.some(m => typeof m.content === "string" && m.content.includes("FUTURE_SENTINEL"))) {
           request.onText("FUTURE_SENTINEL"); return { text: "FUTURE_SENTINEL", toolCalls: [] };
+        }
+        if (fixture.task.id === "memory-visibility" && !request.messages.some(message => typeof message.content === "string"
+          && message.content.includes("VISIBLE_CONTEXT_SENTINEL"))) {
+          const text = "The visible conversation context is missing.";
+          request.onText(text); return { text, toolCalls: [] };
         }
         if (!fixture.noSearch && step++ === 0) return { text: "", toolCalls: [{ id: "fixture-search", type: "function", function: { name: "web_search", arguments: JSON.stringify({ query: fixture.task.question }) } }] };
         const answer = fixture.correction && request.messages.some(message => message.role === "system" && message.content.startsWith("Revise the draft"))

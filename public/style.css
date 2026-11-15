@@ -1,4 +1,4 @@
-/* A ledger page: dates in the margin, entries to the right of a ruled red line. */
+
 
 @font-face {
   font-family: "Barlow Condensed";
@@ -14,7 +14,7 @@
   src: url("/fonts/display-800.woff2") format("woff2");
 }
 
-/* One monospace face for everything except headings, shipped with the app: reading text, dates, stamps, buttons. */
+
 @font-face {
   font-family: "IBM Plex Mono";
   font-weight: 400;
@@ -48,7 +48,7 @@
   --scroll-track: var(--paper-deep);
   --green: #2f6b4a;
   --mono: "IBM Plex Mono", "SF Mono", ui-monospace, Menlo, Consolas, monospace;
-  /* Headings: heavy condensed capitals, like lettering on a ledger's spine, over typewritten entries. */
+
   --display: "Barlow Condensed", "Arial Narrow", Impact, sans-serif;
   --gutter: 8.5rem;
   --measure: 44rem;
@@ -73,7 +73,7 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-/* Thin orange scrollbar instead of the platform default. */
+
 * {
   scrollbar-width: thin;
   scrollbar-color: var(--orange) var(--scroll-track);
@@ -128,7 +128,7 @@ a {
   text-underline-offset: 0.15em;
 }
 
-/* ---- masthead ---------------------------------------------------------- */
+
 
 .masthead {
   position: relative;
@@ -185,7 +185,7 @@ a {
   color: var(--ink);
 }
 
-/* The selected date and time, flat in the masthead. */
+
 .stamp {
   padding: 0.3rem 0.6rem;
   border: 1.5px solid var(--red);
@@ -225,7 +225,7 @@ a {
   line-height: 1.45;
 }
 
-/* A hand-drawn calendar, because the browser's own picker ignores the page's type and colours. */
+
 .cal-head {
   display: grid;
   grid-template-columns: 1.8rem minmax(0, 1fr) 1.8rem;
@@ -392,7 +392,7 @@ a {
   box-shadow: inset 0 0 0 1px var(--ink);
 }
 
-/* The real present, so it is easy to see how far the clock has been moved. */
+
 .cal-grid button.today {
   color: var(--red);
 }
@@ -431,7 +431,7 @@ a {
   color: var(--ink-soft);
 }
 
-/* One half of the time: a two-digit field with a pair of step arrows beside it. */
+
 .spin {
   display: grid;
   grid-template: 1fr 1fr / auto auto;
@@ -556,12 +556,12 @@ a {
   color: var(--ink);
 }
 
-/* ---- thread ------------------------------------------------------------ */
+
 
 .thread {
   flex: 1;
   overflow-y: auto;
-  /* The margin line of the ledger page. */
+
   background: linear-gradient(var(--red), var(--red)) calc(var(--gutter) + 3rem) 0 / 1px 100% no-repeat;
   background-attachment: local;
 }
@@ -598,12 +598,12 @@ a {
 
 .question {
   margin: 0 0 0.75rem;
-  /* Mixed case on purpose: these are the user's own words, and capitals would change how they read. */
+
   font: 700 1.55rem/1.2 var(--display);
   white-space: pre-wrap;
 }
 
-/* What the agent did before answering: dates understood, searches run. */
+
 .trace {
   margin: 0 0 0.9rem;
   padding: 0;
@@ -781,13 +781,13 @@ a {
   font: 0.85rem var(--mono);
 }
 
-/* ---- empty state ------------------------------------------------------- */
+
 
 .empty {
   padding: 4.5rem 1.5rem 2rem calc(var(--gutter) + 4.5rem);
 }
 
-/* The headline may run wider than the reading column; the text under it may not. */
+
 .empty p,
 .starters {
   max-width: var(--measure);
@@ -826,7 +826,7 @@ a {
   color: var(--red);
 }
 
-/* ---- composer ---------------------------------------------------------- */
+
 
 .composer {
   padding: 0.9rem 1.5rem 1.2rem calc(var(--gutter) + 4.5rem);
@@ -908,7 +908,7 @@ a {
   font: 0.78rem/1.5 var(--mono);
 }
 
-/* ---- ledger drawer ----------------------------------------------------- */
+
 
 .ledger {
   position: fixed;
@@ -1019,7 +1019,7 @@ a {
   font-style: italic;
 }
 
-/* ---- small screens ----------------------------------------------------- */
+
 
 @media (max-width: 760px) {
   :root {
@@ -1082,7 +1082,7 @@ a {
   }
 }
 
-/* ---- Preview edition: clearer controls, quieter research, visible evidence. ---- */
+
 :root { --measure: 52rem; --gutter: 8.5rem; }
 body { min-height: 100dvh; font-size: .96rem; line-height: 1.75; }
 .masthead { z-index: 20; background: var(--paper); padding-block: 1.3rem; }
@@ -1121,6 +1121,11 @@ body { min-height: 100dvh; font-size: .96rem; line-height: 1.75; }
 .composer textarea:focus { border-bottom-color: var(--ink); }
 .composer textarea::placeholder { font-style: normal; color: var(--ink-soft); }
 .composer #send { min-width: 7rem; min-height: 50px; padding: 1rem 1.3rem; font-size: .74rem; }
+.minimi-credit-row { display: flex; justify-content: flex-end; margin-top: .7rem; }
+.minimi-credit { display: inline-flex; align-items: center; gap: .54rem; min-height: 28.8px; color: var(--ink-soft); font: .672rem/1.5 "SF Pro Text", "SF Pro Display", -apple-system, BlinkMacSystemFont, system-ui, sans-serif; text-decoration: none; }
+.minimi-credit img { display: block; width: 91.2px; height: auto; }
+.minimi-credit:hover { color: var(--red); }
+.minimi-credit:focus-visible { outline: 1px solid var(--red); outline-offset: 5px; }
 .compose-context { font-size: .65rem; color: var(--red); margin: 0 0 .4rem; }
 .entry { padding-block: 2.85rem; }
 .body { min-width: 0; }
@@ -1236,7 +1241,7 @@ dialog.source-dialog { width: min(43rem, calc(100vw - 2rem)); max-height: calc(1
 
 @media (max-width: 760px) { .ledger-search input { font-size: 1rem; } }
 
-/* Optional clarification: a single editorial question, not a survey. */
+
 .clarification-card { margin: .5rem 0 1.2rem; border-top: 2px solid var(--ink); border-bottom: 1px solid var(--rule); padding: 1.2rem 0; }
 .clarification-card > .eyebrow { color: var(--red); }
 .clarification-card h3 { margin: .6rem 0 .55rem; font: 700 1.65rem/1.25 var(--display); }

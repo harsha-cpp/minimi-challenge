@@ -13,7 +13,7 @@ function harness(options: { budget: ModelBudget; quota?: ModelQuota; pool?: Admi
     async stream(request) {
       started.push(request.purpose!);
       request.onUsage?.({ model: "mock", inputTokens: 1000, outputTokens: 100, cachedInputTokens: 0, reasoningTokens: 0 });
-      if (request.purpose === "research") return { text: "", toolCalls: [{ id: "lookup", type: "function", function: { name: "web_search", arguments: '{"query":"current price"}' } }] };
+      if (request.purpose === "research") return { text: "", toolCalls: [{ id: "lookup", type: "function", function: { name: "web_search", arguments: '{"query":"Acme current price"}' } }] };
       assert.equal(request.purpose, "synthesis"); assert.equal(request.toolChoice, "none"); assert.deepEqual(request.tools, []);
       request.onText(draft); return { text: draft, toolCalls: [] };
     },
@@ -31,7 +31,7 @@ function harness(options: { budget: ModelBudget; quota?: ModelQuota; pool?: Admi
       llm, verifier: llm, store, clock: { now: () => new Date(), simulated: false }, enricher: { schedule() {} },
       search: { async search() { searches++; return [{ url: "https://example.com/price", title: "Official price", text: "The plan costs $25 monthly.",
         freshness: { requested: "fresh", acquisition: "live", contentFetchedAt: new Date().toISOString(), ageStatus: "known" } }]; } },
-    }, { sessionId: "budget", message: "Verify the current price and availability.", tz: "UTC", deadlineAt: Date.now() + 20_000 }, event => {
+    }, { sessionId: "budget", message: "Verify the current Acme price and availability.", tz: "UTC", deadlineAt: Date.now() + 20_000 }, event => {
       if (event.type === "text") assert.equal(store.count(), 1, "buffered synthesis must be committed first");
       events.push(event);
     }));

@@ -1,16 +1,10 @@
-/**
- * The only place the agent learns what time it is.
- *
- * Every timestamp written to memory and every "last Tuesday" resolved against
- * it goes through this, so a test (or a reviewer) can move the agent to another
- * day and ask date questions without waiting a week.
- */
+
+
 export interface Clock {
   now(): Date;
   readonly simulated: boolean;
 }
 
-/** One request owns one immutable reading, independent of subsequent clock travel. */
 export interface TurnTime {
   effectiveAt: string;
   receivedAt: string;
@@ -35,7 +29,6 @@ export class SystemClock implements Clock {
     return this.offsetMs !== 0;
   }
 
-  /** Jump to `target`; time keeps flowing from there. */
   travelTo(target: Date): void {
     this.offsetMs = target.getTime() - Date.now();
   }

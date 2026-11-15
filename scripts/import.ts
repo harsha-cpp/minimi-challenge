@@ -1,13 +1,5 @@
-/**
- * Loads past conversations into memory, for testing date questions against a
- * history you already have.
- *
- *   npm run import -- history.json
- *
- * The file is a JSON array of { "at": ISO date-time, "question": string, "answer": string }.
- * Each entry is stored at its own timestamp and then enriched exactly like a
- * live answer, so its claims can be re-checked later.
- */
+
+
 import { readFileSync } from "node:fs";
 import { loadConfig } from "../src/config.ts";
 import { createLlm } from "../src/llm.ts";

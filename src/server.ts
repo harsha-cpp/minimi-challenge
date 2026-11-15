@@ -19,11 +19,14 @@ import { QuestionStore, QuestionConflict } from "./memory/questions.ts";
 import { parseSelection, type ClarificationAnswer } from "./agent/clarification.ts";
 import { AccessError, ownerForToken, requestOwner } from "./runtime/access.ts";
 import { SseChannel } from "./runtime/sse.ts";
-import type { ProviderSpendingPolicy } from "./runtime/provider-spending.ts";
+import { defaultProviderSpending, type ProviderSpendingPolicy } from "./runtime/provider-spending.ts";
+import { providerConfigurationIssues } from "./runtime/provider-readiness.ts";
 import { POLICY_VERSION, finishTrace, newTrace, recordStage, recordUsage, serverEmission, withTrace, type TurnTrace } from "./runtime/telemetry.ts";
 const root = fileURLToPath(new URL("..", import.meta.url));
 const STATIC: Record<string, [file: string, type: string]> = {
   "/": ["public/index.html", "text/html; charset=utf-8"],
+  "/favicon.svg": ["public/favicon.svg", "image/svg+xml"],
+  "/minimi-logo.png": ["public/minimi-logo.png", "image/png"],
   "/app.js": ["public/app.js", "text/javascript; charset=utf-8"],
   "/recovery.js": ["public/recovery.js", "text/javascript; charset=utf-8"],
   "/citations.js": ["public/citations.js", "text/javascript; charset=utf-8"],
@@ -62,6 +65,7 @@ const modelTrace = (call: ModelCallTrace) => {
 
 export function createApplication(options: { config?: Config; store?: MemoryStore; questions?: QuestionStore; deps?: Deps | null; spendingPolicy?: ProviderSpendingPolicy } = {}) {
   const config = options.config ?? loadConfig();
+  const missing = [...config.missing];
   const clock = new SystemClock();
   const store = options.store ?? new MemoryStore(config.dbPath);
   const questions = options.questions ?? new QuestionStore(config.dbPath);
@@ -77,10 +81,15 @@ export function createApplication(options: { config?: Config; store?: MemoryStor
   let deps: Deps | null = options.deps ?? null;
   let worker: Enricher | undefined;
   if (options.deps === undefined && config.llm && config.exaApiKey) {
-    const llm = createModelGateway(createLlm(config.llm, { spendPolicy: options.spendingPolicy }), { pool: models, quota, defaultBudget: { maxCalls: config.limits.turnModelCalls, maxTokens: config.limits.turnTokens, ...(prices ? { prices, maxSpendUsd: config.limits.maxTurnDollars } : {}) }, outputTokens: config.limits.maxOutputTokens, onCall: modelTrace });
-    const verifier = createModelGateway(createLlm({ ...config.llm, fastModel: config.llm.model }, { spendPolicy: options.spendingPolicy }), { pool: models, quota, defaultBudget: { maxCalls: config.limits.turnModelCalls, maxTokens: config.limits.turnTokens, ...(prices ? { prices, maxSpendUsd: config.limits.maxTurnDollars } : {}) }, onCall: modelTrace });
-    worker = new Enricher(llm, store);
-    deps = { llm, verifier, clock, store, search: withCache(withConcurrency(createExaSearch(config.exaApiKey, { spendPolicy: options.spendingPolicy, maxAttemptCostDollars: config.limits.searchAttemptDollars ?? null }), 4, 16)), enricher: worker, questions };
+    const spendingPolicy = options.spendingPolicy ?? defaultProviderSpending();
+    const issues = providerConfigurationIssues(config, spendingPolicy);
+    missing.push(...issues.filter(name => !missing.includes(name)));
+    if (!issues.length) {
+      const llm = createModelGateway(createLlm(config.llm, { spendPolicy: spendingPolicy }), { pool: models, quota, defaultBudget: { maxCalls: config.limits.turnModelCalls, maxTokens: config.limits.turnTokens, ...(prices ? { prices, maxSpendUsd: config.limits.maxTurnDollars } : {}) }, outputTokens: config.limits.maxOutputTokens, onCall: modelTrace });
+      const verifier = createModelGateway(createLlm({ ...config.llm, fastModel: config.llm.model }, { spendPolicy: spendingPolicy }), { pool: models, quota, defaultBudget: { maxCalls: config.limits.turnModelCalls, maxTokens: config.limits.turnTokens, ...(prices ? { prices, maxSpendUsd: config.limits.maxTurnDollars } : {}) }, onCall: modelTrace });
+      worker = new Enricher(llm, store);
+      deps = { llm, verifier, clock, store, search: withCache(withConcurrency(createExaSearch(config.exaApiKey, { spendPolicy: spendingPolicy, maxAttemptCostDollars: config.limits.searchAttemptDollars ?? null }), 4, 16)), enricher: worker, questions };
+    }
   }
   if (options.deps) {
     const llm = createModelGateway(options.deps.llm, { pool: models, quota, defaultBudget: { maxCalls: config.limits.turnModelCalls, maxTokens: config.limits.turnTokens, ...(prices ? { prices, maxSpendUsd: config.limits.maxTurnDollars } : {}) }, outputTokens: config.limits.maxOutputTokens, onCall: modelTrace });
@@ -98,7 +107,7 @@ export function createApplication(options: { config?: Config; store?: MemoryStor
     const conversation = sessionId ? store.conversation(sessionId, ownerId) : null;
     const viewpoint = conversation ? conversation.viewpointAt : defaultViewpoint;
     return { now: new Date(viewpoint ?? Date.now()).toISOString(), simulated: viewpoint !== null,
-      mode: viewpoint !== null ? "era" : "live", model: config.llm?.model ?? null, missing: config.missing,
+      mode: viewpoint !== null ? "era" : "live", model: config.llm?.model ?? null, missing,
       episodes: store.count(Number.MAX_SAFE_INTEGER, ownerId), policyVersion: POLICY_VERSION,
       simulation: { mode: "era", research: "live-web", review: "event-time-and-sources" },
       features: { clarifications: true, durableTurns: true, conversationTime: true },
@@ -185,7 +194,7 @@ export function createApplication(options: { config?: Config; store?: MemoryStor
           const admissionStarted = performance.now();
           release = await turns.acquire({ ownerId, signal, deadlineAt: Date.now() + Math.min(15_000, config.limits.turnTimeoutMs - 500) });
           recordStage("turn_admission", performance.now() - admissionStarted, { active: turns.stats.active, queued: turns.stats.queued });
-          if (!deps) throw new RequestError(`Missing configuration: ${config.missing.join(", ")}.`, 503, "not_configured");
+          if (!deps) throw new RequestError(`Missing configuration: ${missing.join(", ")}.`, 503, "not_configured");
           channel = new SseChannel(res, () => abort.abort());
           channel.send({ type: "turn", turnId: turn!.id, provisional: true });
           const questionPort = { create: (input: Parameters<QuestionStore["create"]>[0]) => questions.create({ ...input, ownerId }) };
@@ -222,7 +231,8 @@ export function createApplication(options: { config?: Config; store?: MemoryStor
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? "/", "http://localhost"), path = url.pathname;
     if (req.method === "GET" && path === "/healthz") return sendJson(res, 200, { status: "alive" });
-    if (req.method === "GET" && path === "/readyz") return sendJson(res, !draining && deps ? 200 : 503, { ready: !draining && Boolean(deps), policyVersion: POLICY_VERSION });
+    if (req.method === "GET" && path === "/readyz") return sendJson(res, !draining && deps ? 200 : 503,
+      { ready: !draining && Boolean(deps), policyVersion: POLICY_VERSION, ...(missing.length ? { missing } : {}) });
     if (config.access.mode === "hosted" && path === "/api/auth" && req.method === "POST") {
       if (!config.access.allowedOrigins.includes(req.headers.origin ?? "") || !config.access.allowedOrigins.some(origin => new URL(origin).host === req.headers.host)) throw new AccessError(403, "invalid_origin");
       const body = await readJson(req); const token = typeof body.token === "string" ? body.token : "";
@@ -316,14 +326,14 @@ export function createApplication(options: { config?: Config; store?: MemoryStor
     if (worker) await worker.stop();
     await closed; eventLoop.disable(); store.checkpoint(); questions.close(); store.close();
   })();
-  return { server, store, questions, shutdown, state, counters, turns, models };
+  return { server, store, questions, shutdown, state, counters, turns, models, missing };
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const config = loadConfig(); const app = createApplication({ config });
   app.server.listen(config.port, config.host, () => {
     console.log(`asof is running at http://localhost:${config.port}`);
-    if (config.missing.length) console.log(`Not configured yet: ${config.missing.join(", ")} (see .env.example)`);
+    if (app.missing.length) console.log(`Not configured yet: ${app.missing.join(", ")} (see .env.example)`);
   });
   for (const name of ["SIGINT", "SIGTERM"] as const) process.once(name, () => { void app.shutdown().catch(() => { process.exitCode = 1; }); });
 }

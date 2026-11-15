@@ -27,8 +27,10 @@ evidence eligible to answer it. Frozen fixtures are now versioned as `pipeline-r
 | Sources | Retrieved passages can establish facts at the viewpoint. Previous answers remain untrusted claims to check, including when written under a later viewpoint. |
 | Background memory | Missing-reference clarification jobs complete without extracting claims, looking up prior claims or calling a model. |
 
-Implicit verification includes phrases such as “verify your claims”, “is that still true?” and
-“are you sure?”. A missing reference produces a saved clarification question with no generation,
+Implicit verification includes phrases such as “verify your claims”, “verify your claims properly now”,
+“is that still true?” and “are you sure?”. Strong references tolerate adverbs and evidence-request
+phrasing while explicit named subjects, supplied claims and URLs remain standalone requests.
+A missing reference produces a saved clarification question with no generation,
 search or enrichment call. Repeating it cannot turn that clarification into a factual target.
 
 When a valid target exists, generation receives only that bounded question/answer pair as its
@@ -44,6 +46,10 @@ A sourced answer to a different subject is rejected as `wrong_context`. Repair m
 An unavailable or invalid reference review cannot publish the possibly unrelated draft with a disclaimer;
 the result stays explicitly unresolved about the original answer.
 
+Ordinary unanchored era answers no longer receive a blanket unverified-warning prefix. Specific
+uncertainty, unresolved verification checks and the interface's evidence-quality badges remain.
+Removing that prefix does not approve a rejected draft or waive the anchored subject/support checks.
+
 The bounded quote permits 1,000 question characters and 12,000 answer characters. The hash covers the
 complete stored answer. Truncation is explicit, forbids complete verification, and requires visible
 partial/unresolved qualification. Earlier timestamps are labeled as original viewpoints and actual
@@ -53,6 +59,10 @@ The committed episode retains reference metadata. Idempotent replay recovers tha
 unbound verification replies are not trusted to define a new subject: retry follows their immediate
 same-conversation predecessors to the original answer, or asks for clarification if no safe reference
 exists. Previously saved incorrect replies are retained for audit; this repair does not rewrite history.
+An explicitly unverified bound reply contains status prose, so its next implicit retry follows the exact
+validated parent ID/hash back to the claim-bearing answer. Repeated unresolved replies follow that
+binding chain; missing, modified or cyclic parents fail closed. Supported verification answers and
+ordinary standalone unverified answers can remain the next target.
 
 ## Validation
 
@@ -60,6 +70,11 @@ Regression coverage includes backward date changes, competing other-chat topics,
 continuity, missing and repeated references, explicit topic changes, contaminated legacy retries,
 wrong-subject drafts with valid citations, reviewer outages, clipped references, owner/sequence/hash
 boundaries, date ambiguity, and real worker processing with stale prior-claim payloads.
+
+A capped live replay against a protected copy of the reported conversation selected the original
+AI-model answer and excluded the saved IPL reply. It completed durably, but its reviewer timed out
+and the answer remained explicitly unresolved. That is subject-isolation and safe-degradation
+evidence, not a factual-accuracy pass. Later retry/paraphrase refinements were checked offline.
 
 These checks enforce application provenance and publication rules. Model judgments of factual truth
 remain probabilistic; human adjudication and the wider release gates in [evaluation](../evaluation.md)

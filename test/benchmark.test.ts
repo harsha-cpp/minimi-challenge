@@ -30,6 +30,9 @@ test("input identity includes the effective time and seed history", () => {
   assert.notEqual(caseInputHash(task), caseInputHash({ ...task, asOf: "2020-11-04T10:00:00Z" }));
   assert.notEqual(caseInputHash(task), caseInputHash({ ...task, history: [{ at: "2020-11-02T10:00:00Z", question: "q", answer: "a" }] }));
   assert.notEqual(caseInputHash(task), caseInputHash({ ...task, tz: "Asia/Kolkata" }));
+  const history = [{ at: "2020-11-04T10:00:00Z", question: "coding", answer: "prior claim" }];
+  assert.notEqual(caseInputHash({ ...task, history }), caseInputHash({ ...task,
+    history: history.map(past => ({ ...past, scope: "memory" })) }));
 });
 
 test("separate raw query rankings are scored per query and never flattened", () => {

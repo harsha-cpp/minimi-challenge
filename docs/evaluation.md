@@ -114,3 +114,15 @@ The exported `run-plan.json` contains structured baseline/candidate argument arr
 Reports contain deployment identity, adapter mode, reasoning setting, retrieval policy, price-table version and deployment-envelope hash. The implementation hash includes the model adapters/gateway, durable spend guards, telemetry, configuration, retrieval profiles and limits; it is frozen with `sourceSnapshotAt` before provider work begins. Bounded stage traces separate model queue/call, search attempts/cache, evidence packing, review/repair and commit; raw/admitted/cited evidence remains separate. Review spans and committed episode summaries retain the review kind, status, failure-reason enum, calls and elapsed time, including bounded attempt summaries, without storing raw review issues or prompts in that metadata. Priced model usage and retained reservations use conservative operator envelopes and remain estimates rather than invoice amounts. Browser rendering and human adjudication still require separate observations.
 
 The first diagnostic collection contains four baseline cases, nine candidate cases and nine matched-input baseline cases: **22 completed answers, no terminal errors**. One candidate review timed out; its answer remained explicitly unverified and the full unknown-usage reservation was charged. Offline reference checks found the expected table rows, historical boundaries and uncertainty in these samples. These are machine-reviewed development observations, not human accuracy scores. The paired runs have different source hashes, and the earlier candidate predates the pre-provider source timestamp, so they do not establish a retrieval-profile benefit. Exact reports and the confounded comparison are retained under `.context/live-pilot/`. These CLI runs used in-memory conversation stores without enrichment; HTTP workload and disk-recovery evidence are separate.
+
+## Context visibility in frozen replay
+
+`pipeline-regression-v3` keeps the six-case frozen track while correcting the conversation/memory
+contract. Seed history can declare `scope: "conversation"` (the default) or `scope: "memory"` for
+another conversation. Scope participates in the input hash and is applied when seeding storage. The
+visibility fixture retains a later-viewpoint current-thread quote while excluding a future other-chat
+record. A quoted prior statement is an object of recall, not evidence that a world event had happened.
+
+The user-reported model-to-IPL substitution also has HTTP, UI, reviewer and real-worker regressions.
+A capped live protected-copy replay maintained the pinned AI answer and excluded unrelated memory;
+its review timed out, so the answer remained explicitly unverified. No factual-quality pass is claimed.

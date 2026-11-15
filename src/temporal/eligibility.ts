@@ -4,7 +4,6 @@ import { canonicalUrl } from "../search/validate.ts";
 
 type Evidence = Pick<SearchHit, "snapshotAsOf" | "publishedDate" | "temporal" | "archive"> & { url?: string };
 
-/** Admission policy, not proof that an operator's provenance attestation is truthful. */
 export function isHistoricalEvidenceEligible(source: Evidence, cutoff: Date): boolean {
   if (!Number.isFinite(cutoff.getTime())) return false;
   if (source.publishedDate && source.publishedDate > cutoff.toISOString().slice(0, 10)) return false;
@@ -24,7 +23,7 @@ export function isHistoricalEvidenceEligible(source: Evidence, cutoff: Date): bo
   }
   const temporal = source.temporal;
   if (!temporal) return source.snapshotAsOf === cutoff.toISOString();
-  // A corpus source must never masquerade as an Exa snapshot.
+
   if (source.snapshotAsOf || temporal.reviewed !== true || !temporal.documentId?.trim()) return false;
   if (!["primary-source", "archive", "revision"].includes(temporal.provenanceKind)) return false;
   const available = parseInstant(temporal.availableAt);

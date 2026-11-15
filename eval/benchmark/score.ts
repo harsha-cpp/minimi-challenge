@@ -13,7 +13,7 @@ export interface BenchmarkCase {
   requiredFacts?: string[];
   forbiddenFacts?: string[];
   expectedAbstention?: boolean;
-  history?: Array<{ at: string; question: string; answer: string }>;
+  history?: Array<{ at: string; question: string; answer: string; scope?: "conversation" | "memory" }>;
 }
 export interface RawRetrievalBatch { queryId: string; hits: SearchHit[] }
 export interface BenchmarkSample {
@@ -43,7 +43,8 @@ export interface BenchmarkSample {
 /** Deliberately project only generation inputs. Evaluation labels never enter the prompt. */
 export const generationInput = (item: BenchmarkCase) => ({ id: item.id, question: item.question,
   ...(item.asOf === undefined ? {} : { asOf: item.asOf }), ...(item.tz === undefined ? {} : { tz: item.tz }),
-  ...(item.history === undefined ? {} : { history: item.history.map(({ at, question, answer }) => ({ at, question, answer })) }) });
+  ...(item.history === undefined ? {} : { history: item.history.map(({ at, question, answer, scope }) => ({ at, question, answer,
+    ...(scope === undefined ? {} : { scope }) })) }) });
 export const caseInputHash = (item: BenchmarkCase) => createHash("sha256").update(JSON.stringify([item.question, item.asOf ?? null, item.tz ?? "UTC", generationInput(item).history ?? []])).digest("hex");
 const normalize = (text: string) => text.toLowerCase().replace(/\s+/g, " ").trim();
 const canonical = (url: string) => { const value = new URL(url); value.hash = ""; return value.href; };

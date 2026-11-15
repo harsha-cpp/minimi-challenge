@@ -1,6 +1,5 @@
 import { isRealDate } from "./zone.ts";
 
-/** ISO instants only, with explicit timezone and a real calendar date. */
 export function parseInstant(value: unknown): Date | null {
   if (typeof value !== "string") return null;
   const parts = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,3})?(Z|[+-]\d{2}:\d{2})$/.exec(value);

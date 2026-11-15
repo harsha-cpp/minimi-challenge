@@ -1,22 +1,7 @@
-/**
- * Turns the date words in a message ("last Tuesday", "3 November", "two weeks
- * ago") into calendar-day ranges, in code.
- *
- * Why not let the model do it: date arithmetic is exactly what models get
- * subtly wrong, it costs a round trip, and it cannot be unit-tested. Here the
- * rules are a table, the output is exact, and the cost is microseconds.
- *
- * Two decisions shape the rules:
- *  - Memory references point backward. "On Monday" means the Monday that
- *    already happened; anything that resolves to the future is not a memory
- *    reference and is dropped.
- *  - Ambiguity is returned, not hidden. "Last Tuesday", said on a Wednesday,
- *    can mean yesterday or the Tuesday of last week. Both come back as
- *    candidates and recall picks the one that actually has a conversation.
- */
+
+
 import { type LocalDate, addDays, compareDates, formatDate, isRealDate, localDate, weekday } from "./zone.ts";
 
-/** Local calendar days `start` through `end`, inclusive. */
 export interface DayRange {
   start: LocalDate;
   end: LocalDate;
@@ -24,15 +9,15 @@ export interface DayRange {
 }
 
 export interface TemporalRef {
-  /** The words that were matched, as written. */
+
   text: string;
-  /** Most likely reading first. More than one means the phrase is ambiguous. */
+
   candidates: DayRange[];
 }
 
 const MONTH =
   "jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?";
-// Short forms that are also ordinary words ("sat", "sun", "wed", "mon") are left out.
+
 const WEEKDAY = "monday|tuesday|wednesday|thursday|friday|saturday|sunday|tues?|thur?s?|fri";
 const QUANTITY = "an?|one|two|three|four|five|six|seven|eight|nine|ten|\\d{1,3}|(?:a\\s+)?couple(?:\\s+of)?|(?:a\\s+)?few";
 
@@ -52,10 +37,8 @@ const span = (start: LocalDate, end: LocalDate, label?: string): DayRange => ({
   label: label ?? `${formatDate(start)} – ${formatDate(end)}`,
 });
 
-/** Weeks run Monday to Sunday. */
 const mondayOf = (date: LocalDate) => addDays(date, -((weekday(date) + 6) % 7));
 
-/** A day and month with no year means the most recent one that has happened. */
 function mostRecent(m: number, d: number, today: LocalDate): LocalDate | null {
   for (const y of [today.y, today.y - 1]) {
     const date = { y, m, d };
@@ -82,22 +65,18 @@ function namedWeekday(prefix: string | undefined, target: number, today: LocalDa
   const daysBack = (weekday(today) - target + 7) % 7;
 
   if (prefix === "this") {
-    // "This Friday" on a Wednesday has not happened yet.
+
     const inThisWeek = addDays(mondayOf(today), (target + 6) % 7);
     return compareDates(inThisWeek, today) <= 0 ? [day(inThisWeek)] : null;
   }
 
   if (prefix) {
-    // "Last Tuesday": the most recent one, or the one in last week when the
-    // most recent one is still in this week. People use both; the stricter
-    // reading goes first because "yesterday" exists for the looser one.
+
     const mostRecentOne = addDays(today, -(daysBack || 7));
     const stillThisWeek = compareDates(mostRecentOne, mondayOf(today)) >= 0;
     return stillThisWeek ? [day(addDays(mostRecentOne, -7)), day(mostRecentOne)] : [day(mostRecentOne)];
   }
 
-  // Bare "on Monday". Said on a Monday it usually means a week ago, since
-  // "today" exists, but today stays a candidate.
   return daysBack === 0 ? [day(addDays(today, -7)), day(today)] : [day(addDays(today, -daysBack))];
 }
 
@@ -108,7 +87,7 @@ function ago(quantity: string, unit: string, today: LocalDate): DayRange[] {
   if (unit === "day") {
     return vague ? [span(addDays(today, -n - 1), addDays(today, -n + 1))] : [day(addDays(today, -n))];
   }
-  // "Two weeks ago" is rarely exact to the day, so these become small windows.
+
   const center = unit === "week" ? n * 7 : n * 30;
   const slack = unit === "week" ? (vague ? 5 : 2) : 7;
   return [span(addDays(today, -center - slack), addDays(today, -center + slack))];
@@ -116,24 +95,22 @@ function ago(quantity: string, unit: string, today: LocalDate): DayRange[] {
 
 interface Rule {
   pattern: RegExp;
-  /** Null means "recognised, but not a reference to the past". */
+
   resolve(match: RegExpExecArray, today: LocalDate): DayRange[] | null;
 }
 
-// Order matters: specific forms come first, and whatever a rule matches is
-// blanked out so a later, looser rule cannot match inside it.
 const RULES: Rule[] = [
   {
     pattern: /\b(\d{4})-(\d{1,2})-(\d{1,2})\b/g,
     resolve: (m, today) => explicitDate(Number(m[1]), Number(m[2]), Number(m[3]), today),
   },
   {
-    // 3 November, 3rd of Nov 2026
+
     pattern: new RegExp(`\\b(\\d{1,2})(?:st|nd|rd|th)?(?:\\s+of)?\\s+(${MONTH})\\b\\.?(?:,?\\s+(\\d{4})\\b)?`, "g"),
     resolve: (m, today) => explicitDate(m[3] ? Number(m[3]) : undefined, monthOf(m[2]!), Number(m[1]), today),
   },
   {
-    // November 3, Nov 3rd, 2026
+
     pattern: new RegExp(`\\b(${MONTH})\\.?\\s+(\\d{1,2})(?:st|nd|rd|th)?\\b(?:,?\\s+(\\d{4})\\b)?`, "g"),
     resolve: (m, today) => explicitDate(m[3] ? Number(m[3]) : undefined, monthOf(m[1]!), Number(m[2]), today),
   },
@@ -142,7 +119,7 @@ const RULES: Rule[] = [
     resolve: (m, today) => wholeMonth(Number(m[2]), monthOf(m[1]!), today),
   },
   {
-    // "on the 3rd": the most recent 3rd
+
     pattern: /\b(?:on|since)\s+the\s+(\d{1,2})(?:st|nd|rd|th)\b/g,
     resolve: (m, today) => {
       const d = Number(m[1]);
@@ -163,7 +140,7 @@ const RULES: Rule[] = [
     resolve: (m, today) => [day(addDays(mondayOf(today), -7 + ((weekdayOf(m[1]!) + 6) % 7)))],
   },
   {
-    // The lookahead keeps "monday.com" and "Monday CRM" from reading as a day.
+
     pattern: new RegExp(`\\b(?:(last|this|past|previous|next|coming)\\s+)?(${WEEKDAY})\\b(?!\\.\\w|\\s+crm)`, "g"),
     resolve: (m, today) => namedWeekday(m[1] === "past" || m[1] === "previous" ? "last" : m[1], weekdayOf(m[2]!), today),
   },
@@ -192,7 +169,7 @@ const RULES: Rule[] = [
   },
   { pattern: /\bthis\s+month\b/g, resolve: (_m, today) => [span({ y: today.y, m: today.m, d: 1 }, today)] },
   {
-    // "in October", "last March". A bare month name is too often just a word.
+
     pattern: new RegExp(`\\b(in|during|last|this)\\s+(${MONTH})\\b`, "g"),
     resolve: (m, today) => {
       const month = monthOf(m[2]!);

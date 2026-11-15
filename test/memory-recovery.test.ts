@@ -65,8 +65,8 @@ test("owner scoping covers durable turns, episodes, recall, source/claim detail 
     assert.deepEqual(store.sourcesFor(id, "b"), []); assert.deepEqual(store.claimsFor(id, "b"), []);
     assert.deepEqual(store.verifiedStatementsFor(id, "b"), []); assert.deepEqual(store.ledgerPage({ ownerId: "b" }).items, []);
     assert.equal(store.count(Number.MAX_SAFE_INTEGER, "b"), 0);
-    assert.equal(recall(store, "Barack Obama", new Date(1000), "UTC", new Set(), "b").related.length, 0);
-    assert.equal(recall(store, "Barack Obama", new Date(1000), "UTC", new Set(), "a").related[0]!.episode.id, id);
+    assert.equal(recall(store, "Barack Obama", new Date(1000), "UTC", new Set(), "b", { allowCrossSession: true }).related.length, 0);
+    assert.equal(recall(store, "Barack Obama", new Date(1000), "UTC", new Set(), "a", { allowCrossSession: true }).related[0]!.episode.id, id);
     assert.equal(store.getTurn(b.turn.id, "b")!.status, "running");
   } finally { store.close(); }
 });
@@ -133,7 +133,7 @@ test("bounded answer-only indexing covers simulations and failed enrichment with
   const store = new MemoryStore(":memory:");
   try {
     const id = store.saveEpisode({ ...exchange, execution: { simulation: { mode: "era" } } });
-    assert.equal(recall(store, "Barack Obama", new Date(1000), "UTC").related[0]!.episode.id, id);
+    assert.equal(recall(store, "Barack Obama", new Date(1000), "UTC", new Set(), "local", { allowCrossSession: true }).related[0]!.episode.id, id);
     assert.equal(store.termCoverage(["Obama"]).size, 0, "answer indexing is separate from audited metadata");
     assert.deepEqual(store.verifiedStatementsFor(id), []);
     const worker = new Enricher({ stream: async () => ({ text: "", toolCalls: [] }), json: async () => { throw new Error("must not extract simulation facts"); } }, store);
@@ -354,7 +354,7 @@ test("bounded recall retains exact coverage ranking ahead of recency", () => {
   try {
     const specific = store.saveEpisode({ ...exchange, askedAt: 100, question: "alpha beta gamma", answer: "same" });
     for (let i=0;i<300;i++) store.saveEpisode({ ...exchange, askedAt: 200+i, question: "alpha beta", answer: "same" });
-    const result = recall(store, "alpha beta gamma", new Date(1000), "UTC");
+    const result = recall(store, "alpha beta gamma", new Date(1000), "UTC", new Set(), "local", { allowCrossSession: true });
     assert.equal(result.related[0]!.episode.id, specific); assert.equal(store.topicCoverage(["alpha", "beta", "gamma"],1000).get(specific), 3);
   } finally { store.close(); }
 });
@@ -375,7 +375,7 @@ test("100k disk-backed broad-term/date recall stays SQL bounded before cutoff se
     const timings: number[] = [];
     for (let i=0;i<5;i++) {
       const start = performance.now();
-      const result = recall(store, "common broad topic", new Date(1000), "UTC");
+      const result = recall(store, "common broad topic", new Date(1000), "UTC", new Set(), "local", { allowCrossSession: true });
       timings.push(performance.now()-start);
       assert.equal(result.related.length, 3); assert.ok(result.related.every(e => e.episode.askedAt === 100));
       await delay(1);
@@ -392,7 +392,7 @@ test("100k disk-backed broad-term/date recall stays SQL bounded before cutoff se
     const broadLoop = monitorEventLoopDelay({ resolution: 10 }); broadLoop.enable(); await delay(20);
     for (let i=0;i<5;i++) {
       const start = performance.now();
-      const result = recall(store, "common broad topic", new Date(3000), "UTC");
+      const result = recall(store, "common broad topic", new Date(3000), "UTC", new Set(), "local", { allowCrossSession: true });
       allEligible.push(performance.now()-start); assert.equal(result.related.length, 3); await delay(1);
     }
     broadLoop.disable();

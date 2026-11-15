@@ -10,7 +10,7 @@ const cases: Array<[string, number[]]> = [
   ["<div><em>A fact [1, 3]</em> and another [2].</div>", [1, 2, 3]],
   ["<p>A fact &#91;1&#93; and another [2&#44; 3].</p>", [1, 2, 3]],
   ["<p><!-- [99] -->A fact [1].</p><script>[99]</script>", [1]],
-  ["<div>[<em>1</em>]</div>", []], // The renderer does not join separate text nodes.
+  ["<div>[<em>1</em>]</div>", []],
   ["`[99]` and [98](https://example.com).\n\n```html\n<div>[97]</div>\n```", []],
 ];
 for (const [answer, expected] of cases) {

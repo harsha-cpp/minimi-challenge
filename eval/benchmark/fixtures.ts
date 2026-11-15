@@ -2,7 +2,7 @@ import type { SearchHit } from "../../src/search.ts";
 import type { BenchmarkCase } from "./score.ts";
 import { createHash } from "node:crypto";
 
-export const FROZEN_FIXTURE_VERSION = "pipeline-regression-v2";
+export const FROZEN_FIXTURE_VERSION = "pipeline-regression-v3";
 export const fixtureManifest = (fixtures: Fixture[]) => fixtures.map(fixture => ({ id: fixture.task.id,
   sha256: createHash("sha256").update(JSON.stringify(fixture)).digest("hex") }));
 
@@ -38,5 +38,9 @@ export const FIXTURES: Fixture[] = [
     hits: [{ url: technologyUrl, title: "Telephone history", publishedDate: "2025-01-01", text: "In 1948 landline telephones and public telephone booths were in use. The iPhone was introduced in 2007." }],
     answer: "An iPhone is not available in this era. A landline telephone is a period-appropriate option [1]." },
   { task: { id: "present-verification", question: "Is Fictional Cloud's price still correct?", sourceGrades: { [url]: 3 }, requiredFacts: ["$25"] }, hits: [{ ...source, text: "The plan costs $25." }], answer: "The plan is $25 per month [1]." },
-  { task: { id: "memory-visibility", question: "What did I ask about secret pricing?", asOf, forbiddenFacts: ["FUTURE_SENTINEL"], history: [{ at: "2020-11-04T00:00:00Z", question: "secret pricing FUTURE_SENTINEL", answer: "FUTURE_SENTINEL" }] }, hits: [], noSearch: true, answer: "I have no earlier conversation about that." },
+  { task: { id: "memory-visibility", question: "What did I ask about coding?", asOf,
+    requiredFacts: ["VISIBLE_CONTEXT_SENTINEL"], forbiddenFacts: ["FUTURE_SENTINEL"], history: [
+      { at: "2020-11-04T00:00:00Z", question: "coding FUTURE_SENTINEL", answer: "FUTURE_SENTINEL", scope: "memory" },
+      { at: "2020-11-04T00:00:00Z", question: "coding VISIBLE_CONTEXT_SENTINEL", answer: "VISIBLE_CONTEXT_SENTINEL", scope: "conversation" },
+    ] }, hits: [], noSearch: true, answer: "Earlier in this conversation, you asked about coding: VISIBLE_CONTEXT_SENTINEL. That is a conversation reference, not an era fact." },
 ];
