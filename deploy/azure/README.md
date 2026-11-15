@@ -1,8 +1,8 @@
-# Azure deployment candidate
+# Azure deployment
 
-Status: prepared and locally validated, not deployed. Existing previews remain in place. No resource group, VM or provider credential has been created or migrated by this work.
+Status: the hosted demo was deployed on 15 November 2026 in subscription ending `838b`, resource group `minimi-challenge`, tagged `owner=harsha`. [Open the demo](https://asof-f2gl2x6yvy64q.centralindia.cloudapp.azure.com/). Access tokens are shared privately. The VM now owns the authoritative conversation database and provider wallet. Local provider credentials have been disabled to avoid competing spending histories. This is a functioning demo; the latency and independent quality release gates below remain open.
 
-## Proposed footprint and estimate
+## Deployed footprint and estimate
 
 One non-zonal `Standard_B2als_v2` VM (2 burstable vCPUs, 4 GiB RAM) in Central India, Ubuntu 24.04, one 64 GiB Standard SSD OS disk holding code and SQLite, one Standard IPv4, Key Vault with VM managed identity, and private Hot LRS Blob backups. All resources belong to `minimi-challenge` and carry `owner=harsha`. Use a free Azure public-IP hostname initially rather than purchasing a domain.
 
@@ -21,9 +21,9 @@ Retail USD rates retrieved on 15 November 2026 from the [Azure Retail Prices API
 | Egress | Small-demo allowance; measure actual traffic | 0.5000 |
 | **Estimated total** | **31-day month, before tax** | **28.8324** |
 
-This fits $30 only under these assumptions. Taxes, exchange rates, extra traffic/operations, paid log ingestion and provider inference/search are additional. It is not a hard billing ceiling. VM is burstable, so CPU credits must be observed under sustained load. Standard platform metrics and local bounded journal logs are the initial monitoring choice; do not enable unbounded Log Analytics ingestion. Configure Cost Management budget alerts at $24/$27/$30 and operational alert routing before release. Alerts do not stop consumption. The template does not yet configure those notification destinations.
+This fits $30 only under these assumptions. Taxes, exchange rates, extra traffic/operations, paid log ingestion and provider inference/search are additional. It is not a hard billing ceiling. VM is burstable, so CPU credits must be observed under sustained load. Standard platform metrics and local bounded journal logs are the initial monitoring choice; do not enable unbounded Log Analytics ingestion. The subscription bills in INR. The matching Retail Prices API rate is INR 2.3426/hour, implying about INR 95.23/USD for this quote. The monthly infrastructure budget is INR 2,850, with 80%, 90% and 100% email alerts. This is approximately the $30 pre-tax envelope, not a fixed exchange-rate guarantee. Alerts do not stop consumption. Resource-health and sustained CPU alerts route to the operator; no paid Log Analytics ingestion is enabled. Daily backup failures remain visible in systemd and require operator inspection; they do not yet have a separate email alert.
 
-The subscription SKU response permits the regional SKU but restricts zones 2 and 3. This template is deliberately non-zonal. The usage API returned an empty list, so family/regional quota is **unverified**; catalog eligibility does not guarantee allocation capacity. The image lookup resolved Ubuntu version `24.04.202610250`; recheck its availability before deployment. Do not substitute a more expensive SKU automatically.
+The subscription SKU response permits the regional SKU but restricts zones 2 and 3. This template is deliberately non-zonal. After registering Microsoft.Compute, the usage API reported 65 regional and 65 Basv2-family vCPUs available. Allocation succeeded. The VM uses Ubuntu image version `24.04.202610250`; recheck availability before a future deployment. Do not substitute a more expensive SKU automatically.
 
 [VM specifications](https://learn.microsoft.com/en-us/azure/virtual-machines/sizes/general-purpose/basv2-series) and [managed identity authentication](https://learn.microsoft.com/en-us/entra/identity/managed-identities-azure-resources/how-to-use-vm-token).
 
@@ -34,8 +34,13 @@ The subscription SKU response permits the regional SKU but restricts zones 2 and
 - `install.sh`: target-VM bootstrap for pinned Node, locked npm dependencies, Caddy and a hardened systemd service. It does not start chat or migrate databases.
 - `start.mjs`: obtain a managed-identity token, fetch `asof-config` from Key Vault and launch Node with configuration in memory. No credentials are written to an environment file.
 - `asof.service`, `Caddyfile`: one process supervisor, bounded restart policy and HTTPS reverse proxy with streaming enabled.
+- `operations.bicep`: operator secret/backup roles, 30-day Blob retention, resource-health and CPU alerts.
+- `budget.bicep`: monthly budget in the subscription billing currency with 80/90/100% notifications.
+- `backup.mjs`, `asof-backup.service`, `asof-backup.timer`: daily SQLite snapshots, integrity checks, SHA-256 manifest and managed-identity Blob upload. A prefix without a manifest is incomplete. Backup files expire after 30 days, with seven-day Blob soft deletion.
 
 The Azure CLI on the development machine has a stale default group named `elliptic`. Every mutating command must specify the subscription and `minimi-challenge` explicitly. Do not change global defaults as part of this deployment.
+
+After the infrastructure deployment, apply `operations.bicep` with the operator's Entra object ID and notification email. Apply `budget.bicep` separately with a start date at the beginning of the current month and an amount in the confirmed billing currency. The current deployment uses INR 2,850. Granting the operator secret access does not grant the VM permission to change secrets.
 
 After confirming the subscription, quota, estimate and deployment authorization, create the group and review what-if:
 
@@ -61,9 +66,9 @@ Stage the reviewed code at `/opt/asof/app`, excluding `.env`, `.context`, `data`
 
 Grant the operator permission to set secrets through a deliberate least-privilege role assignment; the VM has read-only secret access. Upload a private JSON object of environment-name/string-value pairs as the Key Vault secret `asof-config` using `az keyvault secret set --file PRIVATE_JSON_PATH --name asof-config --vault-name VAULT_NAME -o none`. Never place the values in command arguments, Git, deployment parameters or cloud-init. Include hosted owner tokens, exact HTTPS origins, both provider credentials, deployment names and the existing documented price envelopes. The startup wrapper rejects fields outside its allowlist. Configuration/read failures stop startup rather than falling back to blank or public credentials.
 
-On the VM, run the installer with non-secret `ASOF_VAULT` and `ASOF_DOMAIN` values. It installs the pinned runtime from nodejs.org and verifies the archive checksum. Installation and service/proxy behavior have not yet been exercised on an actual Azure VM.
+On the VM, run the installer with non-secret `ASOF_VAULT`, `ASOF_DOMAIN` and `ASOF_STORAGE` values. It installs the pinned runtime from nodejs.org and verifies the archive checksum. The installed VM passed all 428 tests, type checking and six frozen fixtures. The service loads credentials through managed identity and refuses to start without all three reconciled databases. Caddy obtained a public certificate and passed an authenticated SSE request over HTTPS.
 
-## Five-user baseline and comparison gate
+## Five-user baseline and target result
 
 The existing HTTP workload now accepts `--loads 5`. A local live baseline on the pinned runtime offered 20 mixed turns to five virtual users with four admitted foreground slots:
 
@@ -78,9 +83,27 @@ The existing HTTP workload now accepts `--loads 5`. A local live baseline on the
 
 Report: `.context/azure-plan/five-user-baseline/report.json`. Run caps were $2 Azure and $0.15 Exa, within the existing durable project wallet. This is a small closed-loop diagnostic, not sustained five-user capacity, independent factual correctness or browser rendering. Unverified answers must not count as independently correct.
 
-Repeat the same fixed mix, runtime, policy, cache state, limits and model configuration on the VM, with a separately recorded bounded campaign and the authoritative wallet. The harness starts its own loopback server, so it does not by itself validate public TLS/proxy delivery. Add an external authenticated SSE smoke through Caddy and record first/final events, interruption and recovery. Compare repeated paired per-class results, errors, support states, CPU credits, memory and event-loop delay. Do not declare same-or-better latency from these 20 local samples alone.
+The matching VM diagnostic also completed 20/20 turns with zero errors or rejections and the same answer-state counts. Completion p50 was **3,657 ms**, p95 **20,001 ms**. The slower tail included an 11.2-second search and repeated model review/repair. This does **not** pass a same-or-better latency claim. The two runs were several hours apart and are too small to isolate host effects from provider variability. Repeat paired per-class measurements before changing capacity.
 
-## Controlled cutover and rollback
+The workload uses its own loopback server and isolated conversation DB while charging the authoritative provider wallet. A separate public HTTPS test completed a cited SQLite verification in **12,756 ms**, with one search and three model calls. Anonymous memory access was rejected, cross-owner turn access returned 404, and replaying the idempotency key returned the saved answer. These are functional checks, not independent factual adjudication. Private target artifacts are retained in `.context/azure-plan/target-report.json` and `.context/azure-plan/public-smoke.json`.
+
+A real browser signed in through the access-token form, submitted a short response request, displayed the answer and showed it saved to the ledger. The service also passed readiness after a supervised restart. The restore drill downloaded all three backup files, checked their hashes and SQLite integrity, then restored the conversation snapshot with the application CLI: 26 episodes, 52 sources, no integrity issues and no interrupted turns.
+
+## Routine operations
+
+On the VM:
+
+```sh
+sudo systemctl status asof caddy
+curl --fail http://127.0.0.1:3000/readyz
+sudo systemctl list-timers asof-backup.timer
+sudo systemctl start asof-backup
+sudo journalctl -u asof-backup -n 20 --no-pager
+```
+
+The daily timer runs at 02:00 UTC with up to 15 minutes of jitter. Journals are bounded to 128 MiB on disk and 32 MiB at runtime. An application restore is rehearsed; a timed full-machine recovery and separate backup-failure alert are still follow-up work. Before changing the source, stop the service, preserve the newest databases, stage only reviewed source at the fixed application path, install dependencies and validate, then restart and check readiness. Keep database files outside any source replacement operation.
+
+## Completed cutover and future rollback
 
 1. Confirm which preview/database is authoritative, hosted owner identities, domain, subscription, quota, exact image and expected tax-inclusive spend. Local and Wi-Fi previews must not both become competing production writers.
 2. Install and test VM networking, TLS and service configuration without enabling a second funded worker against a copied ledger. Use mocks for the initial smoke.
@@ -88,7 +111,9 @@ Repeat the same fixed mix, runtime, policy, cache state, limits and model config
 4. Use SQLite's online backup API for each application database and the canonical provider wallet. Record hashes, schema/integrity and source paths. Do not copy only a live WAL main file. Store a protected local/off-host recovery copy.
 5. Transfer snapshots over SSH, verify hashes, install them at the configured app path and `/opt/asof/app/data/provider-spend.db`, and preserve service ownership and restrictive file modes. Never initialize a replacement empty wallet. Account for any provider activity since the snapshot.
 6. Run integrity/readiness checks; verify owner mapping and memory visibility. Start `asof` and Caddy, then run the bounded VM workload and external SSE/recovery checks. Local previews remain stopped during provider-enabled target testing to keep one authoritative wallet.
-7. Switch the advertised live URL only after the comparison/recovery checks pass. Enable startup and schedule protected Blob backups of both databases, retention and restore drills before calling the deployment operational. Backup scheduling and alert routing remain release tasks, not capabilities supplied by the template alone.
+7. Enable service startup and the backup timer only after data, authentication and recovery checks. The current deployment is advertised as a demo with its failed latency comparison stated explicitly, not as a production performance release. Daily private backups, retention and platform alert routing are enabled. A downloaded three-database snapshot passed SHA-256 and SQLite integrity checks. Full host rebuild RTO and alert delivery during an actual incident remain unmeasured.
 8. Rollback stops/drains the target first. Reconcile and transfer the **latest target wallet** and post-cutover conversation data back before restarting local service. Rolling back code must never roll back spending history or discard newly committed conversations.
 
 Do not run a blue/green pair against the same SQLite file. Do not stop the current previews, provision paid resources or perform cutover merely by running the read-only plan script.
+
+At cutover, 26 episodes across 16 conversations were preserved. The deployment copy maps the `local` owner to `harsha` across all owner-scoped tables, while the original protected snapshot retains its original ownership. A separate `reviewer` token cannot access that history. The provider wallet was copied unchanged, with zero pending reservations; all subsequent paid checks charge that same campaign on the VM. The first off-host backup and a post-validation backup both completed. Do not reactivate the archived local credentials without reconciling the newest remote wallet and conversation data.

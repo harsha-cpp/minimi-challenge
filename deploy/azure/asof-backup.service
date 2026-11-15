@@ -1,0 +1,19 @@
+[Unit]
+Description=Back up asof databases to private Azure Blob Storage
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=asof
+Group=asof
+EnvironmentFile=/etc/asof/identity.conf
+ExecStart=/usr/local/bin/node --disable-warning=ExperimentalWarning /opt/asof/app/deploy/azure/backup.mjs
+TimeoutStartSec=10min
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/asof/app/data
+MemoryMax=512M
