@@ -167,6 +167,7 @@ export function createApplication(options: { config?: Config; store?: MemoryStor
         }
       }
       const effectiveViewpoint = resumed ? resumed.card.time.simulated ? Date.parse(resumed.card.time.effectiveAt) : null : selected?.getTime() ?? null;
+      if (effectiveViewpoint !== null && effectiveViewpoint > Date.now()) throw new RequestError("Choose a date and time in the past, or return to live mode.", 400, "future_viewpoint");
       const effectiveMode = effectiveViewpoint === null ? "live" : "era";
       const tz = resumed?.card.time.tz ?? validTimeZone(typeof body.tz === "string" ? body.tz : undefined);
       const key = req.headers["idempotency-key"] ?? body.idempotencyKey ?? randomUUID();
@@ -302,6 +303,7 @@ export function createApplication(options: { config?: Config; store?: MemoryStor
     if (req.method === "POST" && path === "/api/clock") {
       const body = await readJson(req); if (!validSession(body.sessionId)) throw new RequestError("Clock changes require a conversation sessionId.", 400);
       const target = body.now === null ? null : parseInstant(body.now); if (body.now !== null && !target) throw new RequestError("Invalid date.", 400);
+      if (target && target.getTime() > Date.now()) throw new RequestError("Choose a date and time in the past, or return to live mode.", 400, "future_viewpoint");
       store.updateConversation({ ownerId, sessionId: body.sessionId, mode: target ? "era" : "live", viewpointAt: target?.getTime() ?? null });
       return sendJson(res, 200, state(ownerId, body.sessionId));
     }

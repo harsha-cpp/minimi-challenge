@@ -64,6 +64,10 @@ function tick() {
 
 async function setClock(now) {
   if (clockSaving) return;
+  if (now !== null && new Date(now).getTime() > Date.now()) {
+    showClockError("Choose a date and time in the past, or return to now.");
+    return false;
+  }
   clockSaving = true;
   showClockError("");
   $("clock").setAttribute("aria-busy", "true");
@@ -86,6 +90,8 @@ async function setClock(now) {
     clockSaving = false;
     $("clock").removeAttribute("aria-busy");
     for (const control of $("clock").querySelectorAll("button, input")) control.disabled = false;
+    drawCalendar();
+    showCalendarView(calendarView);
   }
 }
 
@@ -123,11 +129,14 @@ function drawCalendar() {
   for (let i = 0; i < blanks; i++) cells.push(el("span"));
 
   const today = new Date();
+  $("cal-next").disabled = calendarDate(year, month + 1) > today;
+  $("cal-prev").disabled = year === 1 && month === 0;
   const daysInMonth = calendarDate(year, month + 1, 0).getDate();
   for (let d = 1; d <= daysInMonth; d++) {
     const date = calendarDate(year, month, d);
     const button = el("button", [sameDay(date, picked) && "selected", sameDay(date, today) && "today"].filter(Boolean).join(" "), String(d));
     button.type = "button";
+    button.disabled = date > today;
     button.setAttribute("aria-label", dayLabel(date));
     button.setAttribute("aria-pressed", String(sameDay(date, picked)));
     button.addEventListener("click", () => {
@@ -142,10 +151,12 @@ function drawCalendar() {
 
 function choosePeriod(year, month) {
   const next = calendarDate(year, month);
-  if (next.getFullYear() < 1 || next.getFullYear() > 9999) return;
+  if (next.getFullYear() < 1 || next.getFullYear() > 9999 || next > new Date()) return;
   shown = next;
 
-  const lastDay = calendarDate(shown.getFullYear(), shown.getMonth() + 1, 0).getDate();
+  const today = new Date();
+  const lastDay = shown.getFullYear() === today.getFullYear() && shown.getMonth() === today.getMonth()
+    ? today.getDate() : calendarDate(shown.getFullYear(), shown.getMonth() + 1, 0).getDate();
   picked = calendarDate(shown.getFullYear(), shown.getMonth(), Math.min(picked.getDate(), lastDay));
   showClockError("");
   drawCalendar();
@@ -164,7 +175,8 @@ function showCalendarView(view, focus = false) {
   $("cal-earlier").hidden = !years || firstYear === 1;
   if (view !== "days") {
     const year = shown.getFullYear();
-    const lastYear = Math.min(9999, Math.max(new Date().getFullYear() + 10, year));
+    const today = new Date();
+    const lastYear = Math.min(9999, today.getFullYear());
     firstYear = Math.min(firstYear, year);
     const values = months ? monthNames.map((_, month) => month) : Array.from({ length: lastYear - firstYear + 1 }, (_, i) => lastYear - i);
     $("cal-options").classList.toggle("years", years);
@@ -173,10 +185,11 @@ function showCalendarView(view, focus = false) {
       const selected = months ? value === shown.getMonth() : value === year;
       const option = el("button", selected ? "selected" : "", months ? monthNames[value] : String(value));
       option.type = "button";
+      option.disabled = months && calendarDate(year, value) > today;
       option.dataset.value = String(value);
       option.setAttribute("aria-pressed", String(selected));
       option.addEventListener("click", () => {
-        choosePeriod(months ? shown.getFullYear() : value, months ? value : shown.getMonth());
+        choosePeriod(months ? shown.getFullYear() : value, months ? value : Math.min(shown.getMonth(), value === today.getFullYear() ? today.getMonth() : 11));
         showCalendarView(months ? "days" : "months", true);
       });
       return option;
@@ -289,7 +302,7 @@ function toggleClock(open) {
   $("stamp").setAttribute("aria-expanded", String(open));
   if (open) {
     showClockError("");
-    picked = agentNow();
+    picked = new Date(Math.min(agentNow().getTime(), Date.now()));
     shown = calendarDate(picked.getFullYear(), picked.getMonth());
     firstYear = Math.max(1, Math.min(1900, picked.getFullYear() - 10));
     pickedMinutes = picked.getHours() * 60 + picked.getMinutes();
@@ -312,7 +325,7 @@ $("cal-earlier").addEventListener("click", () => {
   $("cal-options").scrollTop = scroll;
 });
 $("cal-options").addEventListener("keydown", (event) => {
-  const buttons = [...$("cal-options").querySelectorAll("button")];
+  const buttons = [...$("cal-options").querySelectorAll("button:not(:disabled)")];
   const index = buttons.indexOf(document.activeElement);
   const columns = calendarView === "years" ? 4 : 3;
   const delta = { ArrowLeft: -1, ArrowRight: 1, ArrowUp: -columns, ArrowDown: columns }[event.key];
@@ -586,6 +599,7 @@ function showActions(view, failed = false) {
 }
 function completeEntry(view, timings, cited) {
   view.cited = cited; view.turnStatus = "completed"; clearPendingTurn(view);
+  view.details.open = false;
   view.steps.hidden = true;
   paintView(view);
   const sources = view.dataSources.filter(source => cited.includes(source.n));
@@ -637,6 +651,7 @@ async function send(message, options = {}) {
   const view = options.view ?? addEntry(message.trim());
   view.text = ""; view.dataSources = []; view.answer.replaceChildren(); view.actions.hidden = true;
   view.details.hidden = false;
+  view.details.open = true;
   view.status.classList.remove("is-complete", "is-interrupted");
   const requestStarted = performance.now();
   const noteRender = () => {
@@ -715,6 +730,7 @@ async function send(message, options = {}) {
     await reader?.cancel().catch(() => {});
     cancelAnimationFrame(frame);
     if (completed) { paintView(view); requestAnimationFrame(noteRender); }
+    else if (view.turnStatus !== "running") view.details.open = false;
     if (inFlight === abort) { inFlight = null; setBusy(false);
       if (view.awaitingClarification) view.clarification.querySelector("h3")?.focus({ preventScroll: true });
     }

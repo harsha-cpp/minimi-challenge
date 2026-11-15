@@ -140,6 +140,25 @@ test("conversation dates are scoped and live mode resets prior simulated mode", 
   } finally { await app.shutdown(); }
 });
 
+test("future clock, explicit chat and persisted viewpoints fail before provider work", async () => {
+  let calls = 0; const llm = model(), stream = llm.stream;
+  llm.stream = request => { calls++; return stream(request); };
+  const app = await start(llm), future = new Date(Date.now() + 86400000).toISOString();
+  try {
+    const clock = await app.post("/api/clock", { sessionId: "future", now: future });
+    assert.equal(clock.status, 400); assert.equal((await clock.json()).code, "future_viewpoint");
+    assert.equal(app.store.conversation("future"), null);
+    const explicit = await app.post("/api/chat", { sessionId: "future", message: "Hello", mode: "era", asOf: future });
+    assert.equal(explicit.status, 400); assert.equal((await explicit.json()).code, "future_viewpoint");
+    app.store.updateConversation({ sessionId: "legacy-future", mode: "era", viewpointAt: Date.parse(future) });
+    assert.equal((await app.post("/api/chat", { sessionId: "legacy-future", message: "Hello" })).status, 400);
+    assert.equal(calls, 0); assert.equal(app.store.count(), 0);
+    await events(await app.post("/api/chat", { sessionId: "legacy-future", message: "Hello", mode: "live" }));
+    assert.equal(calls, 1); assert.equal(app.store.conversation("legacy-future")!.viewpointAt, null);
+    assert.equal((await app.post("/api/clock", { sessionId: "future", now: new Date(Date.now() - 60000).toISOString() })).status, 200);
+  } finally { await app.shutdown(); }
+});
+
 test("100 offered turns keep bounded turn/model work; rejected turns never enter providers", async () => {
   let active = 0, peak = 0, calls = 0; let finish!: () => void; const gate = new Promise<void>(resolve => { finish = resolve; });
   const llm: Llm = { json: async () => ({}), stream: async request => { calls++; active++; peak = Math.max(peak, active); await gate; active--; request.onText("Hello"); return { text: "Hello", toolCalls: [] }; } };

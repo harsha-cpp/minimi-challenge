@@ -11,7 +11,7 @@ import { citationTextNodes } from "../public/citations.js";
 const html = readFileSync(new URL("../public/index.html", import.meta.url), "utf8");
 const app = readFileSync(new URL("../public/app.js", import.meta.url), "utf8").replace('import { citationTextNodes } from "./citations.js";\n', "").replace('import { readTurn } from "./recovery.js";\n', "");
 
-async function mount(options: { date?: Date; post?: (body: { now: string | null }) => Promise<Response>; chatEvents?: Array<Record<string, unknown>>; chatReplies?: Array<Array<Record<string, unknown>> | { status: number; error: string; code: string }>; pendingCard?: Record<string, unknown>; memoryEpisodes?: Array<Record<string, unknown>>; savedSession?: string; turnReplies?: Array<Record<string, unknown>>; pendingTurn?: Record<string, unknown>; chatBeforeHeadersFailure?: boolean } = {}) {
+async function mount(options: { date?: Date; post?: (body: { now: string | null }) => Promise<Response>; chatEvents?: Array<Record<string, unknown>>; chatReplies?: Array<Array<Record<string, unknown>> | { status: number; error: string; code: string }>; pendingCard?: Record<string, unknown>; memoryEpisodes?: Array<Record<string, unknown>>; savedSession?: string; turnReplies?: Array<Record<string, unknown>>; pendingTurn?: Record<string, unknown>; chatBeforeHeadersFailure?: boolean; beforeChatReply?: () => Promise<void> } = {}) {
   const dom = new JSDOM(html, { url: "http://localhost:3000/", runScripts: "outside-only", pretendToBeVisual: true });
   const { window } = dom;
   if (options.savedSession) window.sessionStorage.setItem("asof.preview.session.v2", options.savedSession);
@@ -39,6 +39,7 @@ async function mount(options: { date?: Date; post?: (body: { now: string | null 
       if (path === "/api/chat" && (options.chatEvents || options.chatReplies)) {
         chatRequests.push(JSON.parse(String(init?.body)));
         chatKeys.push((init!.headers as Record<string, string>)["idempotency-key"]!);
+        await options.beforeChatReply?.();
         if (options.chatBeforeHeadersFailure && chatRequests.length === 1) throw new TypeError("Lost response before headers");
         const reply = options.chatReplies?.[chatRequests.length - 1] ?? options.chatEvents ?? [];
         return Array.isArray(reply) ? new Response(reply.map(event => `data: ${JSON.stringify(event)}\n\n`).join("")) : Response.json(reply, { status: reply.status });
@@ -77,6 +78,67 @@ test("month navigation submits the visible month without requiring a second day 
     assert.match(ui.button("#stamp").textContent!, /Simulated.*13 Oct 2026/);
     assert.equal(ui.form.hidden, true);
   } finally { ui.dom.window.close(); }
+});
+
+test("calendar blocks future days, months and years while allowing earlier periods", async () => {
+  const now = new Date(), ui = await mount({ date: now });
+  try {
+    ui.open(); assert.equal(ui.button("#cal-next").disabled, true);
+    for (const button of ui.window.document.querySelectorAll<HTMLButtonElement>("#cal-grid button")) {
+      assert.equal(button.disabled, Number(button.textContent) > now.getDate());
+    }
+    ui.button("#cal-month").click();
+    for (const button of ui.window.document.querySelectorAll<HTMLButtonElement>("#cal-options button")) {
+      assert.equal(button.disabled, Number(button.dataset.value) > now.getMonth());
+    }
+    ui.button("#cal-year").click();
+    assert.ok([...ui.window.document.querySelectorAll<HTMLButtonElement>("#cal-options button")].every(button => Number(button.dataset.value) <= now.getFullYear()));
+    ui.choose("year", now.getFullYear() - 1); ui.choose("month", 11);
+    assert.equal(ui.button("#cal-next").disabled, false);
+    ui.travel(); await nextTurn();
+    assert.equal(ui.requests.length, 1);
+    // Reopening and changing back to this year must not carry December into the future.
+    ui.open(); ui.choose("year", now.getFullYear());
+    assert.equal(ui.button("#cal-month").textContent, now.toLocaleDateString("en-GB", { month: "long" }));
+    assert.equal(ui.button("#cal-next").disabled, true);
+  } finally { ui.dom.window.close(); }
+});
+
+test("future time on today's date is rejected before sending a clock change", async () => {
+  const now = new Date(), ui = await mount({ date: now });
+  try {
+    ui.open();
+    const noon = new Date(now); noon.setHours(12, 0, 0, 0);
+    ui.window.Date.now = () => noon.getTime();
+    for (const [id, value] of [["clock-hour", "23"], ["clock-minute", "59"]]) {
+      const input = ui.window.document.getElementById(id!) as HTMLInputElement;
+      input.value = value!; input.dispatchEvent(new ui.window.Event("input", { bubbles: true }));
+    }
+    ui.travel(); await nextTurn();
+    assert.equal(ui.requests.length, 0);
+    assert.match(ui.window.document.getElementById("clock-error")!.textContent!, /past/);
+    assert.equal(ui.form.hidden, false);
+  } finally { ui.dom.window.close(); }
+});
+
+test("research details open during generation, close on completion and remain user-toggleable", async () => {
+  let finish!: () => void;
+  const gate = new Promise<void>(resolve => { finish = resolve; });
+  const ui = await mount({ beforeChatReply: () => gate, chatEvents: [
+    { type: "text", delta: "A completed answer." },
+    { type: "done", episodeId: 1, cited: [], timings: { recallMs: 0, searches: 0, modelCalls: 1, totalMs: 20 } },
+  ] });
+  try {
+    (ui.window.document.getElementById("input") as HTMLTextAreaElement).value = "Hello";
+    ui.button("#send").click(); await nextTurn();
+    const details = ui.window.document.querySelector(".answer-details") as HTMLDetailsElement;
+    assert.equal(details.open, true);
+    finish(); await nextTurn(); await nextTurn();
+    assert.match(ui.window.document.querySelector(".answer-status")!.textContent!, /Saved to Ledger/);
+    assert.equal(details.open, false);
+    details.querySelector("summary")!.click(); await nextTurn(); assert.equal(details.open, true);
+    details.querySelector("summary")!.click(); assert.equal(details.open, false);
+  } finally { finish(); ui.dom.window.close(); }
 });
 
 test("compose shortcut focuses the input and live mode hides the composer date strip", async () => {
@@ -180,7 +242,7 @@ test("modern source dates are identified as publication dates beside a simulated
 for (const [initial, target, navigation] of [
   [new Date(2026, 0, 31, 12), new Date(2026, 1, 28, 12), "#cal-next"],
   [new Date(2024, 0, 31, 12), new Date(2024, 1, 29, 12), "#cal-next"],
-  [new Date(2026, 11, 31, 12), new Date(2027, 0, 31, 12), "#cal-next"],
+  [new Date(2024, 11, 31, 12), new Date(2025, 0, 31, 12), "#cal-next"],
   [new Date(2026, 2, 31, 12), new Date(2026, 1, 28, 12), "#cal-prev"],
 ] as const) {
   test(`month navigation clamps the selected day at month/year boundaries: ${initial.toISOString()}`, async () => {
