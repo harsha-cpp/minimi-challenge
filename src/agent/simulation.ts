@@ -121,14 +121,17 @@ Return ONLY JSON: {"status":"approved"|"needs_revision","issues":[],"safeAnswer"
 "claimChecks":[{"claim":"One material factual assertion","sourceNumbers":[1],"supported":true,"applicable":true}]}.
 Include one check for EVERY material factual assertion, not only claims with citations. supported means
 the exact cited passage entails the assertion; applicable means it applies to this entity, date and units.
+Keep each claim label to a short identifying phrase, at most twelve words; do not copy whole sentences
+or explain successful checks. Assess the full assertion even when its identifying label is abbreviated.
 Use supported only if all material assertions have applicable evidence and required scope is covered.
 Use supported_partial for supported assertions with clearly enumerated unresolved requested facets.
 An answer making no factual assertions may be explicitly_unverified, with claimChecks empty.
 Use needs_revision with concise issues whenever an assertion lacks support or consequential freshness
 is unknown without disclosure. Allowed issue codes: unsupported_claim, missing_citation, incomplete_answer,
 wrong_perspective. Keep at most eight issues, each {"code":"unsupported_claim","detail":"Specific problem"}.
-A safeAnswer is optional and must remove unsupported assertions, preserve supported parts with citations,
-and state specific uncertainty, up to 6000 characters. Never invent citations or evidence.`;
+For needs_revision, return the concise issues, safeAnswer:null and claimChecks:[]; do not write a
+replacement answer or repeat successful checks. The application handles the rewrite separately.
+For approved, use safeAnswer:null. Never invent citations or evidence.`;
 
 export async function reviewSimulationAnswer(input: SimulationReviewInput): Promise<SimulationReview> {
   const started = performance.now();
@@ -138,7 +141,7 @@ export async function reviewSimulationAnswer(input: SimulationReviewInput): Prom
   input.signal?.throwIfAborted();
   // Claim-by-claim current checks can exceed the shorter editorial era review window.
   // The parent turn deadline still bounds the whole operation.
-  const timeoutMs = input.timeoutMs ?? (input.kind === "verification" || input.reference ? 25_000 : 10_000);
+  const timeoutMs = input.timeoutMs ?? (input.kind === "verification" || input.reference ? 30_000 : 10_000);
   const researchedAt = input.researchedAt ?? new Date();
   if (!Number.isFinite(input.viewpoint.getTime()) || !Number.isFinite(researchedAt.getTime())
     || !input.question.trim() || !input.answer.trim() || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30_000) {
@@ -226,7 +229,7 @@ export async function reviewSimulationAnswer(input: SimulationReviewInput): Prom
       ? result.safeAnswer : undefined;
     // The verdict and correction are independent: malformed corrections must never erase rejection.
     if (result.status === "needs_revision") return finish("needs_revision", issues,
-      { ...(safeAnswer ? { safeAnswer } : { reason: "invalid_review_output" }) });
+      { ...(safeAnswer ? { safeAnswer } : verificationReview && result.safeAnswer == null ? {} : { reason: "invalid_review_output" }) });
     let referenceQuality: EvidenceQuality | undefined;
     if (reference) {
       const check = record(result.referenceCheck);

@@ -173,6 +173,15 @@ test("supported uncertainty is approved without manufacturing factual assertions
   assert.equal(review.quality, "explicitly_unverified");
 });
 
+test("verification rejection can return concise findings without generating a duplicate rewrite", async () => {
+  const review = await reviewSimulationAnswer({ llm: { json: async () => rejected(null) },
+    kind: "verification", question: "Verify the current price", answer, sources: [{ ...hit, n: 1 }], viewpoint: new Date(), timeoutMs: 100 });
+  assert.equal(review.status, "needs_revision");
+  assert.equal(review.issues[0]!.code, "unsupported_claim");
+  assert.equal(review.reason, undefined);
+  assert.equal(review.safeAnswer, undefined);
+});
+
 test("supplied-text transformations and ordinary conversation preserve the no-review path", () => {
   for (const question of ['Translate into French: Verify the current price.', 'Rewrite "verify the latest price" politely.', 'hi']) {
     assert.equal(turnPolicy(question, false).requireVerificationEvidence, false);

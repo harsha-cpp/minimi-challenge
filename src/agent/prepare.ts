@@ -84,6 +84,7 @@ export function preparePrompt(input: { message: string; time: TurnTime; history:
     ...(input.requestContext?.anchor ? [
       `PINNED CONVERSATION REFERENCE: ${JSON.stringify({ episodeId: input.requestContext.anchor.episodeId, sequence: input.requestContext.anchor.sequence, answerHash: input.requestContext.anchor.answerHash, originalViewpoint: new Date(input.requestContext.anchor.viewpointAt).toISOString(), truncated: input.requestContext.anchor.truncated })}. The preceding assistant answer in this prompt is the exact bounded object of the follow-up. Check those claims about those entities. Never substitute another remembered topic or task.`,
       "The quoted prior answer is the object to check, not evidence and not knowledge established at this viewpoint. If its products or claims were unavailable or unestablished at the selected date, explain that for the same subject. Do not switch subjects to find an answerable historical question.",
+      "Keep the re-check concise: a brief verdict and a compact cited comparison of the original items, including corrections and unresolved details. Do not repeat the full earlier answer or introduce unrelated claims. Distinguish a dated announcement from a claim that pricing, access or availability remains unchanged today.",
       ...(input.requestContext.anchor.truncated ? ["Only an excerpt of the referenced answer fits. Check only the supplied excerpt and explicitly state that the remaining claims are unverified; never claim to have checked the complete original answer."] : []),
     ] : []),
   ].join("\n");
