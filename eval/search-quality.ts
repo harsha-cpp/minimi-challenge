@@ -5,11 +5,10 @@ export interface SearchCase {
   id: string;
   query: SearchQuery;
   expectedDomains: string[];
-  /** Lexical diagnostics only; these do not establish factual correctness. */
+
   evidenceTerms: string[];
 }
 
-/** Small, inspectable seed set. Expand it before making comparative claims. */
 export const SEARCH_CASES: SearchCase[] = [
   { id: "postgres-pricing", query: { query: "Neon current Postgres pricing plans", domains: ["neon.com"], freshness: "fresh" }, expectedDomains: ["neon.com"], evidenceTerms: ["pricing", "compute", "storage"] },
   { id: "direct-pricing", query: { query: "Supabase Pro monthly plan price and limits", urls: ["https://supabase.com/pricing"], freshness: "fresh" }, expectedDomains: ["supabase.com"], evidenceTerms: ["pro", "month", "database"] },

@@ -1,12 +1,17 @@
 import type { SearchHit } from "../../src/search.ts";
 import type { BenchmarkCase } from "./score.ts";
+import { createHash } from "node:crypto";
+
+export const FROZEN_FIXTURE_VERSION = "pipeline-regression-v2";
+export const fixtureManifest = (fixtures: Fixture[]) => fixtures.map(fixture => ({ id: fixture.task.id,
+  sha256: createHash("sha256").update(JSON.stringify(fixture)).digest("hex") }));
 
 export interface Fixture {
   task: BenchmarkCase;
   hits: SearchHit[];
   answer: string;
   noSearch?: boolean;
-  /** The scripted review/repair branch is plumbing coverage, never model-quality grading. */
+
   correction?: { answer: string; issue: string };
 }
 const asOf = "2020-11-03T09:00:17.123Z";
@@ -18,7 +23,6 @@ const historySource = { url: historyUrl, title: "Independence timeline", publish
   text: "In 1946 India had not yet become independent; political negotiations continued. India became independent on 15 August 1947." };
 const technologyUrl = "https://example.com/technology-history";
 
-/** Labeled scripted responses exercise live-research era orchestration, not model quality. */
 export const FIXTURES: Fixture[] = [
   { task: { id: "historical-price", question: "What was Fictional Cloud's price?", asOf, sourceGrades: { [url]: 3 }, requiredFacts: ["$19"], forbiddenFacts: ["$99"], expectedAbstention: false }, hits: [source], answer: "The Starter plan was $19 per month [1]." },
   { task: { id: "completed-event-premise", question: "Will India get independence?", asOf: "1948-01-14T08:17:10.442Z",

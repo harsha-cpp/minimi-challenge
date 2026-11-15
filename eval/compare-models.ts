@@ -1,4 +1,4 @@
-/** Real Azure deployment comparisons. Fixed-evidence and live-Exa tracks stay separate. */
+
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
