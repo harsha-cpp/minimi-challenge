@@ -4,7 +4,7 @@ A chat agent with one tool, **web search**, and a memory of what it told you and
 
 asof connects the current conversation to fresh web research. Ask a question, come back later, and check whether the answer still holds. Follow-ups stay anchored to the current chat, even when the viewpoint changes. Other conversations are recalled only when you explicitly ask for personal memory; their claims are reference records rather than verified evidence.
 
-**Live demo:** [Open asof](https://asof-f2gl2x6yvy64q.centralindia.cloudapp.azure.com/). No sign-in required. Each browser has its own chat history; return in the same browser to revisit earlier answers.
+**Live demo:** [click here to open live demo](https://asof-f2gl2x6yvy64q.centralindia.cloudapp.azure.com/). No sign-in required. Each browser has its own chat history; return in the same browser to revisit earlier answers.
 
 [Design decisions](DESIGN.md) · [Architecture](docs/architecture/README.md) · [Evaluation](docs/evaluation.md)
 
