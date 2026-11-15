@@ -597,14 +597,21 @@ export class MemoryStore {
     const row = this.db.prepare("SELECT * FROM episodes WHERE id=? AND owner_id=?").get(id,ownerId) as Row | undefined;
     return row ? toEpisode(row) : null;
   }
-  episodesBetween(startMs: number, endMs: number, knownAt = Number.MAX_SAFE_INTEGER, ownerId = "local", limit = MAX_DATE_EPISODES): Episode[] {
-    return (this.db.prepare("SELECT * FROM episodes WHERE owner_id=? AND asked_at>=? AND asked_at<? AND asked_at<=? ORDER BY asked_at,id LIMIT ?")
-      .all(ownerId,startMs,endMs,knownAt,boundedLimit(limit)) as Row[]).map(toEpisode);
+  episodesBetween(startMs: number, endMs: number, knownAt = Number.MAX_SAFE_INTEGER, ownerId = "local", limit = MAX_DATE_EPISODES, sessionId?: string): Episode[] {
+    return (this.db.prepare(`SELECT * FROM episodes WHERE owner_id=? AND asked_at>=? AND asked_at<? AND asked_at<=? ${sessionId === undefined ? "" : "AND session_id=?"} ORDER BY asked_at,id LIMIT ?`)
+      .all(ownerId,startMs,endMs,knownAt,...(sessionId === undefined ? [] : [sessionId]),boundedLimit(limit)) as Row[]).map(toEpisode);
   }
-  neighbours(beforeMs: number, afterMs: number, knownAt = Number.MAX_SAFE_INTEGER, ownerId = "local"): Episode[] {
-    const before = this.db.prepare("SELECT * FROM episodes WHERE owner_id=? AND asked_at<? AND asked_at<=? ORDER BY asked_at DESC,id DESC LIMIT 1").get(ownerId,beforeMs,knownAt);
-    const after = this.db.prepare("SELECT * FROM episodes WHERE owner_id=? AND asked_at>=? AND asked_at<=? ORDER BY asked_at,id LIMIT 1").get(ownerId,afterMs,knownAt);
+  neighbours(beforeMs: number, afterMs: number, knownAt = Number.MAX_SAFE_INTEGER, ownerId = "local", sessionId?: string): Episode[] {
+    const scope = sessionId === undefined ? "" : "AND session_id=?", params = sessionId === undefined ? [] : [sessionId];
+    const before = this.db.prepare(`SELECT * FROM episodes WHERE owner_id=? AND asked_at<? AND asked_at<=? ${scope} ORDER BY asked_at DESC,id DESC LIMIT 1`).get(ownerId,beforeMs,knownAt,...params);
+    const after = this.db.prepare(`SELECT * FROM episodes WHERE owner_id=? AND asked_at>=? AND asked_at<=? ${scope} ORDER BY asked_at,id LIMIT 1`).get(ownerId,afterMs,knownAt,...params);
     return [before,after].filter(r => r !== undefined).map(r => toEpisode(r as Row));
+  }
+  /** Visible transcript order is independent of the selected research viewpoint. These are previous statements, not as-of evidence. */
+  currentConversationHistory(sessionId: string, limit: number, ownerId = "local", beforeSequence = Number.MAX_SAFE_INTEGER): Episode[] {
+    if (!Number.isSafeInteger(beforeSequence) || beforeSequence < 1) return [];
+    return (this.db.prepare("SELECT * FROM episodes WHERE owner_id=? AND session_id=? AND sequence<? ORDER BY sequence DESC,id DESC LIMIT ?")
+      .all(ownerId,sessionId,beforeSequence,boundedLimit(limit,100)) as Row[]).map(toEpisode).reverse();
   }
   sessionHistory(sessionId: string, limit: number, knownAt = Number.MAX_SAFE_INTEGER, ownerId = "local"): Episode[] {
     return (this.db.prepare("SELECT * FROM episodes WHERE owner_id=? AND session_id=? AND asked_at<=? ORDER BY sequence DESC,id DESC LIMIT ?")
@@ -615,28 +622,29 @@ export class MemoryStore {
   termCoverage(terms: string[], knownAt = Number.MAX_SAFE_INTEGER, ownerId = "local"): Map<number,number> {
     return this.coverage(terms,knownAt,ownerId,false);
   }
-  topicCoverage(terms: string[], knownAt = Number.MAX_SAFE_INTEGER, ownerId = "local"): Map<number,number> {
-    return this.coverage(terms,knownAt,ownerId,true);
+  topicCoverage(terms: string[], knownAt = Number.MAX_SAFE_INTEGER, ownerId = "local", sessionId?: string): Map<number,number> {
+    return this.coverage(terms,knownAt,ownerId,true,sessionId);
   }
-  private coverage(terms: string[], knownAt: number, ownerId: string, includeAnswers: boolean): Map<number,number> {
+  private coverage(terms: string[], knownAt: number, ownerId: string, includeAnswers: boolean, sessionId?: string): Map<number,number> {
     const clean = [...new Set(terms)].slice(0,12).filter(t => t.trim() && t.length <= 100);
     if (!clean.length) return new Map();
     const selects: string[] = [], params: Array<string|number> = [];
     // Keep FTS as the scan driver: the owner/time index otherwise induces one FTS lookup per eligible episode.
     clean.forEach((term,index) => {
       const match = `"${term.replaceAll('"','""')}"`;
-      selects.push(`SELECT e.id,${index} AS term FROM episodes_fts f CROSS JOIN episodes e ON e.id=f.rowid WHERE episodes_fts MATCH ? AND e.owner_id=? AND e.asked_at<=?`);
-      params.push(match,ownerId,knownAt);
-      if (includeAnswers) { selects.push(`SELECT e.id,${index} AS term FROM conversation_fts f CROSS JOIN episodes e ON e.id=f.rowid WHERE conversation_fts MATCH ? AND e.owner_id=? AND e.asked_at<=?`); params.push(match,ownerId,knownAt); }
+      const scope = sessionId === undefined ? "" : "AND e.session_id=?", sessionParams = sessionId === undefined ? [] : [sessionId];
+      selects.push(`SELECT e.id,${index} AS term FROM episodes_fts f CROSS JOIN episodes e ON e.id=f.rowid WHERE episodes_fts MATCH ? AND e.owner_id=? AND e.asked_at<=? ${scope}`);
+      params.push(match,ownerId,knownAt,...sessionParams);
+      if (includeAnswers) { selects.push(`SELECT e.id,${index} AS term FROM conversation_fts f CROSS JOIN episodes e ON e.id=f.rowid WHERE conversation_fts MATCH ? AND e.owner_id=? AND e.asked_at<=? ${scope}`); params.push(match,ownerId,knownAt,...sessionParams); }
     });
     const rows = this.db.prepare(`WITH matches AS (${selects.join(" UNION ALL ")})
       SELECT m.id,count(DISTINCT m.term) AS n FROM matches m JOIN episodes e ON e.id=m.id GROUP BY m.id ORDER BY n DESC,e.asked_at DESC,m.id DESC LIMIT ${MAX_CANDIDATES}`).all(...params) as Row[];
     return new Map(rows.map(r => [r.id as number,r.n as number]));
   }
-  episodesById(ids: number[], knownAt = Number.MAX_SAFE_INTEGER, ownerId = "local"): Episode[] {
+  episodesById(ids: number[], knownAt = Number.MAX_SAFE_INTEGER, ownerId = "local", sessionId?: string): Episode[] {
     const selected = [...new Set(ids)].slice(0,MAX_CANDIDATES); if (!selected.length) return [];
-    return (this.db.prepare(`SELECT * FROM episodes WHERE id IN (${selected.map(() => "?").join(",")}) AND owner_id=? AND asked_at<=?`)
-      .all(...selected,ownerId,knownAt) as Row[]).map(toEpisode);
+    return (this.db.prepare(`SELECT * FROM episodes WHERE id IN (${selected.map(() => "?").join(",")}) AND owner_id=? AND asked_at<=? ${sessionId === undefined ? "" : "AND session_id=?"}`)
+      .all(...selected,ownerId,knownAt,...(sessionId === undefined ? [] : [sessionId])) as Row[]).map(toEpisode);
   }
   claimsFor(episodeId: number, ownerId = "local"): Claim[] {
     return (this.db.prepare("SELECT c.* FROM claims c JOIN episodes e ON e.id=c.episode_id WHERE c.episode_id=? AND e.owner_id=? AND c.active=1 ORDER BY c.id").all(episodeId,ownerId) as Row[]).map(toClaim);

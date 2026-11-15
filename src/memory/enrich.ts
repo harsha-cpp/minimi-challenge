@@ -140,6 +140,17 @@ export class Enricher {
       try {
         const episode = this.store.episode(job.episodeId, job.ownerId);
         if (!episode) { this.store.retryMemoryJob(job, "episode_unavailable"); this.failures++; return; }
+        const context = episode.execution?.requestContext;
+        if (context && typeof context === "object" && !Array.isArray(context)
+          && "kind" in context && context.kind === "missing_reference") {
+          // A request for scope contains no factual answer to extract or prior claims to reconcile.
+          // The canonical episode wins even when an old job payload supplies unrelated claims.
+          signal.throwIfAborted();
+          const committed = this.store.completeMemoryJob(job, { summary: episode.question.slice(0, 200), topics: [], claims: [] });
+          outcome = committed ? "completed" : "lease_lost";
+          if (committed) this.completed++;
+          return;
+        }
         const payload = job.payload as EnrichInput | null;
         const requestedClaims = payload && Array.isArray(payload.priorClaims) ? payload.priorClaims.map(claim => claim?.id) : undefined;
         const priorClaims = ["conversation", "creative", "transform", "recall"].includes(String(episode.execution?.intent)) ? []

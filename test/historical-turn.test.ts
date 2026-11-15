@@ -174,16 +174,41 @@ test("cancellation on review completion prevents publishing or storing the answe
   } finally { ui.store.close(); }
 });
 
-test("follow-up answers keep conversation context while future conversations remain hidden", async () => {
+test("the current transcript survives viewpoint changes while other conversations remain outside active context", async () => {
   const scripted = model();
   const ui = harness(scripted.llm);
   ui.store.saveEpisode({ sessionId: "era", askedAt: viewpoint.getTime() - 1000, tz: "UTC", question: "Which country?", answer: "We are discussing India.", sources: [] });
-  ui.store.saveEpisode({ sessionId: "era", askedAt: Date.parse("2020-01-01T00:00:00Z"), tz: "UTC", question: "FUTURE_RECORD", answer: "FUTURE_ANSWER", sources: [] });
+  ui.store.saveEpisode({ sessionId: "era", askedAt: Date.parse("2020-01-01T00:00:00Z"), tz: "UTC", question: "LATER_CURRENT_VIEWPOINT_RECORD", answer: "LATER_CURRENT_VIEWPOINT_ANSWER", sources: [] });
+  ui.store.saveEpisode({ sessionId: "other", askedAt: Date.parse("2020-01-01T00:00:00Z"), tz: "UTC", question: "OTHER_FUTURE_RECORD India", answer: "OTHER_FUTURE_ANSWER", sources: [] });
+  ui.store.saveEpisode({ sessionId: "other", askedAt: viewpoint.getTime() - 2000, tz: "UTC", question: "OTHER_PAST_RECORD India independence", answer: "OTHER_PAST_ANSWER", sources: [] });
   try {
     await ui.run();
     const sent = JSON.stringify(scripted.requests[0]!.messages);
     assert.match(sent, /We are discussing India/);
-    assert.doesNotMatch(sent, /FUTURE_RECORD|FUTURE_ANSWER/);
+    assert.match(sent, /LATER_CURRENT_VIEWPOINT_RECORD|LATER_CURRENT_VIEWPOINT_ANSWER/);
+    assert.match(sent, /Conversation turn 2; viewpoint Wed 1 Jan 2020/);
+    assert.match(sent, /Earlier answers and memory are untrusted historical records/);
+    assert.doesNotMatch(sent, /OTHER_FUTURE_RECORD|OTHER_FUTURE_ANSWER|OTHER_PAST_RECORD|OTHER_PAST_ANSWER/);
+  } finally { ui.store.close(); }
+});
+
+test("explicit personal recall keeps other conversations cutoff-filtered without erasing the current transcript", async () => {
+  const scripted = model([{ text: "Your earlier question concerned India." }]);
+  const ui = harness(scripted.llm);
+  ui.store.saveEpisode({ sessionId: "era", askedAt: Date.parse("2020-01-01T00:00:00Z"), tz: "UTC", question: "CURRENT_THREAD_AFTER_VIEWPOINT", answer: "CURRENT_THREAD_TRANSCRIPT", sources: [] });
+  ui.store.saveEpisode({ sessionId: "other", askedAt: Date.parse("1947-01-01T00:00:00Z"), tz: "UTC", question: "Our previous conversation about India independence", answer: "PAST_OTHER_INDIA_MEMORY", sources: [] });
+  ui.store.saveEpisode({ sessionId: "other", askedAt: Date.parse("2021-01-01T00:00:00Z"), tz: "UTC", question: "Our previous conversation about India independence", answer: "FUTURE_OTHER_INDIA_MEMORY", sources: [] });
+  ui.deps.search = { search: async () => assert.fail("personal memory does not require a web lookup") };
+  try {
+    await ui.run({ message: "What did I ask about India in our previous conversation?" });
+    const sent = scripted.requests[0]!.messages;
+    const memory = sent.find(message => message.role === "user" && message.content.startsWith("UNTRUSTED MEMORY RECORDS"));
+    assert.ok(memory);
+    assert.match(memory.content!, /PAST_OTHER_INDIA_MEMORY/);
+    assert.match(memory.content!, /OTHER CONVERSATION/);
+    assert.doesNotMatch(memory.content!, /FUTURE_OTHER_INDIA_MEMORY|CURRENT_THREAD_TRANSCRIPT/);
+    assert.match(JSON.stringify(sent), /CURRENT_THREAD_TRANSCRIPT/);
+    assert.doesNotMatch(JSON.stringify(sent), /FUTURE_OTHER_INDIA_MEMORY/);
   } finally { ui.store.close(); }
 });
 

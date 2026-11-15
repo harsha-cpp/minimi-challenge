@@ -6,6 +6,7 @@ import type { ChatMessage, Llm, StreamRequest, ToolCall } from "../src/llm.ts";
 import { Enricher } from "../src/memory/enrich.ts";
 import { MemoryStore } from "../src/memory/store.ts";
 import type { SearchProvider, SearchQuery } from "../src/search.ts";
+import { formatInstant } from "../src/time/zone.ts";
 
 const TZ = "Asia/Kolkata";
 
@@ -44,7 +45,17 @@ function harness(llm: Llm, search: SearchProvider, clock: Clock, store = new Mem
   const ask = async (message: string, sessionId = "s1") => {
     events.length = 0;
 
-    const verifier = { json: async () => ({ status: "approved", issues: [] }) };
+    const verifier = { json: async ({ system, user }: Parameters<Llm["json"]>[0]) => {
+      const payload = JSON.parse(user);
+      if (!system.includes("FACT VERIFICATION") && !payload.reference) return { status: "approved", issues: [] };
+      const available = new Set(payload.sources.filter((source: { text: string }) => source.text.trim()).map((source: { n: number }) => source.n));
+      const cited = citedNumbers(payload.draft).filter(n => available.has(n));
+      return { status: "approved", issues: [], quality: cited.length ? "supported" : "explicitly_unverified",
+        claimChecks: cited.length ? [{ claim: payload.draft, sourceNumbers: cited, supported: true, applicable: true }] : [],
+        ...(payload.reference ? { referenceCheck: { episodeId: payload.reference.episodeId, answerHash: payload.reference.answerHash,
+          addressesTarget: true, coverage: cited.length ? "complete" : "unresolved" } } : {}),
+      };
+    } };
     await runTurn({ llm, search, store, clock, enricher, verifier }, { sessionId, message, tz: TZ }, (e) => events.push(e));
     await enricher.idle();
     return events;
@@ -145,7 +156,8 @@ test("a model error surfaces as an error event and nothing is stored", async () 
 test("a week later: the old claim is recalled, re-checked, and the new claim links back to it", async () => {
   const store = new MemoryStore(":memory:");
   const search: SearchProvider = {
-    search: async () => [{ url: "https://neon.com/pricing", title: "Neon pricing", text: "Launch $25/month" }],
+    search: async query => [{ url: "https://neon.com/pricing", title: "Neon pricing", text: query.query === "neon pricing"
+      ? "Launch costs $19/month." : "Launch now costs $25/month; it previously cost $19/month." }],
   };
 
   const first = scriptedLlm(
@@ -189,12 +201,12 @@ test("a week later: the old claim is recalled, re-checked, and the new claim lin
 
 test("earlier turns of the same chat are sent with their timestamps", async () => {
   const { llm, requests } = scriptedLlm([{ text: "one" }, { text: "two" }]);
-  const { ask } = harness(llm, { search: async () => [] }, fixedClock("2026-11-11T10:00:00+05:30"));
+  const { ask, store } = harness(llm, { search: async () => [] }, fixedClock("2026-11-11T10:00:00+05:30"));
   await ask("first question");
   await ask("second question");
   const sent = requests[1]!.messages;
   assert.deepEqual(sent.slice(2, 4), [
-    { role: "user", content: "[Wed 11 Nov 2026, 10:00] first question" },
+    { role: "user", content: `[Conversation turn 1; viewpoint Wed 11 Nov 2026, 10:00; recorded ${formatInstant(store.episode(1)!.createdAt!, TZ)}] first question` },
     { role: "assistant", content: "one" },
   ]);
 });
@@ -244,12 +256,13 @@ test("the same URL with changed evidence keeps distinct citation observations", 
     return [{ url: "https://example.com/pricing", title: "Pricing", text: ++call === 1 ? "$19" : "$25", retrievedAt: "2026-11-12T10:00:00.000Z" }];
   } };
   const { ask, store } = harness(llm, search, fixedClock("2026-11-03T10:00Z"));
-  await ask("verify");
+  const events = await ask("Verify the current Example Cloud price at https://example.com/pricing.");
   const sources = store.sourcesFor(1);
   assert.equal(sources.length, 2);
   assert.notEqual(sources[0]!.contentHash, sources[1]!.contentHash);
   assert.equal(sources[0]!.retrievedAt, "2026-11-12T10:00:00.000Z");
   assert.equal(store.episode(1)!.askedAt, Date.parse("2026-11-03T10:00Z"));
+  assert.equal(events.find(event => event.type === "done")?.quality, "supported");
 });
 
 test("unknown citation numbers are rejected before a claim enters memory", async () => {
@@ -300,7 +313,7 @@ test("era viewpoint stays pinned while research remains live if the shared clock
     return [{ url: "https://example.com", title: "Historical pricing", text: "The price in 2020 was $19." }];
   } };
   const { ask, store } = harness(llm, search, clock);
-  await ask("Is the price still correct?");
+  await ask("Is the Example Cloud price still correct?");
   assert.equal(store.sourcesFor(1)[0]!.snapshotAsOf, undefined);
   assert.equal((store.episode(1)!.execution!.time as { effectiveAt: string }).effectiveAt, asOf.toISOString());
   assert.equal((store.episode(1)!.execution!.time as { simulated: boolean }).simulated, true);

@@ -11,6 +11,7 @@ import type { SearchHit, SearchProvider, SearchQuery } from "../search.ts";
 import { normalizeQuery, withConcurrency } from "../search.ts";
 import { WEB_SEARCH_TOOL } from "./prompt.ts";
 import { prepareHistory, preparePrompt } from "./prepare.ts";
+import { resolveRequestContext, type RequestContext } from "./context.ts";
 import { turnPolicy } from "./prepare.ts";
 import { EvidenceWindow } from "./evidence.ts";
 import { reviewSimulationAnswer, type EvidenceQuality, type SimulationReview } from "./simulation.ts";
@@ -99,12 +100,40 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
     const time = pinTurnTime(clock, tz, input.asOf);
     const now = new Date(time.effectiveAt);
     const simulated = time.simulated;
-    const policy = turnPolicy(message, simulated);
-    buffered = policy.requireSimulationReview || policy.requireVerificationEvidence;
+    let policy = turnPolicy(message, simulated);
     const recallStarted = performance.now();
-    const prior = store.sessionHistory(sessionId, HISTORY_TURNS, now.getTime(), input.ownerId);
-    const history = prepareHistory(prior.map(withoutLegacyFailure), tz);
-    const recalled = recall(store, message, now, tz, history.ids, input.ownerId);
+    const durable = input.turnId ? store.getTurn(input.turnId, input.ownerId) : null;
+    if (durable && durable.sessionId !== sessionId) throw new Error("Conversation context does not match this turn.");
+    const prior = store.currentConversationHistory(sessionId, HISTORY_TURNS, input.ownerId, durable?.sequence);
+    const requestContext = resolveRequestContext({ message, sessionId, ownerId: input.ownerId, history: prior });
+    policy = turnPolicy(message, simulated, requestContext);
+    buffered = policy.requireSimulationReview || policy.requireVerificationEvidence;
+    const contextMetadata = requestContextMetadata(requestContext);
+    // A reference comes from the thread's predecessor sequence, never a topic-ranked memory hit.
+    const selected = requestContext.anchor ? prior.filter(episode => episode.id === requestContext.anchor!.episodeId).map(episode => ({
+      ...episode, question: requestContext.anchor!.question, answer: requestContext.anchor!.answer,
+    })) : prior;
+    const history = prepareHistory(requestContext.anchor ? selected : selected.map(withoutLegacyFailure), tz,
+      { answerChars: requestContext.anchor ? 12_000 : 3000 });
+    const crossConversationMemory = requestContext.memoryScope === "explicit_memory"
+      && !/\b(?:(?:this|current|same)\s+(?:chat|conversation|thread)|here)\b/i.test(message);
+    recordStage("context_boundary", 0, { ...contextMetadata, historyTurns: history.ids.size, crossConversationMemory });
+    if (requestContext.kind === "missing_reference") {
+      const answer = "Which claims should I verify? Paste the claims or point me to an answer in this conversation.";
+      const commitBegan = performance.now();
+      const episodeId = store.saveEpisode({ sessionId, ownerId: input.ownerId, turnId: input.turnId,
+        quality: "non_factual", createdAt: Date.parse(time.receivedAt), askedAt: now.getTime(), tz,
+        question: message, answer, sources: [], execution: { time, quality: "non_factual", intent: policy.intent,
+          requestContext: contextMetadata, searches: 0, modelCalls: 0 } });
+      recordStage("commit", performance.now() - commitBegan);
+      emit({ type: "text", delta: answer });
+      emit({ type: "done", episodeId, turnId: input.turnId, quality: "non_factual", cited: [],
+        timings: { recallMs: 0, firstTokenMs: elapsed(), totalMs: elapsed(), searches: 0, modelCalls: 0 } });
+      return;
+    }
+    const recalled = recall(store, message, now, tz, history.ids, input.ownerId, {
+      sessionId, allowCrossSession: crossConversationMemory, disabled: requestContext.memoryScope === "none",
+    });
     recordStage("history_recall", performance.now() - recallStarted);
     emit({ type: "recall", notes: recallNotes(recalled), ms: Math.round(recalled.ms) });
 
@@ -113,7 +142,7 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
         episodes: hit.episodes.map(item => ({ ...item, episode: withoutLegacyFailure(item.episode) })) })) })),
       related: recalled.related.map(item => ({ ...item, episode: withoutLegacyFailure(item.episode) })),
     };
-    const prompt = preparePrompt({ message, time, history, memory: renderMemory(cleanMemory, tz), clarification: input.clarification });
+    const prompt = preparePrompt({ message, time, history, memory: renderMemory(cleanMemory, tz), requestContext, clarification: input.clarification });
     const messages: ChatMessage[] = prompt.messages;
     const clarificationAllowed = Boolean(deps.questions && !input.clarification && canClarify(message, simulated));
     if (clarificationAllowed) messages.splice(2, 0, { role: "system", content: CLARIFICATION_INSTRUCTIONS });
@@ -269,7 +298,7 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
         const began = performance.now();
         const result = await reviewSimulationAnswer({ llm: deps.verifier ?? llm, question: message,
           answer: draft, viewpoint: now, researchedAt: new Date(time.receivedAt), tz, sources, signal,
-          kind: reviewKind, timeoutMs: deps.reviewTimeoutMs });
+          reference: requestContext.anchor, kind: reviewKind, timeoutMs: deps.reviewTimeoutMs });
         const observation = { kind: reviewKind, status: result.status, reason: result.reason ?? null, calls: result.modelCalls, ms: result.ms };
         reviewAttempts.push(observation);
         recordStage("review", performance.now() - began, observation);
@@ -282,7 +311,7 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
       if (policy.requireVerificationEvidence && (!searches || !sources.some(source => source.text?.trim()))) {
         review = { status: "needs_revision", issues: [{ code: "unsupported_claim", detail: "No usable current evidence was acquired." }], ms: 0, modelCalls: 0 };
         rejectionObserved = true;
-        answer = UNVERIFIED_ANSWER;
+        answer = requestContext.anchor ? UNVERIFIED_REFERENCE_ANSWER : UNVERIFIED_ANSWER;
       } else {
         review = await check(answer);
         if (review.status === "needs_revision") {
@@ -313,7 +342,7 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
           } catch { signal.throwIfAborted(); }
           recordStage("repair", performance.now() - repairBegan, { approved: approvedRepair });
           if (!approvedRepair) {
-            answer = UNVERIFIED_ANSWER;
+            answer = requestContext.anchor ? UNVERIFIED_REFERENCE_ANSWER : UNVERIFIED_ANSWER;
             quality = "explicitly_unverified";
           } else corrected = true;
         }
@@ -321,13 +350,17 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
           quality = review.quality ?? (citedNumbers(answer).length ? "supported" : "explicitly_unverified");
           if (quality === "explicitly_unverified") {
             // A quality label is not a visible qualification, and an empty claim list cannot bless assertions.
-            answer = policy.requireVerificationEvidence ? UNVERIFIED_ANSWER
+            answer = requestContext.anchor ? UNVERIFIED_REFERENCE_ANSWER : policy.requireVerificationEvidence ? UNVERIFIED_ANSWER
               : `I could not verify this answer against the available evidence. Treat the following as unverified.\n\n${answer}`;
           }
         } else if (review.status === "unavailable" && !rejectionObserved) {
           // Preserve a researched draft only with an explicit disclosure that support was not checked.
-          answer = `I could not verify this answer against the available evidence. Treat the following as unverified.\n\n${answer}`;
+          answer = requestContext.anchor ? UNVERIFIED_REFERENCE_ANSWER
+            : `I could not verify this answer against the available evidence. Treat the following as unverified.\n\n${answer}`;
         }
+      }
+      if (requestContext.anchor && quality === "supported_partial") {
+        answer = `This checks only part of my earlier answer; the remaining claims are unverified for the selected date.\n\n${answer}`;
       }
       cited = citedNumbers(answer);
       if (invalidCitations()) throw new Error("The answer cited unavailable evidence. Please retry.");
@@ -340,7 +373,8 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
     const episodeId = store.saveEpisode({
       sessionId, ownerId: input.ownerId, turnId: input.turnId, quality, createdAt: Date.parse(time.receivedAt),
       askedAt: now.getTime(), tz, question: message, answer, sources: citedSources,
-      execution: { time, quality, rejectionObserved, intent: prompt.policy.intent, prompt: prompt.stats, evidence: { ...evidence.stats }, searches, modelCalls,
+      execution: { time, quality, rejectionObserved, requestContext: contextMetadata,
+        intent: prompt.policy.intent, prompt: prompt.stats, evidence: { ...evidence.stats }, searches, modelCalls,
         ...(review ? { review: { kind: reviewKind, status: review.status, reason: review.reason ?? (reviewAttempts.length ? null : "no_usable_evidence"),
           calls: reviewCalls, ms: reviewMs, attempts: reviewAttempts } } : {}),
         ...(input.clarification ? { clarification: input.clarification } : {}),
@@ -381,6 +415,15 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
 }
 
 const UNVERIFIED_ANSWER = "I couldn't verify the requested facts from the available evidence. The check remains unresolved.";
+const UNVERIFIED_REFERENCE_ANSWER = "I couldn't complete the check of my previous answer in this conversation. Those claims remain unverified for the selected date.";
+
+function requestContextMetadata(context: RequestContext) {
+  return { kind: context.kind, memoryScope: context.memoryScope, ...(context.anchor ? {
+    anchorEpisodeId: context.anchor.episodeId, anchorAnswerHash: context.anchor.answerHash,
+    anchorSequence: context.anchor.sequence, anchorViewpointAt: context.anchor.viewpointAt,
+    anchorTruncated: context.anchor.truncated,
+  } : {}) };
+}
 
 async function abortable<T>(operation: Promise<T>, parent: AbortSignal, timeoutMs: number): Promise<T> {
   const signal = AbortSignal.any([parent, AbortSignal.timeout(timeoutMs)]);
