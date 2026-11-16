@@ -11,7 +11,7 @@ import { citationTextNodes } from "../public/citations.js";
 const html = readFileSync(new URL("../public/index.html", import.meta.url), "utf8");
 const app = readFileSync(new URL("../public/app.js", import.meta.url), "utf8").replace('import { citationTextNodes } from "./citations.js";\n', "").replace('import { readTurn } from "./recovery.js";\n', "");
 
-async function mount(options: { chatStream?: ReadableStream<Uint8Array>; fastMode?: boolean; date?: Date; post?: (body: { now: string | null }) => Promise<Response>; chatEvents?: Array<Record<string, unknown>>; chatReplies?: Array<Array<Record<string, unknown>> | { status: number; error: string; code: string }>; pendingCard?: Record<string, unknown>; memoryEpisodes?: Array<Record<string, unknown>>; savedSession?: string; turnReplies?: Array<Record<string, unknown>>; pendingTurn?: Record<string, unknown>; chatBeforeHeadersFailure?: boolean; beforeChatReply?: () => Promise<void> } = {}) {
+async function mount(options: { chatStream?: ReadableStream<Uint8Array>; fastMode?: boolean; date?: Date; post?: (body: { now: string | null }) => Promise<Response>; chatEvents?: Array<Record<string, unknown>>; chatReplies?: Array<Array<Record<string, unknown>> | { status: number; error: string; code: string }>; pendingCard?: Record<string, unknown>; memoryEpisodes?: Array<Record<string, unknown>>; savedSession?: string; turnReplies?: Array<Record<string, unknown>>; pendingTurn?: Record<string, unknown>; chatBeforeHeadersFailure?: boolean; beforeChatReply?: () => Promise<void>; beforeMemoryReply?: () => Promise<void>; beforeSessionReply?: (session: string) => Promise<void> } = {}) {
   const dom = new JSDOM(html, { url: "http://localhost:3000/", runScripts: "outside-only", pretendToBeVisual: true });
   const { window } = dom;
   if (options.savedSession) window.sessionStorage.setItem("asof.preview.session.v2", options.savedSession);
@@ -34,7 +34,7 @@ async function mount(options: { chatStream?: ReadableStream<Uint8Array>; fastMod
       }
       if (path.startsWith("/api/state")) return Response.json(state);
       if (path.endsWith("/clarification")) return Response.json({ card: options.pendingCard ?? null });
-      if (path.startsWith("/api/sessions/")) return Response.json({ episodes: (options.memoryEpisodes ?? []).filter(episode => episode.sessionId === path.split("/").at(-1)).map(episode => ({ episode, sources: episode.sources ?? [] })) });
+      if (path.startsWith("/api/sessions/")) { await options.beforeSessionReply?.(path.split("/").at(-1)!); return Response.json({ episodes: (options.memoryEpisodes ?? []).filter(episode => episode.sessionId === path.split("/").at(-1)).map(episode => ({ episode, sources: episode.sources ?? [] })) }); }
       if (path.startsWith("/api/episodes/")) { const episode = options.memoryEpisodes?.find(episode => String(episode.id) === path.split("/").at(-1)); return Response.json({ episode, sources: episode?.sources ?? [] }); }
       if (path === "/api/chat" && (options.chatEvents || options.chatReplies || options.chatStream)) {
         chatRequests.push(JSON.parse(String(init?.body)));
@@ -45,7 +45,7 @@ async function mount(options: { chatStream?: ReadableStream<Uint8Array>; fastMod
         const reply = options.chatReplies?.[chatRequests.length - 1] ?? options.chatEvents ?? [];
         return Array.isArray(reply) ? new Response(reply.map(event => `data: ${JSON.stringify(event)}\n\n`).join("")) : Response.json(reply, { status: reply.status });
       }
-      if (path === "/api/memory" && options.memoryEpisodes) return Response.json({ episodes: options.memoryEpisodes });
+      if (path.startsWith("/api/memory") && options.memoryEpisodes) { await options.beforeMemoryReply?.(); return Response.json({ episodes: options.memoryEpisodes }); }
       assert.equal(path, "/api/clock");
       const body = JSON.parse(String(init?.body)) as { now: string | null };
       assert.equal(typeof (body as any).sessionId, "string");
@@ -735,7 +735,7 @@ test("retrying unfinished evidence preserves the original reference, viewpoint a
   try {
     const selector = ui.window.document.getElementById("response-mode") as HTMLSelectElement;
     selector.value = "fast";
-    (ui.window.document.getElementById("input") as HTMLTextAreaElement).value = "Verify your previous answer";
+    (ui.window.document.getElementById("input") as HTMLTextAreaElement).value = "Verify this: Acme pricing is $25 monthly";
     ui.button("#send").click(); await flushChat();
     selector.value = "standard";
     [...ui.window.document.querySelectorAll<HTMLButtonElement>(".answer-actions button")].find(button => /Retry unfinished check/.test(button.textContent!))!.click(); await flushChat();
@@ -852,3 +852,106 @@ test("changing the viewpoint keeps the model conversation and sends its verifica
     assert.doesNotMatch(ui.window.document.querySelector("#thread")!.textContent!, /IPL|Rajasthan/);
   } finally { ui.dom.window.close(); }
 });
+
+
+test("starter questions rotate on refresh and new chat without repeating the same group", async () => {
+  const ui = await mount();
+  const questions = () => [...ui.window.document.querySelectorAll<HTMLButtonElement>("[data-starter]")].map(button => button.dataset.question);
+  try {
+    const first = questions(); assert.equal(new Set(first).size, 3);
+    ui.button("[data-refresh-starters]").click(); const second = questions(); assert.notDeepEqual(second, first);
+    ui.button("#new-chat").click(); assert.notDeepEqual(questions(), second);
+  } finally { ui.dom.window.close(); }
+});
+
+test("ambiguous previous discussion with no history shows guidance without a paid request or saved failure", async () => {
+  const ui = await mount({ memoryEpisodes: [], chatEvents: clarificationDone });
+  try {
+    (ui.window.document.getElementById("input") as HTMLTextAreaElement).value = "What did we discuss earlier, and is it still correct?";
+    ui.button("#send").click(); await flushChat();
+    assert.equal(ui.chatRequests.length, 0); assert.equal(ui.window.document.querySelectorAll(".entry").length, 0);
+    assert.match(ui.window.document.querySelector("#history-chooser")!.textContent!, /Paste the claim/);
+    assert.equal(ui.button("#send").disabled, false);
+  } finally { ui.dom.window.close(); }
+});
+
+test("saved-topic selection excludes future and generic entries, pins the original and preserves era and Fast mode", async () => {
+  const ui = await mount({ fastMode: true, memoryEpisodes: [
+    { id: 1, sessionId: "older", askedAt: Date.parse("2019-01-01"), question: "What is PostgreSQL?", answer: "A database.", sources: [] },
+    { id: 2, sessionId: "future", askedAt: Date.parse("2025-01-01"), question: "Future pricing?", answer: "Unknown", sources: [] },
+    { id: 3, sessionId: "generic", askedAt: Date.parse("2018-01-01"), question: "Verify", answer: "Unresolved", sources: [] },
+  ], chatEvents: clarificationDone });
+  try {
+    ui.open(); ui.choose("year", 2020); ui.travel(); await flushChat();
+    (ui.window.document.getElementById("response-mode") as HTMLSelectElement).value = "fast";
+    (ui.window.document.getElementById("input") as HTMLTextAreaElement).value = "verify";
+    ui.button("#send").click(); await flushChat();
+    const choices = ui.window.document.querySelectorAll<HTMLButtonElement>(".history-choice"); assert.equal(choices.length, 1);
+    assert.match(choices[0]!.textContent!, /What is PostgreSQL.*2019/s);
+    choices[0]!.click(); await flushChat();
+    assert.equal(ui.chatRequests.length, 1); assert.equal(ui.chatRequests[0]!.recheckEpisodeId, 1);
+    assert.equal(ui.chatRequests[0]!.sessionId, "older"); assert.equal(ui.chatRequests[0]!.responseMode, "fast");
+    assert.equal(ui.chatRequests[0]!.mode, "era"); assert.equal(new Date(String(ui.chatRequests[0]!.asOf)).getFullYear(), 2020);
+  } finally { ui.dom.window.close(); }
+});
+
+for (const question of ["What did we discuss earlier?", "Verify the HTTP 404 definition", "verify this: the price is $25", "Verify https://example.com/price", "What did I ask last Tuesday?", "Verify your earlier answer about 3 November"]) {
+  test(`concrete or dated verification bypasses the topic chooser: ${question}`, async () => {
+    const ui = await mount({ chatEvents: clarificationDone });
+    try {
+      (ui.window.document.getElementById("input") as HTMLTextAreaElement).value = question;
+      ui.button("#send").click(); await flushChat(); assert.equal(ui.chatRequests.length, 1);
+      assert.equal(ui.window.document.querySelector("#history-chooser"), null);
+    } finally { ui.dom.window.close(); }
+  });
+}
+
+const topicEpisodes = [
+  { id: 32, sessionId: "crm-history", askedAt: Date.parse("2020-01-01"), question: "Compare CRM tools", answer: "Saved CRM answer", sources: [] },
+  { id: 31, sessionId: "crm-old", askedAt: Date.parse("2019-01-01"), question: "Compare CRM tools", answer: "Older CRM answer", sources: [] },
+  { id: 30, sessionId: "db-history", askedAt: Date.parse("2020-01-01"), question: "Compare Postgres hosting", answer: "Saved hosting answer", sources: [] },
+];
+for (const question of ["Verify your earlier answer about CRM", "Verify your earlier CRM recommendations"]) {
+  test(`named prior-topic choices filter and deduplicate: ${question}`, async () => {
+    const ui = await mount({ memoryEpisodes: topicEpisodes, chatEvents: clarificationDone });
+    try {
+      (ui.window.document.getElementById("input") as HTMLTextAreaElement).value = question;
+      ui.button("#send").click(); await flushChat();
+      const choices = ui.window.document.querySelectorAll<HTMLButtonElement>(".history-choice");
+      assert.equal(choices.length, 1); assert.match(choices[0]!.textContent!, /Compare CRM/);
+      assert.equal(ui.chatRequests.length, 0);
+      choices[0]!.click(); await flushChat();
+      assert.equal(ui.chatRequests.length, 1); assert.equal(ui.chatRequests[0]!.recheckEpisodeId, 32);
+    } finally { ui.dom.window.close(); }
+  });
+}
+
+for (const delayed of ["memory", "session", "clock"] as const) {
+  test(`new chat ignores a late topic-selection ${delayed} response without research or viewpoint changes`, async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let clockStarted = false;
+    const ui = await mount({ memoryEpisodes: topicEpisodes, chatEvents: clarificationDone,
+      ...(delayed === "memory" ? { beforeMemoryReply: () => gate } : {}),
+      ...(delayed === "session" ? { beforeSessionReply: (id: string) => id === "crm-history" ? gate : Promise.resolve() } : {}),
+      ...(delayed === "clock" ? { post: async () => {
+        clockStarted = true; await gate;
+        return Response.json({ now: "1995-01-01T00:00:00Z", simulated: true, missing: [], features: {}, model: "test" });
+      } } : {}),
+    });
+    try {
+      (ui.window.document.getElementById("input") as HTMLTextAreaElement).value = "verify";
+      ui.button("#send").click(); await flushChat();
+      if (delayed !== "memory") { ui.button(".history-choice").click(); await flushChat(); }
+      if (delayed === "clock") assert.equal(clockStarted, true);
+      ui.button("#new-chat").click();
+      const newSession = ui.window.sessionStorage.getItem("asof.preview.session.v2");
+      release(); await flushChat();
+      assert.equal(ui.chatRequests.length, 0);
+      assert.equal(ui.window.sessionStorage.getItem("asof.preview.session.v2"), newSession);
+      assert.equal(ui.window.document.querySelector("#history-chooser"), null);
+      assert.equal(ui.window.document.querySelectorAll("#thread .entry").length, 0);
+      assert.equal(ui.window.document.getElementById("composer-era-bar")!.hidden, true);
+    } finally { release(); ui.dom.window.close(); }
+  });
+}

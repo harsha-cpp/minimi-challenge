@@ -1294,3 +1294,15 @@ dialog.source-dialog { width: min(43rem, calc(100vw - 2rem)); max-height: calc(1
 .checked-findings > p { margin: 0 0 .7rem; opacity: .8; font-size: .8rem; }
 .checked-findings ul { padding-left: 1.2rem; margin: 0; }
 .checked-findings li + li { margin-top: .5rem; }
+
+.history-chooser { margin: 2rem 0; padding: 1.2rem; border: 1px solid var(--rule); }
+.history-chooser h2 { font-size: 1.1rem; margin: 0 0 .65rem; }
+.history-chooser p { font: .8rem/1.6 var(--mono); color: var(--ink-soft); }
+.history-choices { display: grid; gap: .55rem; margin: 1rem 0; }
+.history-choice { display: flex; justify-content: space-between; gap: 1rem; padding: .8rem; text-align: left; background: transparent; border: 1px solid var(--rule); color: var(--ink); cursor: pointer; font: inherit; }
+.history-choice:hover, .history-choice:focus-visible { border-color: var(--red); }
+.history-choice:disabled { cursor: wait; opacity: .65; }
+.history-choice small { flex-shrink: 0; color: var(--ink-soft); }
+.starter-heading { gap: .75rem; flex-wrap: wrap; }
+.starter-heading [data-refresh-starters] { margin-left: auto; font-size: .65rem; }
+@media (max-width: 600px) { .history-choice { flex-direction: column; gap: .35rem; } }

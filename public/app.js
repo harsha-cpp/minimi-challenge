@@ -22,6 +22,12 @@ let sessionId = savedSession() || crypto.randomUUID();
 function rememberSession() { try { sessionStorage.setItem("asof.preview.session.v2", sessionId); } catch {} }
 rememberSession();
 let inFlight = null;
+let chooserGeneration = 0;
+let choosingHistory = false;
+let starterOffset = Math.floor(Math.random() * 3) * 3;
+let starterEra;
+function dismissHistoryChooser() { chooserGeneration++; $("history-chooser")?.remove(); }
+
 
 let clockOffset = 0;
 let simulated = false;
@@ -45,6 +51,7 @@ const seconds = (ms) => (ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)} s`)
 
 let latestState;
 function applyState(state) {
+  dismissHistoryChooser();
   latestState = state;
   clockOffset = new Date(state.now).getTime() - Date.now();
   simulated = state.simulated;
@@ -78,7 +85,7 @@ function tick() {
   setTimeout(tick, 1000 - ((Date.now() + clockOffset) % 1000));
 }
 
-async function setClock(now) {
+async function setClock(now, isCurrent = () => true) {
   if (clockSaving) return;
   if (now !== null && new Date(now).getTime() > Date.now()) {
     showClockError("Choose a date and time in the past, or return to now.");
@@ -95,6 +102,7 @@ async function setClock(now) {
       body: JSON.stringify({ now, sessionId }),
     });
     const state = await response.json();
+    if (!isCurrent()) return false;
     if (!response.ok) throw new Error(state.error || "The date could not be changed. Please try again.");
     applyState(state);
     toggleClock(false);
@@ -391,9 +399,18 @@ function updateEra() {
     $("edition-note").textContent = note;
     $("edition-note").hidden = !note;
     $("starter-context").textContent = simulated ? `Questions for ${date.getFullYear()}` : "Research, remember, revisit";
-    const questions = simulated
-      ? [date.getFullYear() >= 1947 ? "Is India already independent?" : "Will India gain independence?", "Who is leading India right now?", date.getFullYear() < 2007 ? "Could I buy an iPhone today?" : "Who won the most recent IPL season?"]
-      : ["What changed in AI this week?", "Compare managed Postgres hosting for a small SaaS", "What did we discuss earlier, and is it still correct?"];
+    const eraKey = simulated ? date.getFullYear() : "live";
+    if (starterEra !== eraKey) { starterEra = eraKey; starterOffset += 3; }
+    const pool = simulated ? [
+      "What are the biggest world events this month?", "Who is leading India at this date?", "What transport options are available for a long journey?",
+      "What major scientific discoveries are known at this date?", "What is happening in space exploration?", "How do people usually communicate over long distances?",
+      "What are the main sources of electricity?", "Which films have been released recently?", "What did we discuss earlier, and is it still correct?",
+    ] : [
+      "What changed in AI this week?", "Compare managed Postgres hosting for a small SaaS", "What did we discuss earlier, and is it still correct?",
+      "Compare CRM tools for a 20-person sales team", "What changed in browser technology this month?", "Find recent progress in battery recycling",
+      "What should I consider when choosing a password manager?", "Compare serverless and traditional hosting for a small app", "Which major space missions are happening this month?",
+    ];
+    const questions = Array.from({ length: 3 }, (_, index) => pool[(starterOffset + index) % pool.length]);
     document.querySelectorAll("[data-starter]").forEach((button, i) => {
       button.dataset.question = questions[i];
       button.replaceChildren(el("span", "starter-number", `0${i + 1}`), el("span", "starter-question", questions[i]), el("span", "starter-arrow", "↗"));
@@ -715,6 +732,7 @@ async function restorePendingTurn() {
 }
 async function send(message, options = {}) {
   if (inFlight || !message.trim()) return;
+  dismissHistoryChooser();
   const view = options.view ?? addEntry(message.trim());
   view.text = ""; view.dataSources = []; view.reviewFailure = null; view.claimCoverage = null;
   view.checkedFindings.hidden = true; view.checkedFindings.replaceChildren(); view.answer.replaceChildren(); view.actions.hidden = true;
@@ -826,12 +844,16 @@ $("composer").addEventListener("submit", event => { event.preventDefault(); if (
   if (pendingView && message.trim().length > 1000) return notify("Keep this detail under 1000 characters, or start a new chat.");
   input.value = ""; fitInput();
   if (pendingView) submitClarification(pendingView, { text: message.trim() });
-  else send(message); });
+  else submitQuestion(message); });
 input.addEventListener("input", fitInput);
 input.addEventListener("keydown", event => { if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); $("composer").requestSubmit(); } });
-$("thread").addEventListener("click", event => { const starter = event.target.closest("[data-question]"); if (starter) send(starter.dataset.question); });
+$("thread").addEventListener("click", event => {
+  if (event.target.closest("[data-refresh-starters]")) { starterOffset += 3; updateEra(); return; }
+  const starter = event.target.closest("[data-question]"); if (starter) submitQuestion(starter.dataset.question);
+});
 function resetThread() { $("thread").replaceChildren(); entries.length = 0; lastEra = null; pendingView = null; }
 function newChat() {
+  dismissHistoryChooser(); choosingHistory = false; starterOffset += 3;
   clearTimeout(toastTimer); $("toast").hidden = true;
   inFlight?.abort(); inFlight = null; sessionId = crypto.randomUUID(); rememberSession(); resetThread(); setBusy(false);
   $("thread").append(emptyTemplate.cloneNode(true)); updateEra(); input.value = ""; fitInput(); $("compose-context").hidden = true;
@@ -841,7 +863,81 @@ $("new-chat").addEventListener("click", newChat);
 document.querySelector(".wordmark").addEventListener("click", event => { event.preventDefault(); newChat(); });
 $("composer-era").addEventListener("click", () => toggleClock($("clock").hidden));
 for (const id of ["header-now", "composer-now"]) $(id).addEventListener("click", () => setClock(null));
+// A topic-only memory request needs a selected saved answer, not a paid guess.
+function priorAnswerRequest(message) {
+  const text = message.trim().replace(/[?.!]+$/, "").trim();
+  if (/\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|january|february|march|april|may|june|july|august|september|october|november|december|yesterday|last week)\b|\b\d{4}-\d{2}-\d{2}\b/i.test(text)) return false;
+  if (text.length > 240 || /https?:\/\/|["“”]|\b(?:verify|check|confirm)\s+(?:this|that)\s*:|\b(?:claim|statement)\s*:/i.test(text)) return false;
+  if (/^(?:please\s+)?(?:verify|re-?check|check again)(?:\s+(?:now|please|it|that|this|the answer|your answer))?$/i.test(text)) return true;
+  if (/^what did (?:we|i|you) (?:discuss|ask|talk about)(?: earlier| before| last time)?(?:,? and (?:is|was) (?:it|that|your answer) still (?:correct|accurate|true))$/i.test(text)) return true;
+  if (/^(?:please\s+)?(?:verify|re-?check|check|review)\s+(?:your|the|our|my)\s+(?:previous|earlier|last|prior)\s+[\p{L}\p{N} _-]{1,80}\s+(?:answer|response|recommendations?|discussion)(?:\s+(?:now|again))?$/iu.test(text)) return true;
+  return /^(?:please\s+)?(?:verify|re-?check|check|review)\s+(?:your|the|our|my)\s+(?:previous|earlier|last|prior)\s+(?:answer|response|recommendations?|discussion)(?:\s+(?:about|on|regarding)\s+[\p{L}\p{N} _-]{1,80})?(?:\s+(?:now|again))?$/iu.test(text)
+    || /^(?:is|was)\s+(?:your|the)\s+(?:previous|earlier|last|prior)\s+(?:answer|response)(?:\s+(?:about|on)\s+[\p{L}\p{N} _-]{1,80})?\s+still\s+(?:correct|accurate|true)$/iu.test(text);
+}
+function historyTopic(message) {
+  const before = message.match(/\b(?:previous|earlier|last|prior)\s+([\p{L}\p{N} _-]{1,80}?)\s+(?:answer|response|recommendations?|discussion)(?:\s+(?:now|again))?[?.!]*$/iu)?.[1];
+  if (before) return before.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
+  return message.match(/\b(?:about|on|regarding)\s+(.+?)(?:\s+still\s+(?:correct|accurate|true)|\s+(?:now|again))?[?.!]*$/i)?.[1]?.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
+}
+function submitQuestion(message) {
+  if (inFlight || choosingHistory) return notify("Finish the current action first.");
+  if (priorAnswerRequest(message)) return choosePriorAnswer(message);
+  return send(message);
+}
+async function choosePriorAnswer(message) {
+  dismissHistoryChooser();
+  const generation = chooserGeneration, originSession = sessionId, era = simulated, cutoff = agentNow().getTime();
+  const current = () => generation === chooserGeneration && sessionId === originSession && !inFlight;
+  const panel = el("section", "history-chooser"); panel.id = "history-chooser";
+  panel.setAttribute("aria-label", "Choose a saved answer to check");
+  panel.append(el("h2", "", "Which saved answer should I check?"), el("p", "", "Loading your saved questions…"));
+  $("thread").append(panel);
+  panel.scrollIntoView({ behavior: "smooth", block: "start" });
+  try {
+    const response = await fetch("/api/memory?limit=100");
+    if (!response.ok) throw new Error("Your saved questions could not be loaded. Try again, or paste the claim you want checked.");
+    const page = await response.json(); if (!current()) return;
+    const topic = historyTopic(message), seen = new Set();
+    const choices = (Array.isArray(page.episodes) ? page.episodes : []).filter(episode => {
+      if (!Number.isSafeInteger(episode.id) || !episode.sessionId || typeof episode.question !== "string" || !episode.answer?.trim()
+        || !Number.isFinite(episode.askedAt) || (era && episode.askedAt > cutoff) || priorAnswerRequest(episode.question)) return false;
+      const key = episode.question.toLowerCase().replace(/\s+/g, " ").trim();
+      if (seen.has(key) || (topic.length && !topic.every(term => key.includes(term)))) return false;
+      seen.add(key); return true;
+    }).slice(0, 6);
+    panel.replaceChildren(el("h2", "", "Which saved answer should I check?"));
+    if (!choices.length) panel.append(el("p", "", "No matching saved questions were found in your recent history for this date. Paste the claim you want checked, or open the Ledger to find an older answer."));
+    else {
+      panel.append(el("p", "", "Choose a question. I’ll check that exact answer at your selected date."));
+      const list = el("div", "history-choices");
+      for (const episode of choices) {
+        const button = buttonAction("", async () => {
+          if (!current() || choosingHistory) return;
+          const selection = {}; choosingHistory = selection;
+          for (const option of list.querySelectorAll("button")) option.disabled = true;
+          const selectedMode = $("response-mode").value, selectedAt = agentNow(), selectedEra = simulated;
+          try {
+            if (!await restoreSession(episode.sessionId, true, { preserveViewpoint: true, isCurrent: current })) throw new Error("That saved conversation is no longer available.");
+            // Restore only the conversation. Keep the user's current research date and answer mode.
+            const restoredGeneration = chooserGeneration;
+            if (!await setClock(selectedEra ? selectedAt.toISOString() : null, () => sessionId === episode.sessionId && chooserGeneration === restoredGeneration)) throw new Error("The selected date could not be preserved. Please try again.");
+            if (sessionId !== episode.sessionId || chooserGeneration !== restoredGeneration + 1) return;
+            $("response-mode").value = selectedMode; updateResponseMode();
+            send(`Re-check your answer to “${episode.question}” from ${dayLabel(new Date(episode.askedAt))}. What is still correct, and what needs correcting?`, { recheckEpisodeId: episode.id });
+          } catch (error) { if (choosingHistory === selection) notify(error.message); }
+          finally { if (choosingHistory === selection) choosingHistory = false; }
+        }, "history-choice");
+        button.append(el("span", "", episode.question), el("small", "", dayLabel(new Date(episode.askedAt)))); list.append(button);
+      }
+      panel.append(list);
+    }
+    panel.append(buttonAction("Keep writing", () => { dismissHistoryChooser(); input.focus(); }, "text-action"));
+    panel.scrollIntoView({ behavior: "smooth", block: "start" });
+  } catch (error) { if (current()) panel.replaceChildren(el("p", "", error.message), buttonAction("Keep writing", () => { dismissHistoryChooser(); input.focus(); }, "text-action")); }
+}
+
 async function recheck(episodeId) {
+  dismissHistoryChooser();
   if (inFlight) return notify("Finish or stop the current answer first.");
   try {
     const response = await fetch(`/api/episodes/${episodeId}`);
@@ -855,11 +951,12 @@ async function recheck(episodeId) {
   } catch (error) { notify(error.message); }
 }
 
-async function restoreSession(id, scroll = false) {
+async function restoreSession(id, scroll = false, options = {}) {
   const response = await fetch(`/api/sessions/${encodeURIComponent(id)}`);
   if (!response.ok) throw new Error("This saved conversation could not be loaded.");
   const { episodes, conversation } = await response.json();
-  if (conversation) applyState({ ...latestState, now: new Date(conversation.viewpointAt ?? Date.now()).toISOString(), simulated: conversation.viewpointAt !== null });
+  if (options.isCurrent && !options.isCurrent()) return false;
+  if (conversation && !options.preserveViewpoint) applyState({ ...latestState, now: new Date(conversation.viewpointAt ?? Date.now()).toISOString(), simulated: conversation.viewpointAt !== null });
   if (!episodes.length) return false;
   resetThread(); sessionId = id; rememberSession();
   for (const item of episodes) {
@@ -885,6 +982,7 @@ async function restorePending(id) {
   showClarification(view, card);
 }
 async function openConversation(episode) {
+  dismissHistoryChooser();
   if (inFlight) return notify("Finish or stop the current answer first.");
   try { await restoreSession(episode.sessionId, true); await restorePending(episode.sessionId); updatePendingComposer(); setBusy(false); closeDialog($("ledger")); notify("Conversation reopened. Continue below."); }
   catch (error) { notify(error.message); }

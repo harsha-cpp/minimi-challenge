@@ -160,5 +160,22 @@
       "capturedAt": "2026-11-16T19:38:56.811Z",
       "backgroundEnrichment": true
     }
-  ]
+  ],
+  "followup": {
+    "scope": "Different explicit full-source verification question, local integration check after Fast schema fix. Not paired with the original simple lookup. The first deployed pre-fix attempt was supported_partial and did not answer the requested definition.",
+    "question": "Read https://www.rfc-editor.org/rfc/rfc9110.html using full content. Verify what HTTP status code 404 means, including whether it proves the resource is permanently gone. Keep it concise.",
+    "quality": "supported",
+    "totalMs": 13090,
+    "modelCalls": 3,
+    "searches": 1,
+    "reviewCalls": 1,
+    "implementation": {
+      "implementation": "b2908707e357b7fb4bc244f214aa12ddd6d7e20b53cc71efb2fcb1e5154f2791",
+      "execution": "claims-checkpoints-v1",
+      "review": "claim-support-v2",
+      "retrieval": "coverage-search-v2",
+      "memory": "lexical-concepts-v1"
+    },
+    "capturedAt": "2026-11-16T19:47:05.619Z"
+  }
 }
