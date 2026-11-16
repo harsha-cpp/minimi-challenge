@@ -17,7 +17,7 @@ import { EvidenceWindow } from "./evidence.ts";
 import { reviewSimulationAnswer, type EvidenceQuality, type SimulationReview } from "./simulation.ts";
 import { recordStage } from "../runtime/telemetry.ts";
 import { citedNumbers } from "./citations.ts";
-import { FAST_INSTRUCTIONS, FAST_LIMITS, type ResponseMode } from "./response-mode.ts";
+import { FAST_INSTRUCTIONS, FAST_LIMITS, FAST_WEB_SEARCH_TOOL, type ResponseMode } from "./response-mode.ts";
 import { ASK_CLARIFICATION_TOOL, CLARIFICATION_INSTRUCTIONS, canClarify, parseClarification,
   type ClarificationAnswer, type ClarificationCard, type ClarificationPort } from "./clarification.ts";
 export { citedNumbers } from "./citations.ts";
@@ -232,15 +232,16 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
     let firstTokenMs: number | null = null;
     let searches = 0;
     let modelCalls = 0;
+    let validationRetry = 0;
 
     for (let round = 1; ; round++) {
-      let mustAnswer = round > (fast ? FAST_LIMITS.searchRounds : MAX_SEARCH_ROUNDS) || remainingMs() < synthesisReserveMs;
+      let mustAnswer = round > (fast ? FAST_LIMITS.searchRounds + validationRetry : MAX_SEARCH_ROUNDS) || remainingMs() < synthesisReserveMs;
       let mayAsk = clarificationAllowed && round === 1 && !mustAnswer;
       const generate = () => {
         modelCalls++;
         return llm.stream({
           messages,
-          tools: mustAnswer ? [] : mayAsk ? [WEB_SEARCH_TOOL, ASK_CLARIFICATION_TOOL] : [WEB_SEARCH_TOOL],
+          tools: mustAnswer ? [] : mayAsk ? [fast ? FAST_WEB_SEARCH_TOOL : WEB_SEARCH_TOOL, ASK_CLARIFICATION_TOOL] : [fast ? FAST_WEB_SEARCH_TOOL : WEB_SEARCH_TOOL],
           toolChoice: mustAnswer ? "none" : "auto",
           signal,
           purpose: mustAnswer ? "synthesis" : "research",
@@ -303,6 +304,11 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
         const content = contents[i]!;
         messages.push({ role: "tool", tool_call_id: call.id, content });
       });
+      if (fast && !validationRetry && results.every(result => typeof result === "string" && result.startsWith("Invalid arguments:"))) {
+        validationRetry = 1;
+        messages.push({ role: "system", content: "No web request ran because the tool arguments were invalid. Correct the arguments and use web_search now. Supply a nonempty query string and omit optional fields you do not need. You have one correction attempt; the original research limits still apply." });
+        recordStage("tool_argument_retry", 0, { attempt: 1 });
+      }
       if (!buffered) emit({ type: "sources", sources });
     }
 

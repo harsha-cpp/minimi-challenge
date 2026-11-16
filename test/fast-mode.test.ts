@@ -45,6 +45,32 @@ test("Fast bounds research to four lookups in one round and retains the full ver
   } finally { store.close(); }
 });
 
+for (const recovers of [true, false]) {
+  test(`Fast corrects invalid tool arguments once, recovery=${recovers}`, async () => {
+    const store = new MemoryStore(":memory:");
+    let calls = 0, searches = 0;
+    const llm: Llm = { json: async () => ({}), stream: async request => {
+      calls++;
+      if (calls <= 2) {
+        assert.equal(request.toolChoice, "auto");
+        assert.deepEqual(Object.keys((request.tools[0]!.function.parameters as any).properties), ["query", "urls"]);
+        const call = lookup(1);
+        if (calls === 1 || !recovers) call.function.arguments = '{"query":"price","urls":42}';
+        return { text: "", toolCalls: [call] };
+      }
+      assert.equal(request.toolChoice, "none");
+      return { text: recovers ? answer : "The price could not be checked.", toolCalls: [] };
+    } };
+    try {
+      const events: AgentEvent[] = [];
+      await runTurn({ store, llm, clock: { now: () => now, simulated: false }, search: { search: async () => { searches++; return [hit]; } }, enricher: { schedule() {} } },
+        { sessionId: "retry", message: "What is the price?", tz: "UTC", responseMode: "fast" }, event => events.push(event));
+      assert.equal(calls, 3); assert.equal(searches, recovers ? 1 : 0);
+      assert.ok(events.some(e => e.type === "done"));
+    } finally { store.close(); }
+  });
+}
+
 test("HTTP Fast routing, replay and clarification resume preserve the selected mode", async () => {
   const store = new MemoryStore(":memory:"), questions = new QuestionStore(":memory:");
   let standardCalls = 0, fastCalls = 0, asked = false;
