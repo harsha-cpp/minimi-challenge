@@ -116,7 +116,7 @@ test("a repeatedly rejected repair ends as explicit uncertainty and never publis
     { json: async () => ({ status: "needs_revision", issues: [{ code: "wrong_perspective", detail: "The event already happened." }], safeAnswer: correction }) });
   try {
     await ui.run();
-    assert.match(ui.store.episode(1)!.answer, /couldn't verify/);
+    assert.match(ui.store.episode(1)!.answer, /remain unverified/);
     assert.equal(ui.store.episode(1)!.execution!.quality, "explicitly_unverified");
     assert.equal(ui.store.episode(1)!.execution!.rejectionObserved, true);
     assert.doesNotMatch(JSON.stringify(ui.events), /REJECTED_FIRST|REJECTED_SECOND/);

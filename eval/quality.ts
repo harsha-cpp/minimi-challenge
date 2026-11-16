@@ -24,8 +24,8 @@ if (!datasetPath) {
   if (manifest.version !== SEED_VERSION || manifest.sha256 !== SEED_HASH || manifest.cases !== dataset.length) throw new Error("Frozen seed manifest mismatch; version and review the changed dataset.");
 }
 const report = {
-  version: QUALITY_PROTOCOL_VERSION, datasetVersion: datasetPath ? "supplied-adjudicated-dataset" : SEED_VERSION, datasetHash: digest(dataset), createdAt: new Date().toISOString(),
-  scope: "Evaluation protocol only. The bundled seed has 200 authored questions, 20 per slice, with all reference captures and human labels pending. Supplied datasets are validated separately. Entity/time groups stay in one split. Generation inputs exclude reference labels. Injected failure, frozen conversation and live-quality tracks are distinct. This command makes no live requests or paid provider calls.",
+  version: QUALITY_PROTOCOL_VERSION, datasetVersion: datasetPath ? "supplied-dataset" : SEED_VERSION, datasetHash: digest(dataset), createdAt: new Date().toISOString(),
+  scope: `Evaluation protocol only. This dataset contains ${dataset.length} authored questions; ${dataset.filter(item => item.labels.status === "pending").length} still need captured references and human adjudication. Entity/time groups stay in one split. Generation inputs exclude reference labels. Injected failure, frozen conversation and live-quality tracks are distinct. This command makes no live requests or paid provider calls.`,
   cases: dataset.length, slices: Object.fromEntries(QUALITY_SLICES.map(slice => [slice, dataset.filter(item => item.slice === slice).length])),
   splits: Object.fromEntries(["development", "heldout"].map(split => [split, dataset.filter(item => item.split === split).length])),
   pendingLabels: dataset.filter(item => item.labels.status === "pending").length,

@@ -25,6 +25,9 @@ test("subject-free verification requires an actual conversational predecessor", 
     "Could you rigorously check the claims you made earlier?", "Please make absolutely sure your previous answer is correct.",
     "Go back and verify your last response carefully.", "Can you substantiate what you just said using reliable sources?",
     "Please check that properly.", "Verify your claims about that answer thoroughly.",
+    "Does that still hold up?", "Would you still recommend those?", "Can I still rely on that?",
+    "Would you give me the same answer today?", "Do those prices still apply?",
+    "Has anything changed since your last response?", "Are those figures still valid?",
   ]) {
     assert.deepEqual(resolve(message), missing, message);
     const result = resolve(message, [episode(22)]);
@@ -46,7 +49,54 @@ test("new named subjects, URLs and supplied claims remain independent pivots", (
     "Verify your claims about Grammarly.", "Verify your claims for Bitly.", "Verify your claims about Swiftly pricing.",
     "Verify your claims and IPL winners thoroughly.", 'Properly verify this claim: "Kimi has a million-token context".',
     "Verify that Grammarly is accurate.", "Verify that grammarly is accurate.", "Verify this Bitly link properly.",
+    "Does SQLite still hold up for analytics?", "Would you still recommend those Azure plans?",
+    "Can I still rely on Redis persistence?", "Do those prices still apply in Japan?",
   ]) assert.deepEqual(resolve(message, [episode(22)]), standalone, message);
+});
+
+test("explicit prior-answer references accept bounded billing, date, region and availability constraints", () => {
+  for (const message of [
+    "Verify your previous answer, including billing term and minimum seats.",
+    "Please check your last response, including currency, taxes and regional availability.",
+    "Re-check your previous answer for India, including currency and tax.",
+    "Verify your earlier answer for Japan, including billing period and taxes.",
+    "Check your previous answer: does announced mean generally available?",
+    "Your previous answer used November 12 as the launch date. Check whether that is publication date or event date.",
+    "Your last answer gave 2026-11-12 as the event date; verify whether it is the publication date or the release date.",
+    "Re-check your previous answer. If verification cannot finish, distinguish unfinished checks from disproven claims.",
+  ]) {
+    assert.deepEqual(resolve(message), missing, message);
+    const result = resolve(message, [episode(22)]);
+    assert.equal(result.anchor?.episodeId, 22, message);
+    assert.equal(result.memoryScope, "none", message);
+    assert.deepEqual(resolve(message, [episode(22, { sessionId: "elsewhere" }), episode(23, { ownerId: "other" })]), missing, message);
+  }
+});
+
+test("review constraints cannot smuggle in another subject or supplied assertion", () => {
+  for (const message of [
+    "Verify your previous answer, including SQLite pricing.",
+    "Verify your previous answer for SQLite, including currency and tax.",
+    "Check your previous answer: Acme costs $10.",
+    "Check your previous answer: does Grammarly mean generally available?",
+    'Check your previous answer: "does announced mean generally available?"',
+    "Verify your previous answer, including billing term and minimum seats; also verify SQLite pricing.",
+    "Re-check your previous answer for India, including currency and tax at https://example.com.",
+  ]) assert.deepEqual(resolve(message, [episode(22)]), standalone, message);
+});
+
+test("named recommendation follow-ups bind only the current predecessor topic, never a matching older or foreign chat", () => {
+  const crm = episode(22, { question: "Shortlist five CRMs for a sales team.", answer: "HubSpot and Zoho are two candidates." });
+  const followup = "Verify your earlier CRM recommendations; if one source is unavailable, show what you can establish for the others.";
+  assert.equal(resolve(followup, [crm]).anchor?.episodeId, 22);
+  assert.deepEqual(resolve(followup, [crm, episode(23)]), standalone);
+  assert.deepEqual(resolve(followup, [episode(23), { ...crm, ownerId: "foreign", sequence: 100 }]), standalone);
+  assert.deepEqual(resolve(followup, [{ ...crm, sessionId: "other" }]), missing);
+  assert.deepEqual(resolve("Verify your earlier SQLite recommendations.", [crm]), standalone);
+  assert.deepEqual(resolve("Verify your earlier Acme CRM recommendations.", [crm]), standalone);
+  const unresolved = episode(23, { question: followup, answer: "The check did not finish.", quality: "explicitly_unverified",
+    execution: { requestContext: { kind: "conversation_reference", anchorEpisodeId: crm.id, anchorAnswerHash: hash(crm.answer) } } });
+  assert.equal(resolve(followup, [crm, unresolved]).anchor?.episodeId, 22);
 });
 
 test("cross-conversation recall is opt-in through deliberate personal-memory requests", () => {
@@ -61,6 +111,8 @@ test("cross-conversation recall is opt-in through deliberate personal-memory req
     "Recall the managed database comparison.", "Please recall the vector database decision.",
     "Last Tuesday I asked you about Postgres hosting. Has any pricing changed since then?",
     "We discussed Postgres last week. Is its pricing unchanged?", "On 2026-05-15 I told you my database choice. What was it?",
+    "On Monday we shortlisted 5 CRM tools for a 20-person sales team. Has any of them changed pricing or shipped something big since?",
+    "Last Friday we compared database hosts. Which did we pick?",
   ]) assert.deepEqual(resolve(message, [episode(22)]), { kind: "standalone", memoryScope: "explicit_memory" }, message);
 });
 
@@ -70,6 +122,7 @@ test("generic verification and world dates grant no personal-memory scope", () =
     "What happened in May 2026?", "What should I ask about Kimi?", "We chose Postgres; is it fast?",
     "Verify our claim that Kimi has a million-token context.", "Is your previous answer still true?",
     "Can Kimi remember my coding preferences?", "I remember my first computer. What is SQLite?",
+    "On Monday we chose Postgres; is it fast?", "On Monday Acme shortlisted CRM tools. What changed?",
     "Recall the latest SQLite version.", "Recall this comparison.", "Recall the managed database comparison: Postgres is fast.",
     'Recall "the managed database comparison".',
     "Last Tuesday I asked Kimi about Postgres. Has pricing changed?",
@@ -185,6 +238,43 @@ test("repeated unresolved checks follow exact valid parent bindings while suppor
       kind: "conversation_reference", anchorEpisodeId: original.id, anchorAnswerHash: hash(original.answer),
     } } });
   assert.equal(resolve("verify again", [original, supported, fallback(28, supported)]).anchor?.episodeId, 27);
+});
+
+test("unfinished-check follow-ups retain the original claims after an independently approved subset", () => {
+  const original = episode(22);
+  const partial = episode(24, { question: "verify your previous answer", answer: "Only the Kimi claim was verified.", quality: "supported_partial",
+    execution: { requestContext: { kind: "conversation_reference", anchorEpisodeId: original.id, anchorAnswerHash: hash(original.answer) },
+      reviewFailure: { reason: "insufficient_evidence", retryable: true, retryScope: "unfinished_claims", retryEpisodeId: original.id } } });
+  for (const message of ["finish checking the rest", "retry the unfinished check", "Please continue checking the remaining claims.", "Verify this again."]) {
+    assert.deepEqual(resolve(message), missing, message);
+    const result = resolve(message, [original, partial]);
+    assert.equal(result.anchor?.episodeId, original.id, message);
+    assert.equal(result.anchor?.answerHash, hash(original.answer), message);
+    assert.equal(result.memoryScope, "none", message);
+  }
+  const approvedPartial = { ...partial, execution: { requestContext: partial.execution!.requestContext } };
+  assert.equal(resolve("verify this again", [original, approvedPartial]).anchor?.episodeId, partial.id,
+    "a normally approved partial answer remains its own claim target");
+  assert.deepEqual(resolve("Finish checking the rest of SQLite pricing.", [original, partial]), standalone);
+});
+
+test("unfinished recovery metadata cannot forge another target or bypass original ownership and hashes", () => {
+  const original = episode(22), other = episode(21, { question: "Different question", answer: "Unrelated facts." });
+  const partial = (retryEpisodeId: unknown, patch: Partial<Episode> = {}) => episode(24, {
+    question: "verify your claims now", answer: "A verified subset.", quality: "supported_partial",
+    execution: { requestContext: { kind: "conversation_reference", anchorEpisodeId: original.id, anchorAnswerHash: hash(original.answer) },
+      reviewFailure: { retryable: true, retryScope: "unfinished_claims", retryEpisodeId } }, ...patch,
+  });
+  for (const forged of [other.id, 99, "22", null, undefined]) {
+    assert.deepEqual(resolve("retry the unfinished check", [other, original, partial(forged)]), missing);
+  }
+  for (const target of [{ ...original, ownerId: "foreign" }, { ...original, sessionId: "other" }, { ...original, answer: "Changed original claims." }]) {
+    assert.deepEqual(resolve("finish checking the rest", [other, target, partial(original.id)]), missing);
+  }
+  assert.deepEqual(resolve("finish checking the rest", [other, partial(original.id)]), missing);
+  assert.deepEqual(resolve("finish checking the rest", [other, original, partial(original.id, {
+    execution: { reviewFailure: { retryable: true, retryScope: "unfinished_claims", retryEpisodeId: original.id } },
+  })]), missing);
 });
 
 test("an unresolved retry with a missing, modified, clarifying or cyclic parent cannot fall back to another answer", () => {

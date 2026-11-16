@@ -51,7 +51,8 @@ export interface SearchHit {
     contentFetchedAt?: string;
     ageStatus: "known" | "unknown";
   };
-  retrieval?: { profile: RetrievalProfile; mode: "auto" | "lite"; content: "highlights" | "full"; policyVersion: string; providerCostDollars?: number; providerCostScope?: "request" };
+  retrieval?: { profile: RetrievalProfile; mode: "auto" | "lite"; content: "highlights" | "full"; policyVersion: string; providerCostDollars?: number; providerCostScope?: "request";
+    passageSelection?: { selection: "complete-received-text" | "query-passages" | "document-prefix"; receivedCharacters: number; omittedCharacters: number; requestedCharacters: number; acquisitionMayBeTruncated: boolean; boundedDocumentHash: string } };
   temporal?: TemporalProvenance;
 
   archive?: {

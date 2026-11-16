@@ -49,9 +49,11 @@ function explicitPersonalMemory(message: string): boolean {
   if (/\b(?:what|which|when|where|how)\b[\s\S]{0,160}\b(?:i|we)\s+(?:said|told|gave|wrote|claimed|asked|chose|discussed|decided|preferred|mentioned|requested|picked|selected|rejected|specified|agreed)\b/i.test(message)) return true;
   if (/\b(?:what|which|when|where|how)\b[\s\S]{0,160}\b(?:did|have|had)\s+you\s+(?:tell|told|give|gave|recommend|recommended|suggest|suggested|say|said)\s+(?:to\s+)?(?:me|us)\b/i.test(message)) return true;
   // A date only authorizes memory when paired with a personal communication/history cue.
-  const dated = /\b(?:yesterday|last (?:week|month|year|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|earlier|previously|on\s+\d{1,2}\s+\w+|on\s+\w+\s+\d{1,2}|\d{4}-\d{2}-\d{2})\b/i.test(message);
+  const dated = /\b(?:yesterday|last (?:week|month|year|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|earlier|previously|on\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)|on\s+\d{1,2}\s+\w+|on\s+\w+\s+\d{1,2}|\d{4}-\d{2}-\d{2})\b/i.test(message);
   return dated && (/\b(?:recall|remember|find|retrieve|show|verify|check)\b[\s\S]{0,100}\b(?:my|our)\s+(?:conversation|chat|discussion|question|request|preference|choice|decision|recommendation|message|claim|statement)s?\b/i.test(message)
-    || /\b(?:i|we)\s+(?:(?:asked|told)\s+you\s+(?:about\s+)?|discussed\s+(?:with\s+you\s+)?)[\p{L}\p{N}]/iu.test(message));
+    || /\b(?:i|we)\s+(?:(?:asked|told)\s+you\s+(?:about\s+)?|discussed\s+(?:with\s+you\s+)?)[\p{L}\p{N}]/iu.test(message)
+    || /\b(?:i|we)\s+(?:shortlisted|selected|picked|compared|chose)\b/i.test(message)
+      && /\b(?:what|which|remind|recall|remember)\b|\b(?:any|all|each|one|some)\s+of\s+(?:them|those)\b|\b(?:they|those|these)\b.{0,60}\b(?:changed|still|since)\b/i.test(message));
 }
 
 const referenceWords = new Set(("verify verification recheck re check fact factcheck double confirm validate is are was were do does did has have can could would will should " +
@@ -60,7 +62,8 @@ const referenceWords = new Set(("verify verification recheck re check fact factc
   "answer answers response responses claim claims statement statements assertion assertions recommendation recommendations fact facts information detail details " +
   "number numbers price prices pricing cost costs plan plans version versions availability result results value values correctness accuracy " +
   "true correct accurate right valid verified supported available unchanged changed up to date sure certain confident about stand by said say wrote written gave given made make provided just " +
-  "for with against evidence sources source checkable thing things time selected viewpoint calendar comparison comparisons want need to and or not full entire complete").split(/\s+/));
+  "for with against evidence sources source checkable thing things time selected viewpoint calendar comparison comparisons want need to and or not full entire complete " +
+  "hold holds recommend rely advice figures sound apply applies since give").split(/\s+/));
 const verificationWords = new Set(("using consulting reading reliable official primary independent credible actual proper rigorous thorough exhaustive sourced " +
   "citation citations references research detail depth care exact links link documents docs doing go back over well better deeper further hard fast together " +
   "own recent assistant tell told stated claimed ensure possible respect regarding concerning related substantiate corroborate reassess cross evaluate doublecheck").split(/\s+/));
@@ -78,6 +81,7 @@ function implicitReference(message: string): boolean {
     || /\b(?:true|correct|accurate|right|valid|up[- ]to[- ]date|changed|unchanged)\b/i.test(core)
       && /\b(?:is|are|was|were|still|has|have|what|what's|whats)\b/i.test(core)
     || /\b(?:are you sure|stand by your (?:answer|response|claims?))\b/i.test(core)
+    || /\b(?:hold(?:s)? up|still (?:recommend|rely on|sound|apply)|same answer)\b/i.test(core)
     || directReference && /\b(?:substantiate|corroborate|reassess|cross[- ]?check|re[- ]?evaluate)\b/i.test(core);
   if (!verification) return false;
   const words = core.toLocaleLowerCase("en-US").match(/[\p{L}\p{N}]+(?:'[\p{L}]+)?/gu) ?? [];
@@ -97,6 +101,57 @@ function implicitReference(message: string): boolean {
   // an unknown noun or explicit new subject still cannot inherit a conversation target.
   return words.every(word => generic(word) || /^\p{L}{3,}ly$/u.test(word));
 }
+
+const reviewFacets = new Set(["billing", "billing term", "billing terms", "billing period", "billing cadence", "minimum seats", "seat minimum",
+  "currency", "tax", "taxes", "regional availability", "availability", "launch date", "event date", "publication date", "release date"]);
+const regionNames = (() => {
+  const names = new Set(["us", "usa", "uk", "eu", "united states", "united kingdom"]);
+  const display = new Intl.DisplayNames(["en"], { type: "region" });
+  for (let first = 65; first <= 90; first++) for (let second = 65; second <= 90; second++) {
+    const code = String.fromCharCode(first, second), name = display.of(code);
+    if (name && name !== code) { names.add(name.toLowerCase()); names.add(code.toLowerCase()); }
+  }
+  return names;
+})();
+
+/** Small clause grammar for explicit references plus review constraints, not arbitrary new subjects. */
+function scopedReference(message: string): { topic?: string } | undefined {
+  const text = normalized(message);
+  if (text.length > 700 || explicitPersonalMemory(text) || suppliedTextTask(text)
+    || /["“”`]|https?:\/\//i.test(text) || /(?:^|\s)'[^']+'(?=\s|[.!?,;:]|$)/.test(text)) return;
+  if (/^(?:(?:please|can you|could you|would you)\s+)*(?:finish (?:checking|verifying) (?:the )?(?:rest|remaining claims)|retry (?:the )?(?:unfinished|remaining) (?:check|claims)|continue checking (?:the )?(?:rest|remaining claims))[.!?]*$/i.test(text)) return {};
+  const date = "(?:\\d{4}-\\d{2}-\\d{2}|(?:january|february|march|april|may|june|july|august|september|october|november|december)\\s+\\d{1,2}(?:,?\\s+\\d{4})?|\\d{1,2}\\s+(?:january|february|march|april|may|june|july|august|september|october|november|december)(?:\\s+\\d{4})?)";
+  const dateKind = "(?:launch|release|announcement|publication|event) date";
+  if (new RegExp(`^your (?:previous|earlier|last|prior) answer (?:used|gave|stated) ${date} as (?:the )?${dateKind}[.;,]\\s*(?:check|verify) whether (?:that|it) is (?:the )?${dateKind} or (?:the )?${dateKind}[.!?]*$`, "i").test(text)) return {};
+  const lead = text.match(/^(?:(?:please|can you|could you|would you)\s+)*(?:verify|re[- ]?check|check|fact[- ]?check|double[- ]?check)\s+your\s+(?:previous|earlier|last|prior)\s+(?:([\p{L}\p{N}][\p{L}\p{N} -]{0,49})\s+)?(answer|response|recommendations?)\b([\s\S]*)$/iu);
+  if (!lead) return;
+  const topic = lead[1]?.trim();
+  // Named recommendations can refer back to that exact predecessor topic; "answer about X" is a pivot.
+  if (topic && !/^recommendations?$/i.test(lead[2]!)) return;
+  let clause = lead[3]!.replace(/^[\s,;:.]+|[\s.!?]+$/g, "").toLowerCase();
+  if (!clause) return { topic };
+  const regional = clause.match(/^for ([\p{L} .-]{2,60}),?\s+including (.+)$/u);
+  if (regional) {
+    if (!regionNames.has(regional[1]!.trim())) return;
+    clause = `including ${regional[2]}`;
+  }
+  if (clause.startsWith("including ")) {
+    const facets = clause.slice(10).split(/\s*,\s*|\s+and\s+/).map(value => value.trim()).filter(Boolean);
+    if (facets.length && facets.length <= 6 && facets.every(facet => reviewFacets.has(facet))) return { topic };
+  }
+  if (/^does (?:announced|announcement|preview|launched|launch) mean (?:generally available|general availability|available to everyone|public availability)$/.test(clause)
+    || /^if (?:one|a|any) source is unavailable, (?:show|state|keep|preserve) what you can (?:establish|verify|confirm) for the others$/.test(clause)
+    || /^if verification cannot finish, distinguish unfinished checks from disproven claims$/.test(clause)) return { topic };
+}
+
+function matchesReferenceTopic(topic: string | undefined, anchor: ConversationAnchor): boolean {
+  if (!topic) return true;
+  const tokens = (value: string) => (value.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []).map(word => word.length > 3 ? word.replace(/s$/, "") : word);
+  const subject = new Set(tokens(`${anchor.question} ${anchor.answer}`));
+  return tokens(topic).every(word => subject.has(word));
+}
+
+const referenceForm = (message: string) => implicitReference(message) || scopedReference(message) !== undefined;
 
 function sequence(episode: Episode): number | null {
   const value = episode.sequence === undefined ? episode.id : episode.sequence;
@@ -130,7 +185,8 @@ export function resolveRequestContext(input: RequestContextInput): RequestContex
       : { kind: "missing_reference", memoryScope: "none" };
   }
   if (explicitPersonalMemory(input.message)) return { kind: "standalone", memoryScope: "explicit_memory" };
-  if (!implicitReference(input.message)) return { kind: "standalone", memoryScope: "none" };
+  const scope = scopedReference(input.message);
+  if (!implicitReference(input.message) && !scope) return { kind: "standalone", memoryScope: "none" };
   const missing: RequestContext = { kind: "missing_reference", memoryScope: "none" };
   const scoped = input.history.filter(episode => episode.sessionId === input.sessionId && (episode.ownerId ?? "local") === ownerId);
   if (scoped.some(episode => !Number.isSafeInteger(episode.id) || episode.id <= 0 || sequence(episode) === null)) return missing;
@@ -153,29 +209,39 @@ export function resolveRequestContext(input: RequestContextInput): RequestContex
     if (!target || sequence(target)! >= sequence(episode)! || metadata(target)?.kind === "missing_reference"
       || !anchorFor(target, ownerId) || hash(target.answer) !== context.anchorAnswerHash.toLowerCase()) return false;
     const targetKind = metadata(target)?.kind;
-    return targetKind === "standalone" || !(implicitReference(target.question) || targetKind === "conversation_reference") || validBinding(target, visited);
+    return targetKind === "standalone" || !(referenceForm(target.question) || targetKind === "conversation_reference") || validBinding(target, visited);
   };
   for (let index = 0; index < history.length; index++) {
     const episode = history[index]!;
     const context = metadata(episode);
     if (context?.kind === "missing_reference") return missing;
-    const legacyReference = implicitReference(episode.question);
+    if ((episode.quality === "supported_partial" || episode.execution?.quality === "supported_partial")
+      && object(episode.execution?.reviewFailure)?.retryScope === "unfinished_claims" && context?.kind !== "conversation_reference") return missing;
+    const legacyReference = referenceForm(episode.question);
     // A declared but invalid binding is not permission to select another subject.
     if (context?.kind === "conversation_reference" && !validBinding(episode)) return missing;
     if (!legacyReference || context?.kind === "standalone" || context?.kind === "conversation_reference") {
       let subject = episode;
       const followed = new Set<number>();
-      while (metadata(subject)?.kind === "conversation_reference"
-        && (subject.quality === "explicitly_unverified" || subject.execution?.quality === "explicitly_unverified")) {
+      while (true) {
+        const binding = metadata(subject);
+        const recovery = object(subject.execution?.reviewFailure);
+        const unfinished = (subject.quality === "supported_partial" || subject.execution?.quality === "supported_partial")
+          && recovery?.retryScope === "unfinished_claims";
+        if (unfinished && (binding?.kind !== "conversation_reference" || recovery.retryable !== true
+          || !Number.isSafeInteger(recovery.retryEpisodeId) || recovery.retryEpisodeId !== binding.anchorEpisodeId)) return missing;
+        if (binding?.kind !== "conversation_reference"
+          || !(unfinished || subject.quality === "explicitly_unverified" || subject.execution?.quality === "explicitly_unverified")) break;
         if (followed.has(subject.id)) return missing;
         followed.add(subject.id);
-        // Bound unresolved replies contain safe status prose, not a replacement claim set.
+        // Unresolved prose and approved subsets of failed checks do not replace the original claim set.
         // The binding was validated above; follow that exact parent rather than an adjacent turn.
-        const parent = byId.get(metadata(subject)!.anchorEpisodeId as number);
+        const parent = byId.get(binding.anchorEpisodeId as number);
         if (!parent) return missing;
         subject = parent;
       }
       const anchor = anchorFor(subject, ownerId);
+      if (anchor && !matchesReferenceTopic(scope?.topic, anchor)) return { kind: "standalone", memoryScope: "none" };
       return anchor ? { kind: "conversation_reference", memoryScope: "none", anchor } : missing;
     }
     // Legacy unbound follow-up prose may already contain cross-conversation contamination.

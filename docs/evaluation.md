@@ -2,7 +2,20 @@
 
 The deterministic pipeline and evaluation framework are implemented. Small real-provider development diagnostics have been collected; held-out quality, representative latency and human calibration remain unmeasured. The bundled dataset contains **200 questions, 20 in each of ten slices, with every reference capture and human label pending**. A green unit suite or frozen replay does not satisfy the production release gate.
 
+## Execution identity
+
+Each new turn records execution, review, retrieval and memory policy versions plus a source fingerprint. The fingerprint includes claim coverage, checkpoints, concept recall, model routing and search policy. Interrupted research is invalidated when these inputs change. Benchmark reports also hash the new modules before provider work. Compare matching questions, seeded history, viewpoint and mode, retain failed or unverified outcomes, and report sample counts alongside timing changes. A faster unverified answer is not a verified-quality improvement.
+
 ## Offline checks
+
+The focused [20-conversation review set](../eval/quality/review-cases.json) exercises re-checks, paraphrased references, missing history, price conditions, event dates, availability and partial failures. Its routing expectations run in the normal test suite. Every factual reference and human label remains pending; these tests do not establish answer accuracy.
+
+```sh
+npm run eval:quality -- --dataset eval/quality/review-cases.json --out .context/focused-quality.json --annotation-template .context/focused-labels.json
+node --import tsx scripts/latency-report.ts --db data/asof.db
+```
+
+The latency command reads at most 1,000 retained traces without modifying the database. It separates mode, intent, outcome and completed-answer quality, and distinguishes first server text from measured browser rendering. Missing measurements stay null. p95 requires at least 20 samples for each metric; retained usage is not a controlled benchmark. Local `/api/metrics` exposes the same aggregate without questions, identities or source URLs. Clarifications count as waiting for input, not provider failures.
 
 ```sh
 npm run typecheck

@@ -1288,3 +1288,9 @@ dialog.source-dialog { width: min(43rem, calc(100vw - 2rem)); max-height: calc(1
   .custom-detail-row input { width: 100%; flex-basis: 100%; font-size: 1rem; }
   .custom-detail-row button { min-height: 38px; }
 }
+/* Reviewed progress is visually separate from the final answer. */
+.checked-findings { margin: 1.25rem 0; padding: 1rem 1.25rem; border-left: 2px solid #49715c; background: rgba(73, 113, 92, .06); font-size: .9rem; line-height: 1.65; }
+.checked-findings > strong { display: block; margin-bottom: .25rem; }
+.checked-findings > p { margin: 0 0 .7rem; opacity: .8; font-size: .8rem; }
+.checked-findings ul { padding-left: 1.2rem; margin: 0; }
+.checked-findings li + li { margin-top: .5rem; }

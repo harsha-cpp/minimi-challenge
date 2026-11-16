@@ -1,5 +1,5 @@
 import type { SearchProvider, SearchQuery, RetrievalProfile } from "./types.ts";
-export const RETRIEVAL_POLICY_VERSION = "profiles-v1";
+export const RETRIEVAL_POLICY_VERSION = "profiles-passages-v2";
 export const PROFILES: Record<RetrievalProfile, { results: number; excerptChars: number }> = {
   fact: { results: 5, excerptChars: 2500 }, direct: { results: 5, excerptChars: 2500 },
   verification: { results: 5, excerptChars: 3500 }, comparison: { results: 6, excerptChars: 3000 },

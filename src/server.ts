@@ -23,6 +23,9 @@ import { SseChannel } from "./runtime/sse.ts";
 import { defaultProviderSpending, type ProviderSpendingPolicy } from "./runtime/provider-spending.ts";
 import { providerConfigurationIssues } from "./runtime/provider-readiness.ts";
 import { POLICY_VERSION, finishTrace, newTrace, recordStage, recordUsage, serverEmission, withTrace, type TurnTrace } from "./runtime/telemetry.ts";
+import { summarizeTraces } from "./runtime/latency-report.ts";
+import { ResearchCheckpoints, RESEARCH_CHECKPOINT_TTL_MS, type ResearchCheckpoint, type ResearchRequest } from "./runtime/research-checkpoints.ts";
+import { executionPolicyFingerprint } from "./runtime/versions.ts";
 const root = fileURLToPath(new URL("..", import.meta.url));
 const STATIC: Record<string, [file: string, type: string]> = {
   "/": ["public/index.html", "text/html; charset=utf-8"],
@@ -48,6 +51,9 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
 class RequestError extends Error {
   constructor(message: string, readonly status: number, readonly code?: string) { super(message); }
 }
+class TurnAbort extends Error {
+  constructor(readonly kind: "explicit" | "disconnect" | "shutdown") { super("Turn stopped"); this.name = "AbortError"; }
+}
 async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = []; let size = 0;
   for await (const chunk of req) { size += chunk.length; if (size > 100_000) throw new RequestError("Request body too large", 413); chunks.push(chunk); }
@@ -64,12 +70,13 @@ const modelTrace = (call: ModelCallTrace) => {
   if (call.providerStarted) recordUsage(call.usage ?? undefined);
 };
 
-export function createApplication(options: { config?: Config; store?: MemoryStore; questions?: QuestionStore; deps?: Deps | null; spendingPolicy?: ProviderSpendingPolicy } = {}) {
+export function createApplication(options: { config?: Config; store?: MemoryStore; questions?: QuestionStore; checkpoints?: ResearchCheckpoints; deps?: Deps | null; spendingPolicy?: ProviderSpendingPolicy } = {}) {
   const config = options.config ?? loadConfig();
   const missing = [...config.missing];
   const clock = new SystemClock();
   const store = options.store ?? new MemoryStore(config.dbPath);
   const questions = options.questions ?? new QuestionStore(config.dbPath);
+  const checkpoints = options.checkpoints ?? new ResearchCheckpoints(config.dbPath);
   store.recoverInterruptedTurns();
   store.purgeOperational(Date.now() - config.limits.traceRetentionDays * 86_400_000);
   const turns = new AdmissionPool({ maxActive: config.limits.activeTurns, maxQueued: config.limits.queuedTurns, foregroundReserve: 0 });
@@ -77,8 +84,34 @@ export function createApplication(options: { config?: Config; store?: MemoryStor
   const quota = new ModelQuota({ requestsPerMinute: config.limits.modelRequestsPerMinute, tokensPerMinute: config.limits.modelTokensPerMinute, completionRequests: config.limits.modelCompletionRequests, completionTokens: config.limits.modelCompletionTokens });
   const prices = config.limits.inputDollarsPerMillion !== null && config.limits.outputDollarsPerMillion !== null
     ? { version: process.env.MODEL_PRICE_VERSION ?? "operator-v1", inputPerMillionUsd: config.limits.inputDollarsPerMillion, outputPerMillionUsd: config.limits.outputDollarsPerMillion } : undefined;
-  const budget = () => new ModelBudget({ maxCalls: config.limits.turnModelCalls, maxTokens: config.limits.turnTokens, reserveCalls: Math.min(2, config.limits.turnModelCalls - 1), reserveTokens: Math.min(12_000, Math.floor(config.limits.turnTokens / 4)),
-    ...(prices ? { prices, maxSpendUsd: config.limits.maxTurnDollars } : {}) });
+  const budget = (prior?: ResearchCheckpoint["usage"]) => {
+    if (prices && prior?.spendUsd === null) throw new RequestError("The previous attempt's cost could not be bounded. Start fresh research after its usage is reconciled.", 409, "checkpoint_budget_unknown");
+    const calls = config.limits.turnModelCalls - (prior?.calls ?? 0), tokens = config.limits.turnTokens - (prior?.tokens ?? 0);
+    const dollars = config.limits.maxTurnDollars - (prior?.spendUsd ?? 0);
+    if (calls < 1 || tokens < 1 || prices && dollars <= 0) throw new RequestError("This attempt has exhausted its research allowance. Start a new request.", 409, "checkpoint_budget_exhausted");
+    return new ModelBudget({ maxCalls: calls, maxTokens: tokens, reserveCalls: Math.min(2, calls - 1), reserveTokens: Math.min(12_000, Math.floor(tokens / 4)),
+      ...(prices ? { prices, maxSpendUsd: dollars } : {}) });
+  };
+  const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+  const policyHash = digest({ implementation: executionPolicyFingerprint(), policy: POLICY_VERSION, limits: config.limits,
+    model: config.llm?.model, fastModel: config.llm?.fastModel, reasoningEffort: config.llm?.reasoningEffort,
+    endpoint: config.llm?.baseUrl, apiMode: config.llm?.apiMode, tokenLimitParameter: config.llm?.tokenLimitParameter,
+    supportsStreamUsage: config.llm?.supportsStreamUsage, maxOutputTokens: config.llm?.maxOutputTokens, maxJsonOutputTokens: config.llm?.maxJsonOutputTokens,
+    retrievalProfiles: config.retrievalProfiles });
+  const checkpointContext = (request: ResearchRequest, ownerId: string) => {
+    const conversation = store.conversation(request.sessionId, ownerId);
+    const target = request.recheckEpisodeId === undefined ? null : store.episode(request.recheckEpisodeId, ownerId);
+    return digest({ episodes: store.count(Number.MAX_SAFE_INTEGER, ownerId), mode: conversation?.mode, viewpointAt: conversation?.viewpointAt,
+      history: store.currentConversationHistory(request.sessionId, 8, ownerId).map(episode => [episode.id, episode.sequence, digest([episode.question, episode.answer]), digest(store.canonicalClaimsFor(episode.id, ownerId))]),
+      target: target ? [target.id, digest(target.answer), digest(store.canonicalClaimsFor(target.id, ownerId))] : null });
+  };
+  const usableCheckpoint = (turn: DurableTurn, ownerId: string) => {
+    if (!["failed", "interrupted", "running"].includes(turn.status)) return null;
+    const saved = checkpoints.get(turn.id, ownerId);
+    if (!saved || saved.sessionId !== turn.sessionId || saved.policyHash !== policyHash || saved.contextHash !== checkpointContext(saved.request, ownerId)) return null;
+    if (turn.status !== "running") { try { budget(saved.usage); } catch { return null; } }
+    return saved;
+  };
   let deps: Deps | null = options.deps ?? null;
   let worker: Enricher | undefined;
   if (options.deps === undefined && config.llm && config.exaApiKey) {
@@ -114,12 +147,25 @@ export function createApplication(options: { config?: Config; store?: MemoryStor
       mode: viewpoint !== null ? "era" : "live", model: config.llm?.model ?? null, missing,
       episodes: store.count(Number.MAX_SAFE_INTEGER, ownerId), policyVersion: POLICY_VERSION,
       simulation: { mode: "era", research: "live-web", review: "event-time-and-sources" },
-      features: { clarifications: true, durableTurns: true, conversationTime: true, fastMode: Boolean(deps?.fastLlm) },
+      features: { clarifications: true, durableTurns: true, conversationTime: true, researchResume: true, fastMode: Boolean(deps?.fastLlm) },
       ...(conversation ? { conversation } : {}) };
   };
-  const turnResult = (turn: DurableTurn, ownerId: string) => ({ turn,
-    ...(turn.episodeId !== null ? { episode: store.episode(turn.episodeId, ownerId), sources: store.sourcesFor(turn.episodeId, ownerId) } : {}),
-  });
+  const turnResult = (turn: DurableTurn, ownerId: string) => {
+    const saved = usableCheckpoint(turn, ownerId);
+    const review = saved?.progress.review;
+    const publishFindings = review && !review.reason && (review.status === "approved" && ["supported", "supported_partial"].includes(review.quality ?? "")
+      || review.status === "needs_revision" && Boolean(review.approvedFindings?.length));
+    return { turn,
+    ...(saved ? { checkpoint: { available: turn.status !== "running", stage: saved.progress.stage, expiresAt: saved.expiresAt,
+      request: { ...saved.request, asOf: saved.request.asOf === null ? null : new Date(saved.request.asOf).toISOString(), clarification: undefined },
+      ...(publishFindings && review.approvedFindings ? { approvedFindings: review.approvedFindings } : {}),
+      ...(publishFindings && review.reviewedClaims ? { reviewedClaims: review.reviewedClaims } : {}) } } : {}),
+    ...(turn.status === "waiting_input" ? { clarification: turn.clarificationId ? questions.pendingById(turn.clarificationId, ownerId) : null } : {}),
+    ...(turn.episodeId !== null ? { episode: store.episode(turn.episodeId, ownerId), sources: store.sourcesFor(turn.episodeId, ownerId),
+      canonicalClaims: store.canonicalClaimsFor(turn.episodeId, ownerId), reviewedClaims: store.reviewedClaimsFor(turn.episodeId, ownerId),
+      claimCoverage: store.claimCoverageFor(turn.episodeId, ownerId), coverageTarget: store.episode(turn.episodeId, ownerId)?.execution?.coverageTarget } : {}),
+    };
+  };
   const replay = (res: ServerResponse, turn: DurableTurn, ownerId: string) => {
     const episode = turn.episodeId !== null ? store.episode(turn.episodeId, ownerId) : null;
     if (!episode) return sendJson(res, 200, turnResult(turn, ownerId));
@@ -128,16 +174,55 @@ export function createApplication(options: { config?: Config; store?: MemoryStor
     channel.send({ type: "turn", turnId: turn.id, provisional: false });
     channel.send({ type: "sources", sources }); channel.send({ type: "text", delta: episode.answer });
     channel.send({ type: "done", turnId: turn.id, episodeId: episode.id, quality: episode.quality ?? "explicitly_unverified", cited: sources.map(source => source.n),
-      timings: { recallMs: 0, firstTokenMs: 0, totalMs: 0, searches: 0, modelCalls: 0 }, recovered: true }); channel.end();
+      timings: { recallMs: 0, firstTokenMs: 0, totalMs: 0, searches: 0, modelCalls: 0 },
+      reviewedClaims: store.reviewedClaimsFor(episode.id, ownerId), claimCoverage: store.claimCoverageFor(episode.id, ownerId),
+      coverageTarget: episode.execution?.coverageTarget,
+      ...(episode.execution?.reviewFailure ? { reviewFailure: episode.execution.reviewFailure } : {}), recovered: true }); channel.end();
+  };
+  const resumeBody = (body: Record<string, unknown>, original: ResearchRequest) => {
+    const savedBody = { sessionId: original.sessionId, message: original.message, tz: original.tz, mode: original.mode,
+      asOf: original.asOf === null ? null : new Date(original.asOf).toISOString(), responseMode: original.responseMode,
+      retryUnfinished: original.retryUnfinished ?? false,
+      ...(original.recheckEpisodeId !== undefined ? { recheckEpisodeId: original.recheckEpisodeId } : {}) };
+    for (const [name, value] of Object.entries(savedBody)) {
+      if (body[name] !== undefined && body[name] !== value) throw new RequestError("Resume the original request, or start fresh research for changed input.", 409, "checkpoint_request_changed");
+    }
+    if (body.clarification !== undefined || body.recheckEpisodeId !== undefined && original.recheckEpisodeId === undefined) throw new RequestError("Research checkpoint request changed.", 409, "checkpoint_request_changed");
+    return { ...body, ...savedBody };
   };
   async function handleChat(req: IncomingMessage, res: ServerResponse, ownerId: string): Promise<void> {
     if (draining) return sendJson(res, 503, { error: "Service is shutting down.", code: "draining" });
-    const body = await readJson(req);
+    let body = await readJson(req);
+    let resumedResearch: ResearchCheckpoint | undefined;
+    const resumeTurnId = body.resumeTurnId;
+    if (resumeTurnId !== undefined) {
+      if (typeof resumeTurnId !== "string" || !/^[a-zA-Z0-9-]{1,64}$/.test(resumeTurnId)) throw new RequestError("Invalid research checkpoint.", 400, "invalid_checkpoint");
+      const requestKey = req.headers["idempotency-key"] ?? body.idempotencyKey;
+      const priorResume = typeof requestKey === "string" ? checkpoints.resumption(requestKey, ownerId) : null;
+      if (priorResume) {
+        if (priorResume.fromTurnId !== resumeTurnId) throw new RequestError("This request key belongs to another resumed turn.", 409, "idempotency_conflict");
+        resumeBody(body, priorResume.request);
+        const existing = store.getTurn(priorResume.turnId, ownerId);
+        if (!existing) throw new RequestError("Resumed turn not found.", 404, "checkpoint_not_found");
+        res.setHeader("x-turn-id", existing.id);
+        if (existing.status === "completed") return replay(res, existing, ownerId);
+        return sendJson(res, existing.status === "running" ? 202 : 409, { ...turnResult(existing, ownerId),
+          code: existing.status === "running" ? "turn_in_progress" : "turn_terminal" });
+      }
+      const priorTurn = store.getTurn(resumeTurnId, ownerId);
+      if (!priorTurn || body.sessionId !== undefined && body.sessionId !== priorTurn.sessionId) throw new RequestError("Research checkpoint not found.", 404, "checkpoint_not_found");
+      if (!["failed", "interrupted"].includes(priorTurn.status)) throw new RequestError("This turn cannot resume research.", 409, "checkpoint_not_resumable");
+      resumedResearch = usableCheckpoint(priorTurn, ownerId) ?? undefined;
+      if (!resumedResearch) throw new RequestError("This research checkpoint expired or its context changed. Ask again for fresh research.", 409, "checkpoint_invalidated");
+      body = resumeBody(body, resumedResearch.request);
+    }
     let message = typeof body.message === "string" ? body.message.trim() : "";
     if ((!body.clarification && (!message || message.length > 8000)) || !validSession(body.sessionId)) throw new RequestError("Expected a session ID and a message of 1 to 8000 characters.", 400);
     const sessionId = body.sessionId;
     if (body.responseMode !== undefined && body.responseMode !== "standard" && body.responseMode !== "fast") throw new RequestError("responseMode must be standard or fast.", 400);
     const recheckEpisodeId = body.recheckEpisodeId;
+    if (body.retryUnfinished !== undefined && typeof body.retryUnfinished !== "boolean") throw new RequestError("retryUnfinished must be a boolean.", 400);
+    if (body.retryUnfinished === true && recheckEpisodeId === undefined) throw new RequestError("Retrying unfinished claims requires a saved answer.", 400, "invalid_retry_target");
     if (recheckEpisodeId !== undefined) {
       if (!Number.isSafeInteger(recheckEpisodeId) || Number(recheckEpisodeId) < 1 || body.clarification !== undefined) throw new RequestError("Invalid saved answer reference.", 400);
       const target = store.episode(Number(recheckEpisodeId), ownerId);
@@ -154,15 +239,16 @@ export function createApplication(options: { config?: Config; store?: MemoryStor
     const viewpoint = body.mode === "live" || body.asOf === null ? null : asOf?.getTime() ?? previous?.viewpointAt ?? defaultViewpoint;
     const selected = viewpoint === null ? undefined : new Date(viewpoint);
     let resumed: ReturnType<QuestionStore["begin"]> | undefined;
-    let clarification: ClarificationAnswer | undefined;
+    let clarification: ClarificationAnswer | undefined = resumedResearch?.request.clarification;
     let release: (() => void) | undefined;
     let turn: DurableTurn | undefined;
     let channel: SseChannel | undefined;
     const deadlineAt = Date.now() + config.limits.turnTimeoutMs;
     const abort = new AbortController(); controllers.add(abort);
     const signal = AbortSignal.any([abort.signal, AbortSignal.timeout(config.limits.turnTimeoutMs)]);
-    const onClose = () => { if (!res.writableEnded) abort.abort(); };
-    res.on("close", onClose); req.on("aborted", () => abort.abort());
+    const abortOutcome = () => abort.signal.aborted ? abort.signal.reason instanceof TurnAbort && abort.signal.reason.kind === "explicit" ? "cancelled" : "interrupted" : "deadline";
+    const onClose = () => { if (!res.writableEnded) abort.abort(new TurnAbort("disconnect")); };
+    res.on("close", onClose); req.on("aborted", () => abort.abort(new TurnAbort("disconnect")));
     try {
       if (body.clarification !== undefined) {
         const raw = body.clarification as Record<string, unknown> | null;
@@ -185,18 +271,31 @@ export function createApplication(options: { config?: Config; store?: MemoryStor
       const tz = resumed?.card.time.tz ?? validTimeZone(typeof body.tz === "string" ? body.tz : undefined);
       const key = req.headers["idempotency-key"] ?? body.idempotencyKey ?? randomUUID();
       if (typeof key !== "string" || !/^[a-zA-Z0-9_.:-]{1,128}$/.test(key)) throw new RequestError("Invalid idempotency key.", 400);
-      const requestHash = createHash("sha256").update(JSON.stringify({ sessionId, message, tz, mode: effectiveMode, asOf: effectiveViewpoint, clarification: clarification ?? null,
+      const requestIdentity = { sessionId, message, tz, mode: effectiveMode, asOf: effectiveViewpoint, clarification: clarification ?? null,
         ...(responseMode === "fast" ? { responseMode } : {}),
-        ...(recheckEpisodeId !== undefined ? { recheckEpisodeId } : {}) })).digest("hex");
+        ...(body.retryUnfinished === true ? { retryUnfinished: true } : {}),
+        ...(recheckEpisodeId !== undefined ? { recheckEpisodeId } : {}) };
+      const researchRequestHash = digest(requestIdentity);
+      if (resumedResearch && resumedResearch.requestHash !== researchRequestHash) throw new RequestError("Research checkpoint request changed.", 409, "checkpoint_request_changed");
+      const requestHash = resumeTurnId === undefined ? researchRequestHash : digest({ ...requestIdentity, resumeTurnId });
       const begun = store.beginTurn({ ownerId, sessionId, idempotencyKey: key, requestHash, viewpointAt: effectiveViewpoint, mode: effectiveMode });
       turn = begun.turn;
       if (begun.created) requestControllers.set(turn.id, abort);
       res.setHeader("x-turn-id", turn.id);
       if (!begun.created) {
         if (turn.status === "completed") return replay(res, turn, ownerId);
+        if (turn.status === "waiting_input" && turn.clarificationId) {
+          const card = questions.pendingById(turn.clarificationId, ownerId);
+          if (card) {
+            const replayChannel = new SseChannel(res, () => {});
+            replayChannel.send({ type: "turn", turnId: turn.id, provisional: false });
+            replayChannel.send({ type: "clarification", card }); replayChannel.end(); return;
+          }
+        }
         res.setHeader("retry-after", "1");
         return sendJson(res, turn.status === "running" ? 202 : 409, { ...turnResult(turn, ownerId), code: turn.status === "running" ? "turn_in_progress" : "turn_terminal", error: turn.status === "running" ? "This answer is already running." : "This attempt ended. Submit a new key to try again." });
       }
+      if (resumedResearch) checkpoints.recordResumption({ ownerId, idempotencyKey: key, turnId: turn.id, fromTurnId: resumedResearch.turnId, request: resumedResearch.request });
       const trace = newTrace(turn.id, (responseMode === "fast" ? config.llm?.fastModel : config.llm?.model) ?? null, effectiveMode);
       const persistTrace = (updated: TurnTrace) => {
         try { const priorTrace = store.traceFor(turn!.id, ownerId); store.saveTrace(turn!.id, ownerId,
@@ -207,38 +306,81 @@ export function createApplication(options: { config?: Config; store?: MemoryStor
       await withTrace(trace, async () => {
         recordStage("response_mode", 0, { mode: responseMode });
         let outcome = "failed";
+        let activeBudget: ModelBudget | undefined;
         try {
           const admissionStarted = performance.now();
           release = await turns.acquire({ ownerId, signal, deadlineAt: Date.now() + Math.min(15_000, config.limits.turnTimeoutMs - 500) });
           recordStage("turn_admission", performance.now() - admissionStarted, { active: turns.stats.active, queued: turns.stats.queued });
           if (!deps) throw new RequestError(`Missing configuration: ${missing.join(", ")}.`, 503, "not_configured");
-          channel = new SseChannel(res, () => abort.abort());
+          channel = new SseChannel(res, () => abort.abort(new TurnAbort("disconnect")));
           channel.send({ type: "turn", turnId: turn!.id, provisional: true });
           const questionPort = { create: (input: Parameters<QuestionStore["create"]>[0]) => questions.create({ ...input, ownerId }) };
           const policy = turnPolicy(message, effectiveMode === "era");
-          const requestDeps: Deps = { ...deps, store, clock: { now: () => new Date(effectiveViewpoint ?? Date.now()), simulated: effectiveMode === "era" },
+          const checkpointRequest: ResearchRequest = { sessionId, message, tz, mode: effectiveMode, asOf: effectiveViewpoint, responseMode,
+            ...(clarification ? { clarification } : {}), ...(body.retryUnfinished === true ? { retryUnfinished: true } : {}),
+            ...(recheckEpisodeId !== undefined ? { recheckEpisodeId: Number(recheckEpisodeId) } : {}) };
+          const checkpointCreatedAt = resumedResearch?.createdAt ?? Date.now();
+          const checkpointEffectiveAt = resumedResearch?.effectiveAt ?? new Date(effectiveViewpoint ?? Date.now()).toISOString();
+          const checkpointContextHash = checkpointContext(checkpointRequest, ownerId);
+          const requestBudget = budget(resumedResearch?.usage);
+          activeBudget = requestBudget;
+          if (resumedResearch) {
+            checkpoints.save({ ...resumedResearch, turnId: turn!.id, contextHash: checkpointContextHash });
+            // The continuation owns this evidence now. A failed continuation resumes from its own
+            // charged usage, so retrying the older turn cannot reset the per-request allowance.
+            checkpoints.remove(resumedResearch.turnId, ownerId);
+          }
+          const requestDeps: Deps = { ...deps, store, clock: { now: () => new Date(checkpointEffectiveAt), simulated: effectiveMode === "era" },
             ...(responseMode === "fast" ? { llm: deps.fastLlm!, repairLlm: deps.llm } : {}),
+            checkpoints: { save(progress) {
+              if (signal.aborted || store.getTurn(turn!.id, ownerId)?.status !== "running") throw new Error("Research checkpoint turn is no longer active.");
+              const usage = requestBudget.snapshot;
+              checkpoints.save({ version: 1, ownerId, turnId: turn!.id, sessionId, requestHash: researchRequestHash,
+                contextHash: checkpointContextHash, policyHash, effectiveAt: checkpointEffectiveAt, createdAt: checkpointCreatedAt,
+                expiresAt: resumedResearch?.expiresAt ?? checkpointCreatedAt + RESEARCH_CHECKPOINT_TTL_MS, request: checkpointRequest, progress,
+                usage: { calls: (resumedResearch?.usage.calls ?? 0) + usage.calls, tokens: (resumedResearch?.usage.tokens ?? 0) + usage.tokens,
+                  spendUsd: usage.spendUsd === null ? null : (resumedResearch?.usage.spendUsd ?? 0) + usage.spendUsd } });
+            } },
             questions: questionPort, search: withProfile(deps.search, retrievalProfile(message, { simulated: effectiveMode === "era", verify: policy.requireVerificationEvidence }), config.retrievalProfiles) };
-          await runWithModelContext({ ownerId, turnId: turn!.id, budget: budget(), deadlineAt, deadlineReserveMs: Math.min(12_000, Math.floor(config.limits.turnTimeoutMs / 3)) },
+          await runWithModelContext({ ownerId, turnId: turn!.id, budget: requestBudget, deadlineAt, deadlineReserveMs: Math.min(12_000, Math.floor(config.limits.turnTimeoutMs / 3)),
+            beforeProvider() {
+              const saved = checkpoints.get(turn!.id, ownerId);
+              if (!saved) return;
+              const usage = requestBudget.snapshot;
+              checkpoints.save({ ...saved, progress: { ...saved.progress, modelCalls: Math.max(saved.progress.modelCalls, (resumedResearch?.usage.calls ?? 0) + usage.calls) },
+                usage: { calls: (resumedResearch?.usage.calls ?? 0) + usage.calls, tokens: (resumedResearch?.usage.tokens ?? 0) + usage.tokens,
+                  spendUsd: usage.spendUsd === null ? null : (resumedResearch?.usage.spendUsd ?? 0) + usage.spendUsd } });
+            } },
             () => runTurn(requestDeps, { ownerId, turnId: turn!.id, sessionId, message, tz, responseMode, asOf: effectiveViewpoint === null ? undefined : new Date(effectiveViewpoint), clarification,
-              ...(recheckEpisodeId !== undefined ? { recheckEpisodeId: Number(recheckEpisodeId) } : {}), deadlineAt, signal }, event => {
+              ...(recheckEpisodeId !== undefined ? { recheckEpisodeId: Number(recheckEpisodeId) } : {}),
+              ...(body.retryUnfinished === true ? { retryUnfinished: true } : {}),
+              ...(resumedResearch ? { resumeCheckpoint: resumedResearch.progress } : {}), deadlineAt, signal }, event => {
               if (event.type === "text") serverEmission();
-              if (event.type === "done") { outcome = "completed"; trace.quality = event.quality; count(`quality_${event.quality}`); if (resumed) questions.finish(resumed.card.id, event.episodeId); }
-              if (event.type === "clarification") outcome = "clarification_required";
+              if (event.type === "done") { outcome = "completed"; trace.quality = event.quality; count(`quality_${event.quality}`); checkpoints.remove(turn!.id, ownerId); if (resumedResearch) checkpoints.remove(resumedResearch.turnId, ownerId); if (resumed) questions.finish(resumed.card.id, event.episodeId); }
+              if (event.type === "clarification") { outcome = "waiting_input"; store.waitForInput(turn!.id, event.card.id, ownerId); }
               if (event.type === "error") outcome = event.code ?? "generation_failed";
               channel!.send(event);
             }));
           if (store.getTurn(turn!.id, ownerId)?.status === "completed") outcome = "completed";
+          else if (store.getTurn(turn!.id, ownerId)?.status === "waiting_input") outcome = "waiting_input";
           else {
-            outcome = signal.aborted ? abort.signal.aborted ? "cancelled" : "deadline" : outcome;
+            outcome = signal.aborted ? abortOutcome() : outcome;
             store.failTurn(turn!.id, outcome, ownerId);
           }
         } catch (error) {
-          outcome = error instanceof AdmissionError ? `admission_${error.code}` : signal.aborted ? "cancelled" : "infrastructure_error";
+          outcome = signal.aborted ? abortOutcome() : error instanceof AdmissionError ? `admission_${error.code}` : "infrastructure_error";
           store.failTurn(turn!.id, outcome, ownerId);
           if (!res.headersSent) { res.setHeader("retry-after", "2"); sendJson(res, 503, { error: error instanceof RequestError ? error.message : "Service is busy. Try again shortly.", code: outcome, turnId: turn!.id }); }
           else channel?.send({ type: "error", message: "The answer could not be completed. Check its saved status before retrying." });
         } finally {
+          const saved = checkpoints.get(turn!.id, ownerId);
+          if (saved && activeBudget && outcome !== "completed") {
+            const usage = activeBudget.snapshot;
+            try { checkpoints.save({ ...saved, progress: { ...saved.progress, modelCalls: Math.max(saved.progress.modelCalls, (resumedResearch?.usage.calls ?? 0) + usage.calls) }, usage: { calls: (resumedResearch?.usage.calls ?? 0) + usage.calls,
+              tokens: (resumedResearch?.usage.tokens ?? 0) + usage.tokens,
+              spendUsd: usage.spendUsd === null ? null : (resumedResearch?.usage.spendUsd ?? 0) + usage.spendUsd } }); }
+            catch { count("checkpoint_write_failed"); }
+          }
           count(outcome);
           const terminal = finishTrace(outcome)!;
           persistTrace(terminal);
@@ -273,12 +415,14 @@ export function createApplication(options: { config?: Config; store?: MemoryStor
     if (req.method === "GET" && STATIC[path]) { const [file, type] = STATIC[path]; res.writeHead(200, { "content-type": type, "cache-control": path === "/" ? "no-store" : "no-cache" }).end(await readFile(root + file)); return; }
     const sessionId = url.searchParams.get("sessionId");
     if (req.method === "GET" && path === "/api/state") return sendJson(res, 200, state(ownerId, validSession(sessionId) ? sessionId : undefined));
-    if (req.method === "GET" && path === "/api/metrics" && config.access.mode === "local") return sendJson(res, 200, { counters, turns: turns.stats, models: models.stats, quota: quota.stats, jobs: store.memoryJobCounts(), sqlite: store.metrics, eventLoop: { p95Ms: eventLoop.percentile(95) / 1e6, maxMs: eventLoop.max / 1e6 } });
+    if (req.method === "GET" && path === "/api/metrics" && config.access.mode === "local") return sendJson(res, 200, { counters, turns: turns.stats, models: models.stats, quota: quota.stats, jobs: store.memoryJobCounts(), sqlite: store.metrics, eventLoop: { p95Ms: eventLoop.percentile(95) / 1e6, maxMs: eventLoop.max / 1e6 }, latency: summarizeTraces(store.recentTraces()) });
     const pendingMatch = /^\/api\/sessions\/([a-zA-Z0-9_-]{1,64})\/clarification$/.exec(path);
     if (req.method === "GET" && pendingMatch) return sendJson(res, 200, { card: questions.pending(pendingMatch[1]!, ownerId) });
     const sessionMatch = /^\/api\/sessions\/([a-zA-Z0-9_-]{1,64})$/.exec(path);
     if (req.method === "GET" && sessionMatch) {
-      const episodes = store.sessionHistory(sessionMatch[1]!, 100, Number.MAX_SAFE_INTEGER, ownerId).map(episode => ({ episode, sources: store.sourcesFor(episode.id, ownerId) }));
+      const episodes = store.sessionHistory(sessionMatch[1]!, 100, Number.MAX_SAFE_INTEGER, ownerId).map(episode => ({ episode, sources: store.sourcesFor(episode.id, ownerId),
+        canonicalClaims: store.canonicalClaimsFor(episode.id, ownerId), reviewedClaims: store.reviewedClaimsFor(episode.id, ownerId),
+        claimCoverage: store.claimCoverageFor(episode.id, ownerId), coverageTarget: episode.execution?.coverageTarget }));
       return sendJson(res, 200, { episodes, conversation: store.conversation(sessionMatch[1]!, ownerId) });
     }
     const turnKeyMatch = /^\/api\/turns\/by-key\/([^/]{1,384})$/.exec(path);
@@ -305,7 +449,8 @@ export function createApplication(options: { config?: Config; store?: MemoryStor
     }
     if (req.method === "POST" && turnMatch && !turnMatch[2]) {
       const turn = store.getTurn(turnMatch[1]!, ownerId); if (!turn) return sendJson(res, 404, { error: "Turn not found" });
-      requestControllers.get(turn.id)?.abort(); return sendJson(res, 200, { ok: true });
+      checkpoints.remove(turn.id, ownerId);
+      requestControllers.get(turn.id)?.abort(new TurnAbort("explicit")); return sendJson(res, 200, { ok: true });
     }
     if (req.method === "GET" && path === "/api/memory") {
       const cursor = url.searchParams.get("cursor"), limit = url.searchParams.get("limit");
@@ -316,7 +461,9 @@ export function createApplication(options: { config?: Config; store?: MemoryStor
     const episodeMatch = /^\/api\/episodes\/(\d+)$/.exec(path);
     if (req.method === "GET" && episodeMatch) {
       const id = Number(episodeMatch[1]), episode = store.episode(id, ownerId); if (!episode) return sendJson(res, 404, { error: "Episode not found" });
-      return sendJson(res, 200, { episode, claims: store.claimsFor(id, ownerId), sources: store.sourcesFor(id, ownerId), verifiedStatements: store.verifiedStatementsFor(id, ownerId) });
+      return sendJson(res, 200, { episode, claims: store.claimsFor(id, ownerId), sources: store.sourcesFor(id, ownerId), verifiedStatements: store.verifiedStatementsFor(id, ownerId),
+        canonicalClaims: store.canonicalClaimsFor(id, ownerId), reviewedClaims: store.reviewedClaimsFor(id, ownerId),
+        claimCoverage: store.claimCoverageFor(id, ownerId), coverageTarget: episode.execution?.coverageTarget });
     }
     if (req.method === "POST" && path === "/api/clock") {
       const body = await readJson(req); if (!validSession(body.sessionId)) throw new RequestError("Clock changes require a conversation sessionId.", 400);
@@ -346,13 +493,13 @@ export function createApplication(options: { config?: Config; store?: MemoryStor
     const closed = new Promise<void>(resolveClosed => server.close(() => resolveClosed()));
     let timer: ReturnType<typeof setTimeout> | undefined;
     await Promise.race([Promise.allSettled([...activeRequests]), new Promise<void>(done => { timer = setTimeout(done, config.limits.shutdownMs); })]); clearTimeout(timer);
-    for (const controller of controllers) controller.abort();
+    for (const controller of controllers) controller.abort(new TurnAbort("shutdown"));
     models.close(); server.closeAllConnections();
     await Promise.race([Promise.allSettled([...activeRequests]), new Promise<void>(done => { timer = setTimeout(done, 1000); })]); clearTimeout(timer);
     if (worker) await worker.stop();
-    await closed; eventLoop.disable(); store.checkpoint(); questions.close(); store.close();
+    await closed; eventLoop.disable(); checkpoints.close(); store.checkpoint(); questions.close(); store.close();
   })();
-  return { server, store, questions, shutdown, state, counters, turns, models, missing };
+  return { server, store, questions, checkpoints, shutdown, state, counters, turns, models, missing };
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

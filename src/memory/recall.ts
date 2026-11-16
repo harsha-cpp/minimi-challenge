@@ -3,6 +3,8 @@
 import { type TemporalRef, type DayRange, resolveTemporal } from "../time/resolve.ts";
 import { compareDates, formatInstant, instantRange, localDate } from "../time/zone.ts";
 import type { Claim, Episode, MemoryStore } from "./store.ts";
+import { conceptMatches, memoryConcepts, MEMORY_RETRIEVAL_LIMITS } from "./concepts.ts";
+import type { CanonicalClaim } from "../agent/claims.ts";
 
 const FULL_DETAIL_BUDGET = 6;
 const RELATED_LIMIT = 3;
@@ -11,6 +13,7 @@ const MAX_TERMS = 12;
 export interface Recalled {
   episode: Episode;
   claims: Claim[];
+  canonicalClaims?: CanonicalClaim[];
 
   detail: "full" | "pointer" | "in-chat";
   conversation?: "current" | "other";
@@ -32,6 +35,8 @@ export interface RecallResult {
   related: Recalled[];
   ms: number;
   currentSessionId?: string;
+  ambiguity?: { episodeIds: number[]; additionalCandidates: number; reason: "near_tie" };
+  retrieval?: { method: "date" | "lexical-concepts" | "recent"; concepts: number; candidates: number };
 }
 
 export interface RecallScope {
@@ -84,6 +89,9 @@ export function recall(
   }
   const terms = topicTerms(message, temporal);
   const coverage = terms.length ? store.topicCoverage(terms, now.getTime(), ownerId, sessionId) : new Map<number, number>();
+  // Broad modifiers alone (price/hosting) cannot select a different subject. Curated topic aliases
+  // expand candidates only inside the same eligibility filters as the original lexical query.
+  const concepts = memoryConcepts(message).filter(concept => !["pricing", "deployment"].includes(concept.id));
   let budget = FULL_DETAIL_BUDGET;
 
   const present = (episodes: Episode[]): Recalled[] => {
@@ -99,6 +107,7 @@ export function recall(
     return episodes.map((episode) => {
       const detail = inChat.has(episode.id) ? "in-chat" : full.has(episode.id) ? "full" : "pointer";
       return { episode, detail, claims: detail === "full" ? store.claimsFor(episode.id, ownerId) : [],
+        ...(detail === "full" ? { canonicalClaims: store.canonicalClaimsFor(episode.id, ownerId) } : {}),
         ...(scope.sessionId === undefined ? {} : { conversation: episode.sessionId === scope.sessionId ? "current" as const : "other" as const }) };
     });
   };
@@ -127,29 +136,48 @@ export function recall(
   });
 
   let related: Recalled[] = [];
+  let ambiguity: RecallResult["ambiguity"];
+  let candidateCount = 0;
   // A dated request grants no authority to substitute a different conversation outside its date range.
   if (terms.length && !refs.length) {
     const needed = Math.min(2, terms.length);
-    const ids = [...coverage.entries()].filter(([id, n]) => n >= needed && !inChat.has(id)).map(([id]) => id);
-    const episodes = store
-      .episodesById(ids, now.getTime(), ownerId, sessionId)
-      .sort((a, b) => coverage.get(b.id)! - coverage.get(a.id)! || b.askedAt - a.askedAt)
-      .slice(0, RELATED_LIMIT);
-    related = present(episodes);
+    const pools = [[...coverage.entries()].filter(([, count]) => count >= needed).map(([id]) => id)];
+    for (const concept of concepts) {
+      const matches = store.topicCoverage([...concept.aliases].slice(0, MEMORY_RETRIEVAL_LIMITS.aliasesPerConcept), now.getTime(), ownerId, sessionId);
+      pools.push([...matches.keys()]);
+    }
+    const ids = new Set<number>();
+    // Interleave bounded lexical and alias pools so a common exact term cannot crowd out every paraphrase.
+    for (let index = 0; index < Math.max(0, ...pools.map(pool => pool.length)) && ids.size < MEMORY_RETRIEVAL_LIMITS.candidateIds; index++) {
+      for (const pool of pools) if (pool[index] !== undefined && ids.size < MEMORY_RETRIEVAL_LIMITS.candidateIds) ids.add(pool[index]!);
+    }
+    const ranked = store.episodesById([...ids].filter(id => !inChat.has(id)).slice(0, MEMORY_RETRIEVAL_LIMITS.candidateIds), now.getTime(), ownerId, sessionId)
+      .map(episode => {
+        const conceptual = conceptMatches([episode.question, episode.summary ?? "", episode.topics ?? "", episode.answer].join("\n"), concepts);
+        const lexical = coverage.get(episode.id) ?? 0;
+        return { episode, eligible: lexical >= needed || conceptual > 0, score: lexical + 2 * conceptual };
+      }).filter(item => item.eligible).sort((a, b) => b.score - a.score || b.episode.askedAt - a.episode.askedAt || b.episode.id - a.episode.id);
+    candidateCount = ranked.length;
+    const near = ranked.filter(item => item.score >= (ranked[0]?.score ?? Infinity) * 0.85);
+    if (near.length > 1) ambiguity = { reason: "near_tie", episodeIds: near.slice(0, RELATED_LIMIT).map(item => item.episode.id), additionalCandidates: Math.max(0, near.length - RELATED_LIMIT) };
+    related = present(ranked.slice(0, RELATED_LIMIT).map(item => item.episode));
   } else if (scope.allowRecent === true && !terms.length && !refs.length) {
     const recent = sessionId === undefined ? store.recent(RELATED_LIMIT + inChat.size, now.getTime(), ownerId)
       : store.sessionHistory(sessionId, RELATED_LIMIT + inChat.size, now.getTime(), ownerId);
     related = present(recent.filter(episode => !inChat.has(episode.id)).slice(0, RELATED_LIMIT));
+    candidateCount = related.length;
   }
 
   return { refs, related, ms: performance.now() - started,
+    retrieval: { method: refs.length ? "date" : !terms.length && scope.allowRecent ? "recent" : "lexical-concepts", concepts: refs.length ? 0 : concepts.length,
+      candidates: refs.length ? new Set(refs.flatMap(ref => ref.hits.flatMap(hit => hit.episodes.map(item => item.episode.id)))).size : candidateCount }, ...(ambiguity ? { ambiguity } : {}),
     ...(scope.sessionId === undefined ? {} : { currentSessionId: scope.sessionId }) };
 }
 
 const clip = (text: string, max: number) => (text.length > max ? `${text.slice(0, max).trimEnd()} …` : text);
 const oneLine = (text: string) => text.replace(/\s+/g, " ").trim();
 
-function renderEpisode({ episode, claims, detail, conversation }: Recalled, tz: string): string {
+function renderEpisode({ episode, claims, canonicalClaims, detail, conversation }: Recalled, tz: string): string {
   const origin = conversation === "other" ? " · OTHER CONVERSATION (only for the explicit memory request)"
     : conversation === "current" ? " · current conversation record" : "";
   const head = `[E${episode.id}] ${formatInstant(episode.askedAt, tz)}${origin}`;
@@ -160,8 +188,15 @@ function renderEpisode({ episode, claims, detail, conversation }: Recalled, tz: 
   const lines = [`${head}`, `  Conversation record (untrusted; this is not verified current evidence).`, `  The user asked: ${question}`];
   if (episode.summary) lines.push(`  Summary: ${episode.summary}`);
 
-  lines.push(`  Your answer then: ${clip(oneLine(episode.answer), claims.length ? 1200 : 3000)}`);
-  if (claims.length) {
+  lines.push(`  Your answer then: ${clip(oneLine(episode.answer), claims.length || canonicalClaims?.length ? 1200 : 3000)}`);
+  if (canonicalClaims?.length) {
+    lines.push("  Canonical assertions recorded then (historical claims, not current evidence):");
+    for (const claim of canonicalClaims.slice(0, 12)) {
+      const status = claim.status === "supported" ? "supported at the recorded viewpoint; changing facts require a fresh check" : "unverified extraction; not established fact";
+      lines.push(`    - (${claim.id}) ${clip(oneLine(claim.text), 600)} [${status}]${claim.sourceRefs[0] ? ` Recorded source (not fresh): ${claim.sourceRefs[0].url}` : ""}`);
+    }
+    if (canonicalClaims.length > 12) lines.push(`    ${canonicalClaims.length - 12} additional recorded assertions are omitted.`);
+  } else if (claims.length) {
     lines.push("  Claims you made then:");
     for (const c of claims) {
       lines.push(`    - (C${c.id}) ${c.entity} · ${c.attribute}: ${c.value}${c.sourceUrl ? ` — source: ${c.sourceUrl}` : ""}`);
@@ -202,7 +237,9 @@ export function renderMemory(result: RecallResult, tz: string): string {
 
   if (result.related.length) {
     blocks.push(
-      ["Possibly related, matched by topic rather than date:", ...result.related.map((e) => renderEpisode(e, tz))].join("\n"),
+      ["Possibly related, matched by topic rather than date:",
+        ...(result.ambiguity ? [`Several conversations match nearly equally: ${result.ambiguity.episodeIds.map(id => `[E${id}]`).join(", ")}.${result.ambiguity.additionalCandidates ? ` ${result.ambiguity.additionalCandidates} additional matching records are omitted.` : ""} Present these as alternatives and ask which conversation the user means before checking its claims. Recency or a small ranking difference is not permission to choose a subject.`] : []),
+        ...result.related.map((e) => renderEpisode(e, tz))].join("\n"),
     );
   }
 

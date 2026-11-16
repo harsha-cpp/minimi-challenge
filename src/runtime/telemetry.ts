@@ -1,11 +1,13 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { LlmUsage } from "../llm.ts";
+import { EXECUTION_POLICY_VERSION, executionIdentity } from "./versions.ts";
 
-export const POLICY_VERSION = "grounded-recovery-v1";
+export const POLICY_VERSION = EXECUTION_POLICY_VERSION;
 type Metadata = Record<string, string | number | boolean | null>;
 export interface Stage { name: string; ms: number; atMs: number; data?: Metadata }
 export interface TurnTrace {
   version: 1; turnId: string; policyVersion: string; model: string | null; mode: string;
+  implementation?: ReturnType<typeof executionIdentity>;
   receivedAt: string; outcome: string; quality?: string; stages: Stage[]; droppedStages: number;
   usage: LlmUsage[]; missingUsage: number; droppedUsage: number;
   serverFirstEmissionMs: number | null; clientFirstRenderMs: number | null; totalMs: number;
@@ -13,7 +15,7 @@ export interface TurnTrace {
 interface TraceContext { trace: TurnTrace; started: number; terminal: boolean; onLateUpdate?: (trace: TurnTrace) => void }
 const context = new AsyncLocalStorage<TraceContext>();
 export function newTrace(turnId: string, model: string | null, mode: string): TurnTrace {
-  return { version: 1, turnId, policyVersion: POLICY_VERSION, model: model?.slice(0, 128) ?? null, mode: mode.slice(0, 64), receivedAt: new Date().toISOString(),
+  return { version: 1, turnId, policyVersion: POLICY_VERSION, implementation: executionIdentity(), model: model?.slice(0, 128) ?? null, mode: mode.slice(0, 64), receivedAt: new Date().toISOString(),
     outcome: "running", stages: [], droppedStages: 0, usage: [], missingUsage: 0, droppedUsage: 0,
     serverFirstEmissionMs: null, clientFirstRenderMs: null, totalMs: 0 };
 }

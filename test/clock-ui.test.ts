@@ -11,7 +11,7 @@ import { citationTextNodes } from "../public/citations.js";
 const html = readFileSync(new URL("../public/index.html", import.meta.url), "utf8");
 const app = readFileSync(new URL("../public/app.js", import.meta.url), "utf8").replace('import { citationTextNodes } from "./citations.js";\n', "").replace('import { readTurn } from "./recovery.js";\n', "");
 
-async function mount(options: { fastMode?: boolean; date?: Date; post?: (body: { now: string | null }) => Promise<Response>; chatEvents?: Array<Record<string, unknown>>; chatReplies?: Array<Array<Record<string, unknown>> | { status: number; error: string; code: string }>; pendingCard?: Record<string, unknown>; memoryEpisodes?: Array<Record<string, unknown>>; savedSession?: string; turnReplies?: Array<Record<string, unknown>>; pendingTurn?: Record<string, unknown>; chatBeforeHeadersFailure?: boolean; beforeChatReply?: () => Promise<void> } = {}) {
+async function mount(options: { chatStream?: ReadableStream<Uint8Array>; fastMode?: boolean; date?: Date; post?: (body: { now: string | null }) => Promise<Response>; chatEvents?: Array<Record<string, unknown>>; chatReplies?: Array<Array<Record<string, unknown>> | { status: number; error: string; code: string }>; pendingCard?: Record<string, unknown>; memoryEpisodes?: Array<Record<string, unknown>>; savedSession?: string; turnReplies?: Array<Record<string, unknown>>; pendingTurn?: Record<string, unknown>; chatBeforeHeadersFailure?: boolean; beforeChatReply?: () => Promise<void> } = {}) {
   const dom = new JSDOM(html, { url: "http://localhost:3000/", runScripts: "outside-only", pretendToBeVisual: true });
   const { window } = dom;
   if (options.savedSession) window.sessionStorage.setItem("asof.preview.session.v2", options.savedSession);
@@ -36,11 +36,12 @@ async function mount(options: { fastMode?: boolean; date?: Date; post?: (body: {
       if (path.endsWith("/clarification")) return Response.json({ card: options.pendingCard ?? null });
       if (path.startsWith("/api/sessions/")) return Response.json({ episodes: (options.memoryEpisodes ?? []).filter(episode => episode.sessionId === path.split("/").at(-1)).map(episode => ({ episode, sources: episode.sources ?? [] })) });
       if (path.startsWith("/api/episodes/")) { const episode = options.memoryEpisodes?.find(episode => String(episode.id) === path.split("/").at(-1)); return Response.json({ episode, sources: episode?.sources ?? [] }); }
-      if (path === "/api/chat" && (options.chatEvents || options.chatReplies)) {
+      if (path === "/api/chat" && (options.chatEvents || options.chatReplies || options.chatStream)) {
         chatRequests.push(JSON.parse(String(init?.body)));
         chatKeys.push((init!.headers as Record<string, string>)["idempotency-key"]!);
         await options.beforeChatReply?.();
         if (options.chatBeforeHeadersFailure && chatRequests.length === 1) throw new TypeError("Lost response before headers");
+        if (options.chatStream && chatRequests.length === 1) return new Response(options.chatStream);
         const reply = options.chatReplies?.[chatRequests.length - 1] ?? options.chatEvents ?? [];
         return Array.isArray(reply) ? new Response(reply.map(event => `data: ${JSON.stringify(event)}\n\n`).join("")) : Response.json(reply, { status: reply.status });
       }
@@ -668,6 +669,83 @@ test("expired clarification can restart the original question without retrying t
 });
 
 const recoveredTurn = { turn: { id: "durable-1", status: "completed" }, episode: { id: 17, answer: "The committed answer [1].", quality: "supported" }, sources: [{ n: 1, title: "Official", url: "https://example.com/official" }] };
+
+test("durable reviewed findings appear before completion and are replaced by the final answer", async () => {
+  let controller!: ReadableStreamDefaultController<Uint8Array>;
+  const stream = new ReadableStream<Uint8Array>({ start(value) { controller = value; } });
+  const emit = (value: unknown) => controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(value)}\n\n`));
+  const ui = await mount({ chatStream: stream });
+  try {
+    (ui.window.document.getElementById("input") as HTMLTextAreaElement).value = "Verify the plans";
+    ui.button("#send").click(); await flushChat();
+    emit({ type: "claim_review", partial: true, coverage: [], claims: [{ text: "The basic plan is free.", status: "supported", sourceRefs: [{ n: 1, url: "https://example.com/plans" }] }] });
+    await flushChat();
+    const findings = ui.window.document.querySelector<HTMLElement>(".checked-findings")!;
+    assert.equal(findings.hidden, false); assert.match(findings.textContent!, /basic plan is free/);
+    assert.match(findings.textContent!, /remaining check is still running/);
+    assert.equal(ui.window.document.querySelector(".answer")!.textContent, "");
+    emit({ type: "text", delta: "The basic plan is free; paid pricing remains unresolved." });
+    emit({ type: "done", episodeId: 22, quality: "supported_partial", cited: [], claimCoverage: [{ claimId: "a", status: "supported" }, { claimId: "b", status: "unresolved" }], timings: { recallMs: 0, searches: 1, modelCalls: 2, totalMs: 20 } }); controller.close(); await flushChat();
+    assert.equal(findings.hidden, true);
+    assert.match(ui.window.document.querySelector(".answer-status")!.textContent!, /1 supported, 0 corrected, 1 unresolved/);
+  } finally { ui.dom.window.close(); }
+});
+
+test("resume saved research sends the trusted predecessor id with a new request key", async () => {
+  const ui = await mount({ chatReplies: [[{ type: "turn", turnId: "interrupted-1" }], clarificationDone],
+    turnReplies: [{ turn: { id: "interrupted-1", status: "interrupted" }, checkpoint: { available: true, stage: "researched", expiresAt: Date.now() + 60_000, request: { sessionId: "original-session" } } }] });
+  try {
+    (ui.window.document.getElementById("input") as HTMLTextAreaElement).value = "Check that claim";
+    ui.button("#send").click(); await flushChat();
+    [...ui.window.document.querySelectorAll<HTMLButtonElement>(".answer-actions button")].find(button => /Resume saved research/.test(button.textContent!))!.click(); await flushChat();
+    assert.deepEqual(ui.chatRequests[1], { resumeTurnId: "interrupted-1", sessionId: "original-session" });
+    assert.notEqual(ui.chatKeys[0], ui.chatKeys[1]);
+  } finally { ui.dom.window.close(); }
+});
+
+test("lost clarification completion restores waiting input without another generation", async () => {
+  const ui = await mount({ fastMode: true, chatEvents: [{ type: "turn", turnId: "waiting-1" }],
+    turnReplies: [{ turn: { id: "waiting-1", status: "waiting_input" }, clarification: { ...clarificationCard, responseMode: "fast" } }] });
+  try {
+    (ui.window.document.getElementById("input") as HTMLTextAreaElement).value = clarificationCard.message;
+    ui.button("#send").click(); await flushChat();
+    assert.equal(ui.chatRequests.length, 1);
+    assert.equal(ui.window.document.querySelectorAll(".clarification-card").length, 1);
+    assert.match(ui.window.document.querySelector(".answer-status")!.textContent!, /Waiting for your direction/);
+    assert.equal(ui.window.sessionStorage.getItem("asof.pending.turn"), null);
+    assert.equal(ui.window.document.querySelectorAll(".failure").length, 0);
+  } finally { ui.dom.window.close(); }
+});
+
+test("cancelled recovery allows a new keyed retry rather than repeated status polling", async () => {
+  const ui = await mount({ chatReplies: [[{ type: "turn", turnId: "cancelled-1" }], clarificationDone],
+    turnReplies: [{ turn: { id: "cancelled-1", status: "cancelled" } }] });
+  try {
+    (ui.window.document.getElementById("input") as HTMLTextAreaElement).value = "Original question";
+    ui.button("#send").click(); await flushChat();
+    assert.match(ui.window.document.querySelector(".answer-status")!.textContent!, /Stopped/);
+    [...ui.window.document.querySelectorAll<HTMLButtonElement>(".answer-actions button")].find(button => /Retry question/.test(button.textContent!))!.click(); await flushChat();
+    assert.equal(ui.chatRequests.length, 2); assert.notEqual(ui.chatKeys[0], ui.chatKeys[1]);
+  } finally { ui.dom.window.close(); }
+});
+
+test("retrying unfinished evidence preserves the original reference, viewpoint and answer mode", async () => {
+  const ui = await mount({ fastMode: true, chatReplies: [[{ type: "text", delta: "One claim is supported [1]." },
+    { type: "done", episodeId: 21, quality: "supported_partial", cited: [1], timings: { recallMs: 0, searches: 1, modelCalls: 2, totalMs: 20 }, reviewFailure: { reason: "insufficient_evidence", retryable: true, retryScope: "unfinished_claims", retryEpisodeId: 9 } }], clarificationDone] });
+  try {
+    const selector = ui.window.document.getElementById("response-mode") as HTMLSelectElement;
+    selector.value = "fast";
+    (ui.window.document.getElementById("input") as HTMLTextAreaElement).value = "Verify your previous answer";
+    ui.button("#send").click(); await flushChat();
+    selector.value = "standard";
+    [...ui.window.document.querySelectorAll<HTMLButtonElement>(".answer-actions button")].find(button => /Retry unfinished check/.test(button.textContent!))!.click(); await flushChat();
+    assert.equal(ui.chatRequests.length, 2);
+    assert.equal(ui.chatRequests[1]!.recheckEpisodeId, 9);
+    assert.equal(ui.chatRequests[1]!.responseMode, "fast");
+    assert.equal(ui.chatRequests[1]!.mode, ui.chatRequests[0]!.mode);
+    assert.notEqual(ui.chatKeys[0], ui.chatKeys[1]);
+  } finally { ui.dom.window.close(); }
+});
 
 test("lost done recovers the durable answer without a second generation", async () => {
   const ui = await mount({ chatEvents: [{ type: "turn", turnId: "durable-1" }, { type: "text", delta: "Provisional answer" }], turnReplies: [recoveredTurn] });

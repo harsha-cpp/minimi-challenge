@@ -35,7 +35,7 @@ test("durable turn idempotency conflicts, conversation serialization and commit 
     const next = begin(store, "second");
     assert.equal(next.turn.sequence, first.turn.sequence + 1);
     store.failTurn(next.turn.id, "cancelled");
-    assert.equal(store.getTurn(next.turn.id)!.status, "failed");
+    assert.equal(store.getTurn(next.turn.id)!.status, "cancelled");
   } finally { store.close(); }
 });
 

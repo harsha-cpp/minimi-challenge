@@ -70,6 +70,8 @@ export interface SpendStoreOptions {
   campaignId?: string;
   /** Initial or reduced campaign caps. Increasing an established cap is forbidden. */
   caps?: Partial<Record<SpendProvider, number>>;
+  /** Operator-created child identity; not a provider credential or a replacement campaign. */
+  delegationIdentity?: string;
 }
 interface BudgetRow {
   provider: SpendProvider;
@@ -132,6 +134,7 @@ export class ProviderSpendStore {
             id INTEGER PRIMARY KEY CHECK(id=1), campaign_id TEXT NOT NULL,
             schema_version INTEGER NOT NULL, created_at INTEGER NOT NULL
           );
+          CREATE TABLE IF NOT EXISTS provider_spend_delegation (id INTEGER PRIMARY KEY CHECK(id=1), identity TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS provider_spend_budgets (
             provider TEXT PRIMARY KEY CHECK(provider IN ('azure','exa')),
             cap_microusd INTEGER NOT NULL CHECK(cap_microusd>=0),
@@ -163,6 +166,12 @@ export class ProviderSpendStore {
           throw new SpendBudgetError("campaign_conflict", "An existing provider ledger cannot acquire a replacement campaign identity.");
         }
         if (!campaign) this.db.prepare("INSERT INTO provider_spend_campaign VALUES (1,?,1,?)").run(this.campaignId, Date.now());
+        if (options.delegationIdentity !== undefined) {
+          if (!/^[a-f0-9-]{36}$/.test(options.delegationIdentity)) throw new SpendBudgetError("campaign_conflict", "Invalid delegated ledger identity.");
+          const identity = this.db.prepare("SELECT identity FROM provider_spend_delegation WHERE id=1").get();
+          if (campaign && identity?.identity !== options.delegationIdentity) throw new SpendBudgetError("campaign_conflict", "The delegated ledger identity does not match its parent allocation.");
+          if (!campaign) this.db.prepare("INSERT INTO provider_spend_delegation VALUES (1,?)").run(options.delegationIdentity);
+        }
         for (const provider of ["azure", "exa"] as const) {
           const existing = this.budget(provider);
           if (campaign && !existing) throw new SpendBudgetError("ledger_unavailable", "An established provider budget is missing; paid work must remain stopped.", provider);
@@ -191,12 +200,25 @@ export class ProviderSpendStore {
   }
 
   reserve(input: SpendReservationInput): SpendReservation {
+    return this.reserveGuarded(input);
+  }
+  /** The allocation state and parent hold are checked under the same SQLite write lock. */
+  reserveDelegation(allocationId: string, provider: SpendProvider, maxDollars: number): SpendReservation {
+    return this.reserveGuarded({ provider, maxDollars, requestId: `allocation:${allocationId}:${provider}`, stage: "delegated_allowance" }, () => {
+      const allocation = this.db.prepare("SELECT state,caps_json FROM provider_budget_allocations WHERE id=?").get(allocationId);
+      if (!allocation || allocation.state !== "preparing" || JSON.parse(String(allocation.caps_json))[provider] !== maxDollars) {
+        throw new SpendBudgetError("reservation_state", "A closing or issued allocation cannot acquire a new parent hold.", provider);
+      }
+    });
+  }
+  private reserveGuarded(input: SpendReservationInput, guard?: () => void): SpendReservation {
     providerName(input.provider);
     const amount = micros(input.maxDollars, "ceil", false), id = randomUUID();
     const requestId = input.requestId ?? id;
     if (!/^[a-zA-Z0-9_.:/-]{1,160}$/.test(requestId)) throw new SpendBudgetError("invalid_reservation", "Invalid provider request identity.", input.provider);
     const context = safeContext(input);
     this.transaction(() => {
+      guard?.();
       const budget = this.budget(input.provider)!;
       if (budget.locked) throw new SpendBudgetError("provider_locked", "Provider spending is locked after a billing-bound violation.", input.provider);
       if (this.db.prepare("SELECT id FROM provider_spend_reservations WHERE provider=? AND request_id=?").get(input.provider, requestId)) {
@@ -282,6 +304,23 @@ export class ProviderSpendStore {
     } catch { throw new SpendBudgetError("ledger_unavailable", "Provider budget status is unavailable; paid work must remain stopped."); }
   }
   get snapshot(): SpendSummary { return this.getSummary(); }
+
+  /** Operator-side recovery of durable holds; never expose reservation handles to public clients. */
+  findReservation(provider: SpendProvider, requestId: string): { id: string; maxDollars: number; state: string; started: boolean } | null {
+    const row = this.db.prepare("SELECT * FROM provider_spend_reservations WHERE provider=? AND request_id=?").get(provider, requestId) as ReservationRow | undefined;
+    return row ? { id: row.id, maxDollars: row.reserved_microusd / MICRO_USD, state: row.state, started: row.started_at !== null } : null;
+  }
+  resumeReservation(id: string): SpendReservation {
+    this.reservation(id);
+    return { id, started: () => this.started(id), markStarted: () => this.started(id),
+      settle: actual => this.settle(id, actual), cancelBeforeStart: () => this.cancelBeforeStart(id) };
+  }
+  /** Permanently stop new reservations before reconciling a delegated allowance. Existing bills still settle. */
+  seal(reason: string): SpendSummary {
+    if (!reason.trim()) throw new SpendBudgetError("invalid_reservation", "A sealing reason is required.");
+    this.transaction(() => this.db.prepare("UPDATE provider_spend_budgets SET locked=1,lock_reason=coalesce(lock_reason,?)").run(reason.slice(0, 128)));
+    return this.getSummary();
+  }
   close(): void { if (!this.closed) { this.db.close(); this.closed = true; } }
 
   private budget(provider: SpendProvider): BudgetRow | undefined {

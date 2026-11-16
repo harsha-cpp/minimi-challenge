@@ -229,7 +229,7 @@ test("selected full-text reads recover omitted table rows within a strict conten
   const table = "Year | Winner\n" + "An old table row\n".repeat(190) + "2026 | Decisive last row";
   const { http, requests } = httpMock([json({ results: [{ ...result, text: table, highlights: ["An introductory excerpt"] }] })]);
   const hits = await createExaSearch("key", { spendPolicy: null, fetch: http }).search({ query: "complete winners table", urls: [result.url], content: "full", profile: "complete-list" });
-  assert.equal(requests[0]!.body.text.maxCharacters, 12_000); assert.equal(requests[0]!.body.highlights, undefined);
+  assert.equal(requests[0]!.body.text.maxCharacters, 400_000); assert.equal(requests[0]!.body.highlights, undefined);
   assert.match(hits[0]!.text, /Decisive last row/); assert.ok(hits[0]!.text.length <= 12_000);
 });
 

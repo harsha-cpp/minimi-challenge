@@ -1,0 +1,82 @@
+{
+  "crm-since-shortlist": {
+    "kind": "standalone",
+    "memoryScope": "explicit_memory"
+  },
+  "crm-pronoun": {
+    "kind": "conversation_reference",
+    "memoryScope": "none"
+  },
+  "crm-paraphrase": {
+    "kind": "conversation_reference",
+    "memoryScope": "none"
+  },
+  "pg-since-tuesday": {
+    "kind": "standalone",
+    "memoryScope": "explicit_memory"
+  },
+  "dated-recall-and-check": {
+    "kind": "standalone",
+    "memoryScope": "explicit_memory"
+  },
+  "missing-dated-memory": {
+    "kind": "standalone",
+    "memoryScope": "explicit_memory"
+  },
+  "reference-paraphrase": {
+    "kind": "conversation_reference",
+    "memoryScope": "none"
+  },
+  "reference-short": {
+    "kind": "conversation_reference",
+    "memoryScope": "none"
+  },
+  "reference-without-history": {
+    "kind": "missing_reference",
+    "memoryScope": "none"
+  },
+  "reference-other-chat": {
+    "kind": "missing_reference",
+    "memoryScope": "none"
+  },
+  "new-subject": {
+    "kind": "standalone",
+    "memoryScope": "none"
+  },
+  "direct-url": {
+    "kind": "standalone",
+    "memoryScope": "none"
+  },
+  "quoted-transformation": {
+    "kind": "standalone",
+    "memoryScope": "none"
+  },
+  "publication-versus-launch": {
+    "kind": "conversation_reference",
+    "memoryScope": "none"
+  },
+  "asof-availability": {
+    "kind": "conversation_reference",
+    "memoryScope": "none"
+  },
+  "annual-monthly": {
+    "kind": "conversation_reference",
+    "memoryScope": "none"
+  },
+  "currency-region": {
+    "kind": "conversation_reference",
+    "memoryScope": "none"
+  },
+  "preview-versus-general": {
+    "kind": "conversation_reference",
+    "memoryScope": "none"
+  },
+  "partial-source-failure": {
+    "kind": "conversation_reference",
+    "memoryScope": "none"
+  },
+  "review-timeout": {
+    "kind": "conversation_reference",
+    "memoryScope": "none"
+  }
+}

@@ -15,6 +15,15 @@ export class EvidenceWindow {
   readonly stats = { toolChars: 0, admittedPassages: 0, rejectedTemporal: 0, omittedForBudget: 0,
     duplicatePassages: 0, duplicateCharsAvoided: 0, rawCandidates: 0 };
 
+  constructor(restored?: EvidenceWindow["stats"]) {
+    if (!restored) return;
+    if (Object.keys(this.stats).some(key => !Number.isSafeInteger(restored[key as keyof typeof restored]) || restored[key as keyof typeof restored] < 0)
+      || restored.toolChars > PROMPT_LIMITS.toolChars) throw new Error("Invalid restored evidence budget.");
+    Object.assign(this.stats,restored);
+    this.remaining = PROMPT_LIMITS.toolChars - restored.toolChars;
+    this.rounds = restored.toolChars ? 1 : 0;
+  }
+
   error(message: string): string {
     return this.charge(message.slice(0, Math.min(500, this.remaining)));
   }
@@ -64,7 +73,8 @@ export class EvidenceWindow {
         }
         const title = hit.title.replace(/\s+/g, " ").slice(0, 300);
         const date = hit.publishedDate ? ` · published ${hit.publishedDate}` : "";
-        const provenance = [hit.retrievedAt && `retrieved ${hit.retrievedAt}`,
+        const selection = hit.retrieval?.passageSelection;
+        const provenance = [selection && `bounded source acquisition (may omit the document tail); selection ${selection.selection}; received ${selection.receivedCharacters} characters; omitted ${selection.omittedCharacters} received characters; not proof of complete document coverage`, hit.retrievedAt && `retrieved ${hit.retrievedAt}`,
           hit.freshness ? `requested freshness ${hit.freshness.requested}; acquisition ${hit.freshness.acquisition}; provider content age ${hit.freshness.ageStatus}${hit.freshness.contentFetchedAt ? `; provider fetched ${hit.freshness.contentFetchedAt}` : "; provider fetch time unknown"}` : "provider content age unknown",
           hit.temporal ? `reviewed ${hit.temporal.provenanceKind} version ${hit.temporal.documentId}; available ${hit.temporal.availableAt}; provenance ${hit.temporal.provenanceUrl}`
             : hit.archive ? `archived ${hit.archive.capturedAt}; preserved version ${hit.archive.captureUrl}`

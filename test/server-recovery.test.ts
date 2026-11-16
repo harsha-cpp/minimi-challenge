@@ -66,7 +66,7 @@ function gatedModel() {
   return { llm, entered, aborted, finish, calls: () => calls };
 }
 
-test("real socket disconnect before commit cancels generation and late provider output cannot persist", { timeout: 6000 }, async () => {
+test("real socket disconnect interrupts generation and late provider output cannot persist", { timeout: 6000 }, async () => {
   const model = gatedModel(), app = await start(model.llm);
   try {
     const client = await rawChat(app.base, body, "disconnect-before");
@@ -75,8 +75,8 @@ test("real socket disconnect before commit cancels generation and late provider 
     assert.equal(app.store.getTurn(turnId)!.status, "running");
     client.drop(); await bounded(model.aborted.promise, "disconnect propagation"); await client.ended;
     const saved = await terminal(app, turnId);
-    assert.equal(saved.turn.status, "failed"); assert.equal(saved.turn.errorCode, "cancelled");
-    assert.equal(app.store.count(), 0); assert.equal(app.store.traceFor(turnId)!.outcome, "cancelled");
+    assert.equal(saved.turn.status, "interrupted"); assert.equal(saved.turn.errorCode, "interrupted");
+    assert.equal(app.store.count(), 0); assert.equal(app.store.traceFor(turnId)!.outcome, "interrupted");
     model.finish.resolve(); await delay(0);
     assert.equal(app.store.count(), 0); assert.equal(events(client.text()).some(event => event.type === "done"), false);
     const retry = await app.post("/api/chat", body, "disconnect-before");
@@ -134,7 +134,7 @@ test("shutdown is bounded with an uncooperative provider and late completion can
     assert.ok(performance.now() - began < 2000); await bounded(model.aborted.promise, "shutdown propagation"); await client.ended;
     const restored = new MemoryStore(path);
     try {
-      assert.equal(restored.getTurn(turnId)!.status, "failed"); assert.equal(restored.getTurn(turnId)!.errorCode, "cancelled"); assert.equal(restored.count(), 0);
+      assert.equal(restored.getTurn(turnId)!.status, "interrupted"); assert.equal(restored.getTurn(turnId)!.errorCode, "interrupted"); assert.equal(restored.count(), 0);
       model.finish.resolve(); await delay(0); assert.equal(restored.count(), 0);
       assert.equal(restored.integrityCheck().ok, true);
     } finally { restored.close(); }

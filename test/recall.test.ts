@@ -39,7 +39,8 @@ test("'on 3 November' finds that day's conversation and its claims", () => {
 
   const memory = renderMemory(result, TZ);
   assert.match(memory, /Tue 3 Nov 2026, 14:05/);
-  assert.match(memory, /Neon · Launch plan price: \$19\/month — source: https:\/\/neon\.com\/pricing/);
+  assert.match(memory, /Neon: Launch plan price = \$19\/month/);
+  assert.match(memory, /unverified extraction; not established fact/);
 });
 
 test("topic matches do not decide between dates that both have conversations", () => {

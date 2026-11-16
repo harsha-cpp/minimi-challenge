@@ -6,6 +6,8 @@ import { dirname } from "node:path";
 import { backup, DatabaseSync } from "node:sqlite";
 import type { SearchHit, TemporalProvenance } from "../search/types.ts";
 import { POLICY_VERSION } from "../runtime/telemetry.ts";
+import { REVIEWED_CLAIM_SCHEMA_VERSION, makeExtractedClaim, reviewCoverage, validateReviewedClaims, type CanonicalClaim, type ClaimCoverage, type ReviewedClaim } from "../agent/claims.ts";
+import { REVIEW_POLICY_VERSION } from "../runtime/versions.ts";
 
 export interface Source {
   n: number;
@@ -49,7 +51,8 @@ export interface DurableTurn {
   id: string;
   ownerId: string;
   sessionId: string;
-  status: "running" | "completed" | "failed" | "interrupted";
+  status: "running" | "waiting_input" | "completed" | "cancelled" | "failed" | "interrupted";
+  clarificationId?: string | null;
   episodeId: number | null;
   quality: string | null;
   errorCode: string | null;
@@ -157,6 +160,26 @@ CREATE TABLE IF NOT EXISTS claims (
 );
 CREATE INDEX IF NOT EXISTS claims_by_episode ON claims (episode_id);
 
+CREATE TABLE IF NOT EXISTS canonical_claims (
+  episode_id INTEGER NOT NULL REFERENCES episodes(id),
+  claim_id TEXT NOT NULL,
+  origin TEXT NOT NULL CHECK(origin IN ('review','extracted')),
+  record_json TEXT NOT NULL,
+  active INTEGER NOT NULL DEFAULT 1,
+  PRIMARY KEY(episode_id,claim_id)
+);
+CREATE TABLE IF NOT EXISTS claim_coverage (
+  episode_id INTEGER NOT NULL REFERENCES episodes(id),
+  reference_episode_id INTEGER NOT NULL REFERENCES episodes(id),
+  reference_answer_hash TEXT NOT NULL,
+  record_json TEXT NOT NULL,
+  PRIMARY KEY(episode_id)
+);
+CREATE INDEX IF NOT EXISTS claim_coverage_by_reference ON claim_coverage(reference_episode_id,episode_id);
+CREATE TRIGGER IF NOT EXISTS canonical_claims_no_mutation BEFORE UPDATE OF claim_id,origin,record_json ON canonical_claims BEGIN
+  SELECT RAISE(ABORT, 'Canonical claim observations are immutable.');
+END;
+
 CREATE TABLE IF NOT EXISTS verified_statements (
   id INTEGER PRIMARY KEY,
   episode_id INTEGER NOT NULL REFERENCES episodes(id),
@@ -251,7 +274,7 @@ const boundedLimit = (n: number, max = MAX_DATE_EPISODES) => Math.max(1, Math.mi
 const owner = (value?: string) => value ?? "local";
 const toTurn = (r: Row): DurableTurn => ({ id: r.id as string, ownerId: r.owner_id as string,
   sessionId: r.session_id as string, status: r.status as DurableTurn["status"], episodeId: r.episode_id as number | null,
-  quality: r.quality as string | null, errorCode: r.error_code as string | null,
+  quality: r.quality as string | null, errorCode: r.error_code as string | null, clarificationId: r.clarification_id as string | null,
   createdAt: r.created_at as number, updatedAt: r.updated_at as number, viewpointAt: r.viewpoint_at as number | null,
   mode: r.mode as string, sequence: r.sequence as number });
 const toSource = (r: Row): Source => ({ ...(r.evidence_json ? JSON.parse(r.evidence_json as string) : {}),
@@ -326,8 +349,12 @@ export class MemoryStore {
           turn_id TEXT NOT NULL, owner_id TEXT NOT NULL, trace_json TEXT NOT NULL, updated_at INTEGER NOT NULL,
           PRIMARY KEY(turn_id, owner_id)
         );
+        CREATE INDEX IF NOT EXISTS turn_traces_by_updated ON turn_traces(updated_at DESC);
         CREATE VIRTUAL TABLE IF NOT EXISTS conversation_fts USING fts5(answer, tokenize = 'porter unicode61');
       `);
+      if (!(this.db.prepare("PRAGMA table_info(turns)").all() as Row[]).some(row => row.name === "clarification_id")) {
+        this.db.exec("ALTER TABLE turns ADD COLUMN clarification_id TEXT");
+      }
       const applied = this.db.prepare("SELECT version FROM schema_migrations WHERE version = 1").get();
       if (!applied) {
         // Preserve unknown wall time. ID ordering is an explicit legacy sequence fallback.
@@ -440,7 +467,12 @@ export class MemoryStore {
     return row ? toTurn(row) : null;
   }
   failTurn(id: string, code: string, ownerId = "local"): void {
-    this.db.prepare("UPDATE turns SET status='failed', error_code=?, updated_at=? WHERE id=? AND owner_id=? AND status='running'").run(code.slice(0,100),Date.now(),id,ownerId);
+    this.db.prepare("UPDATE turns SET status=?, error_code=?, updated_at=? WHERE id=? AND owner_id=? AND status='running'")
+      .run(code === "cancelled" ? "cancelled" : code === "interrupted" ? "interrupted" : "failed",code.slice(0,100),Date.now(),id,ownerId);
+  }
+  waitForInput(id: string, clarificationId: string, ownerId = "local"): void {
+    this.db.prepare("UPDATE turns SET status='waiting_input',clarification_id=?,error_code=NULL,updated_at=? WHERE id=? AND owner_id=? AND status='running'")
+      .run(clarificationId,Date.now(),id,ownerId);
   }
   recoverInterruptedTurns(): number {
     this.beginWrite();
@@ -471,14 +503,21 @@ export class MemoryStore {
     const r = this.db.prepare("SELECT trace_json FROM turn_traces WHERE turn_id=? AND owner_id=?").get(turnId,ownerId) as Row | undefined;
     return r ? JSON.parse(r.trace_json as string) : null;
   }
+  recentTraces(limit = 1000): Array<Record<string, unknown>> {
+    return (this.db.prepare("SELECT trace_json FROM turn_traces ORDER BY updated_at DESC LIMIT ?").all(boundedLimit(limit, 1000)) as Row[])
+      .flatMap(row => { try { return [JSON.parse(row.trace_json as string)]; } catch { return []; } });
+  }
   purgeOperational(beforeTime: number): { traces: number; jobs: number } {
     const traces = Number(this.db.prepare("DELETE FROM turn_traces WHERE updated_at < ?").run(beforeTime).changes);
     const jobs = Number(this.db.prepare("DELETE FROM memory_jobs WHERE state = 'completed' AND updated_at < ?").run(beforeTime).changes);
     return { traces, jobs };
   }
 
-  saveEpisode(e: Omit<Episode, "id" | "summary" | "topics"> & { sources: Source[]; verifiedStatements?: NewVerifiedStatement[] }): number {
+  saveEpisode(e: Omit<Episode, "id" | "summary" | "topics"> & { sources: Source[]; verifiedStatements?: NewVerifiedStatement[];
+    reviewedClaims?: ReviewedClaim[]; claimCoverage?: ClaimCoverage[]; coverageReference?: { episodeId: number; answerHash: string } }): number {
     const verifiedStatements = validateStatements(e.verifiedStatements, e.sources, e.askedAt);
+    const reviewedClaims = validateReviewedClaims(e.reviewedClaims, e.sources, e.askedAt);
+    const execution = e.reviewedClaims !== undefined ? { ...e.execution,reviewedClaimSchemaVersion:REVIEWED_CLAIM_SCHEMA_VERSION,reviewPolicyVersion:REVIEW_POLICY_VERSION } : e.execution;
     const ownerId = owner(e.ownerId);
     this.beginWrite();
     try {
@@ -492,12 +531,28 @@ export class MemoryStore {
         sequence = this.conversation(e.sessionId,ownerId)!.nextSequence;
         this.db.prepare("UPDATE conversations SET next_sequence=next_sequence+1 WHERE owner_id=? AND session_id=?").run(ownerId,e.sessionId);
       }
+      const reference = e.coverageReference, original = reference ? this.episode(reference.episodeId,ownerId) : null;
+      if (reference && (!original || original.sessionId !== e.sessionId || (original.sequence ?? original.id) >= sequence
+        || createHash("sha256").update(original.answer).digest("hex") !== reference.answerHash)) throw new Error("Invalid claim coverage reference.");
+      const originalClaimIds = new Set(original ? this.canonicalClaimsFor(original.id,ownerId).map(claim => claim.id) : []);
+      if (reviewedClaims.some(claim => claim.scope.referenceAnswerHash !== (reference?.answerHash ?? null)
+        || claim.referenceClaimId !== null && !originalClaimIds.has(claim.referenceClaimId))) throw new Error("Reviewed claim has an invalid original binding.");
       const result = this.db.prepare(`INSERT INTO episodes(session_id,asked_at,tz,question,answer,execution_json,owner_id,created_at,sequence,quality,turn_id)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(e.sessionId,e.askedAt,e.tz,e.question,e.answer,e.execution ? JSON.stringify(e.execution) : null,
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(e.sessionId,e.askedAt,e.tz,e.question,e.answer,execution ? JSON.stringify(execution) : null,
           ownerId,e.createdAt ?? Date.now(),sequence,e.quality ?? null,e.turnId ?? null);
       const id = Number(result.lastInsertRowid);
       const insertSource = this.db.prepare("INSERT INTO sources(episode_id,n,url,title,published_date,evidence_json) VALUES (?,?,?,?,?,?)");
       for (const s of e.sources) { const { n,url,title,publishedDate,...evidence } = s; insertSource.run(id,n,url,title,publishedDate ?? null,JSON.stringify(evidence)); }
+      const insertCanonical = this.db.prepare("INSERT INTO canonical_claims(episode_id,claim_id,origin,record_json) VALUES (?,?,?,?)");
+      for (const claim of reviewedClaims) insertCanonical.run(id,claim.id,claim.origin,JSON.stringify(claim));
+      if (e.claimCoverage?.length) {
+        if (!reference || !original) throw new Error("Invalid claim coverage reference.");
+        const originals = this.canonicalClaimsFor(original.id,ownerId), requested = new Set(e.claimCoverage.map(claim => claim.claimId));
+        if ([...requested].some(id => !originals.some(claim => claim.id === id))) throw new Error("Coverage references an unknown original claim.");
+        const coverage = reviewCoverage(e.claimCoverage,originals.filter(claim => requested.has(claim.id)),reviewedClaims,e.sources.map(source => source.n));
+        this.db.prepare("INSERT INTO claim_coverage(episode_id,reference_episode_id,reference_answer_hash,record_json) VALUES (?,?,?,?)")
+          .run(id,original.id,reference.answerHash,JSON.stringify(coverage));
+      }
       if (verifiedStatements.length) {
         let statementId = Number((this.db.prepare("SELECT coalesce(max(id),0) AS id FROM verified_statements").get() as { id: number }).id);
         const insertLink = this.db.prepare("INSERT INTO verified_statement_sources(statement_id,episode_id,source_n) VALUES (?,?,?)");
@@ -507,7 +562,7 @@ export class MemoryStore {
           insertStatement.run(statementId,id,statement.text,e.askedAt,Date.now());
         }
       }
-      this.db.prepare("INSERT INTO episodes_fts(rowid,question,entities) VALUES (?,?,?)").run(id,e.question,verifiedStatements.map(s => s.text).join("\n") || null);
+      this.db.prepare("INSERT INTO episodes_fts(rowid,question,entities) VALUES (?,?,?)").run(id,e.question,[...verifiedStatements.map(s => s.text),...reviewedClaims.map(c => c.text)].join("\n") || null);
       this.db.prepare("INSERT INTO conversation_fts(rowid,answer) VALUES (?,?)").run(id,e.answer.slice(0,ANSWER_INDEX_CHARS));
       const now = Date.now();
       this.db.prepare("INSERT INTO memory_jobs(episode_id,owner_id,available_at,created_at,updated_at) VALUES (?,?,?,?,?)").run(id,ownerId,now,now,now);
@@ -528,7 +583,7 @@ export class MemoryStore {
   private applyEnrichment(episodeId: number, input: Enrichment, ownerId: string): void {
     const episode = this.episode(episodeId,ownerId); if (!episode) return;
     const enrichment = boundEnrichment(input), topics = enrichment.topics.join(", ");
-    const audited = this.verifiedStatementsFor(episodeId,ownerId).map(s => s.text).join("\n");
+    const audited = [...this.verifiedStatementsFor(episodeId,ownerId),...this.reviewedClaimsFor(episodeId,ownerId)].map(s => s.text).join("\n");
     const entities = [audited,[...new Set(enrichment.claims.map(c => c.entity))].join(", ")].filter(Boolean).join("\n");
     this.db.prepare("UPDATE episodes SET summary=?,topics=? WHERE id=? AND owner_id=?").run(enrichment.summary,topics,episodeId,ownerId);
     // Keep claim identities and referenced rows stable across retries and revised extraction.
@@ -544,6 +599,15 @@ export class MemoryStore {
       const key = claimKey(c), previous = byKey.get(key);
       if (previous) this.db.prepare("UPDATE claims SET active=1,kind=?,verdict=? WHERE id=?").run(c.kind,c.verdict,previous);
       else { const result = insert.run(episodeId,c.entity,c.attribute,c.value,c.kind,c.sourceUrl,episode.askedAt,c.priorClaimId,c.verdict); byKey.set(key,Number(result.lastInsertRowid)); }
+    }
+    this.db.prepare("UPDATE canonical_claims SET active=0 WHERE episode_id=? AND origin='extracted'").run(episodeId);
+    if (!this.reviewedClaimsFor(episodeId,ownerId).length && episode.execution?.reviewedClaimSchemaVersion !== 1) {
+      const sources = this.sourcesFor(episodeId,ownerId);
+      for (const claim of enrichment.claims) {
+        const canonical = makeExtractedClaim(claim,{ viewpointAt: new Date(episode.askedAt).toISOString(),tz: episode.tz,kind: "lookup",referenceAnswerHash: null },sources);
+        this.db.prepare(`INSERT INTO canonical_claims(episode_id,claim_id,origin,record_json) VALUES (?,?,?,?)
+          ON CONFLICT(episode_id,claim_id) DO UPDATE SET active=1`).run(episodeId,canonical.id,canonical.origin,JSON.stringify(canonical));
+      }
     }
     this.db.prepare("DELETE FROM episodes_fts WHERE rowid=?").run(episodeId);
     this.db.prepare("INSERT INTO episodes_fts(rowid,question,summary,topics,entities) VALUES (?,?,?,?,?)").run(episodeId,episode.question,enrichment.summary,topics,entities);
@@ -665,6 +729,33 @@ export class MemoryStore {
     const rows = this.db.prepare(`SELECT v.id,v.text,v.viewpoint_at,v.verified_at,s.source_n FROM verified_statements v
       JOIN verified_statement_sources s ON s.statement_id=v.id AND s.episode_id=v.episode_id WHERE v.episode_id=? ORDER BY v.id,s.source_n`).all(episodeId) as Row[];
     return groupStatements(rows);
+  }
+  canonicalClaimsFor(episodeId: number, ownerId = "local"): CanonicalClaim[] {
+    return (this.db.prepare(`SELECT c.record_json FROM canonical_claims c JOIN episodes e ON e.id=c.episode_id
+      WHERE c.episode_id=? AND e.owner_id=? AND c.active=1 ORDER BY c.claim_id`).all(episodeId,ownerId) as Row[]).map(row => JSON.parse(row.record_json as string));
+  }
+  reviewedClaimsFor(episodeId: number, ownerId = "local"): ReviewedClaim[] {
+    return this.canonicalClaimsFor(episodeId,ownerId).filter((claim): claim is ReviewedClaim => claim.origin === "review" && claim.status === "supported");
+  }
+  claimCoverageFor(episodeId: number, ownerId = "local"): ClaimCoverage[] {
+    const row = this.db.prepare(`SELECT c.record_json FROM claim_coverage c JOIN episodes e ON e.id=c.episode_id WHERE c.episode_id=? AND e.owner_id=?`).get(episodeId,ownerId) as Row | undefined;
+    return row ? JSON.parse(row.record_json as string) : [];
+  }
+  latestClaimCoverageFor(referenceEpisodeId: number, sessionId: string, ownerId = "local", scope?: {viewpointAt:number;simulated:boolean;tz:string;receivedAt:number}): ClaimCoverage[] {
+    const original = this.episode(referenceEpisodeId,ownerId); if (!original || original.sessionId !== sessionId) return [];
+    const hash = createHash("sha256").update(original.answer).digest("hex");
+    const rows = this.db.prepare(`SELECT c.record_json,e.execution_json,e.asked_at,e.created_at FROM claim_coverage c JOIN episodes e ON e.id=c.episode_id
+      WHERE c.reference_episode_id=? AND c.reference_answer_hash=? AND e.owner_id=? AND e.session_id=? ORDER BY e.sequence DESC LIMIT 100`)
+      .all(referenceEpisodeId,hash,ownerId,sessionId) as Row[];
+    const decisions = new Map<string,ClaimCoverage>();
+    for (const row of rows) {
+      const execution = row.execution_json ? JSON.parse(row.execution_json as string) : null;
+      if (!scope || execution?.reviewPolicyVersion !== REVIEW_POLICY_VERSION || execution?.time?.simulated !== scope.simulated || execution?.time?.tz !== scope.tz
+        || (scope.simulated ? row.asked_at !== scope.viewpointAt : typeof row.created_at !== "number" || row.created_at > scope.receivedAt
+          || scope.receivedAt-row.created_at > 120_000 || Math.abs(Number(row.asked_at)-scope.viewpointAt)>120_000)) continue;
+      for (const claim of JSON.parse(row.record_json as string) as ClaimCoverage[]) if (!decisions.has(claim.claimId)) decisions.set(claim.claimId,claim);
+    }
+    return this.canonicalClaimsFor(referenceEpisodeId,ownerId).map(claim => decisions.get(claim.id) ?? { claimId:claim.id,status:"unresolved",sourceNumbers:[] });
   }
   sourcesFor(episodeId: number, ownerId = "local"): Source[] {
     return (this.db.prepare("SELECT s.* FROM sources s JOIN episodes e ON e.id=s.episode_id WHERE s.episode_id=? AND e.owner_id=? ORDER BY s.n").all(episodeId,ownerId) as Row[]).map(toSource);

@@ -153,7 +153,7 @@ test("a model error surfaces as an error event and nothing is stored", async () 
   assert.equal(store.count(), 0);
 });
 
-test("a week later: the old claim is recalled, re-checked, and the new claim links back to it", async () => {
+test("a week later: explicit memory recalls the old claim and retains the reviewed result without inventing a historical link", async () => {
   const store = new MemoryStore(":memory:");
   const search: SearchProvider = {
     search: async query => [{ url: "https://neon.com/pricing", title: "Neon pricing", text: query.query === "neon pricing"
@@ -188,15 +188,17 @@ test("a week later: the old claim is recalled, re-checked, and the new claim lin
   const memory = second.requests[0]!.messages.find(m => m.role === "user" && m.content.startsWith("UNTRUSTED MEMORY RECORDS"))!;
   const context = JSON.parse((memory.content as string).split("\n").slice(1).join("\n")) as string;
   assert.match(context, /"Last Tuesday" → Tue 3 Nov 2026\. \(It could also mean Tue 10 Nov 2026, but there are no conversations then\.\)/);
-  assert.match(context, new RegExp(`\\(C${original!.id}\\) Neon · Launch plan price: \\$19/month`));
+  assert.match(context, /Neon: Launch plan price = \$19\/month/);
+  assert.match(context, /unverified extraction; not established fact/);
 
-  assert.match(second.jsonPrompts[0]!, new RegExp(`id ${original!.id}: Neon · Launch plan price: \\$19/month`));
-
-  const [updated] = store.claimsFor(2);
-  assert.deepEqual(
-    { value: updated!.value, prior: updated!.priorClaimId, verdict: updated!.verdict },
-    { value: "$25/month", prior: original!.id, verdict: "changed" },
-  );
+  assert.equal(second.jsonPrompts.length,0,"foreground-reviewed assertions are not independently re-extracted");
+  assert.deepEqual(store.claimsFor(2),[]);
+  const [updated] = store.reviewedClaimsFor(2);
+  assert.ok(updated); assert.equal(updated.text,"It changed: $19 → $25 [1].");
+  assert.equal(updated.status,"supported"); assert.equal(updated.sourceRefs[0]?.url,"https://neon.com/pricing");
+  assert.equal(updated.referenceClaimId,null,"the review did not establish a structured cross-conversation claim identity");
+  assert.equal(updated.entity,null); assert.equal(updated.attribute,null); assert.equal(updated.value,null);
+  assert.equal(store.canonicalClaimsFor(1)[0]?.status,"unverified","remembered extraction is not upgraded by a later check");
 });
 
 test("earlier turns of the same chat are sent with their timestamps", async () => {
@@ -363,7 +365,8 @@ for (const question of ["What did I ask on 3 November?", "Recall the managed dat
     assert.ok(memoryMessage, "omitted history must be recalled");
     const memory = JSON.parse((memoryMessage.content as string).split("\n").slice(1).join("\n")) as string;
     assert.match(memory, /retained-answer marker is \$19/);
-    assert.match(memory, /Fictional Cloud · price: \$19/);
+    assert.match(memory, /Fictional Cloud: price = \$19/);
+    assert.match(memory, /unverified extraction; not established fact/);
     assert.doesNotMatch(memory, /this is in the current chat, above/);
     assert.equal(sent.some(m => m.role === "assistant" && m.content?.includes("retained-answer marker")), false);
     store.close();

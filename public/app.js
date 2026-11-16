@@ -513,11 +513,13 @@ function addEntry(question, options = {}) {
   const view = { entry, at: now.toISOString(), isEra, question, trace: el("ul", "trace"), answer: el("div", "answer"), sources: el("ol", "sources"), timings: el("div", "timings"), status: el("div", "answer-status"), steps: el("ol", "answer-steps"), actions: el("div", "answer-actions"), details: el("details", "answer-details"), text: "", dataSources: [], episodeId: options.episodeId };
   view.responseMode = options.responseMode ?? (options.restored ? "standard" : $("response-mode").value);
   view.clarification = el("div", "clarification-slot");
+  view.checkedFindings = el("section", "checked-findings"); view.checkedFindings.hidden = true;
+  view.checkedFindings.setAttribute("aria-live", "polite");
   view.status.setAttribute("role", "status");
   for (const [i, title] of ["Researching", "Checking era", "Preparing answer"].entries()) view.steps.append(el("li", "", `${String(i + 1).padStart(2, "0")} ${title}`));
   view.details.append(el("summary", "", "Research details"), view.trace, view.timings);
   view.sources.hidden = true; view.actions.hidden = true;
-  body.append(el("h2", "question", question), view.clarification, view.steps, view.answer, view.sources, view.status, view.actions, view.details);
+  body.append(el("h2", "question", question), view.clarification, view.steps, view.checkedFindings, view.answer, view.sources, view.status, view.actions, view.details);
   entry.append(gutter, body); $("thread").append(entry); entries.push(view);
   if (!options.restored) entry.scrollIntoView({ block: "start", behavior: "smooth" });
   return view;
@@ -531,6 +533,18 @@ function traceLine(list, kind, label) {
   const item = el("li"); item.append(el("span", "kind", kind), el("span", "label", label), el("span", "state")); list.append(item); return item;
 }
 function paintView(view) { renderAnswer(view.answer, view.text, view.dataSources, { at: view.at, episodeId: view.episodeId }); }
+function showCheckedFindings(view, claims) {
+  if (!Array.isArray(claims) || !claims.length) return;
+  view.checkedFindings.replaceChildren(el("strong", "", "Checked so far"), el("p", "", "These findings passed review. The remaining check is still running."));
+  const list = el("ul");
+  for (const claim of claims.slice(0, 64)) if (claim.status === "supported" && typeof claim.text === "string") {
+    const item = el("li");
+    const refs = Array.isArray(claim.sourceRefs) ? claim.sourceRefs.map(ref => ({ ...ref, title: ref.url })) : [];
+    const text = /\[\d+\]/.test(claim.text) ? claim.text : `${claim.text} ${refs.map(ref => `[${ref.n}]`).join(" ")}`;
+    renderAnswer(item, text, refs, { at: view.at }); list.append(item);
+  }
+  view.checkedFindings.append(list); view.checkedFindings.hidden = !list.children.length;
+}
 
 function choiceSummary(view, answer) {
   view.clarification.replaceChildren();
@@ -549,6 +563,7 @@ function selectionFor(answer) {
   return answer.skipped ? { skip: true } : answer.optionId ? { optionId: answer.optionId } : { text: answer.answer };
 }
 function showClarification(view, card) {
+  view.responseMode = card.responseMode ?? view.responseMode;
   view.clarificationId = card.id;
   view.card = card;
   view.awaitingClarification = true;
@@ -606,9 +621,22 @@ function showActions(view, failed = false) {
     catch { notify("Copy is unavailable in this browser. Select the answer text to copy it."); }
   }));
   view.actions.append(buttonAction("Edit question", () => { $("input").value = view.question; $("compose-context").textContent = "Editing an earlier question · sends as a new entry"; $("compose-context").hidden = false; fitInput(); $("input").focus(); }));
+  if (!failed && view.reviewFailure?.retryable) view.actions.append(buttonAction("Retry unfinished check ↗", () => {
+    if (inFlight) return notify("Finish or stop the current answer first.");
+    const retry = addEntry(view.question, { at: view.at, simulated: view.isEra, responseMode: view.responseMode });
+    send(view.question, { view: retry, recheckEpisodeId: view.reviewFailure.retryEpisodeId,
+      retryUnfinished: Boolean(view.reviewFailure.retryEpisodeId && view.reviewFailure.retryScope === "unfinished_claims") });
+  }));
+  if (failed && view.checkpoint?.available && view.turnStatus !== "cancelled") view.actions.append(buttonAction("Resume saved research ↗", () => {
+    if (inFlight) return notify("Finish or stop the current answer first.");
+    const priorTurnId = view.turnId;
+    view.idempotencyKey = null; view.turnId = null; view.turnStatus = null;
+    view.requestBody = { resumeTurnId: priorTurnId, sessionId: view.checkpoint.request?.sessionId ?? sessionId };
+    send(view.question, { view });
+  }));
   view.actions.append(buttonAction(failed ? "Retry question ↗" : "Ask again", () => { if (inFlight) return notify("Finish or stop the current answer first.");
-    if (failed && view.turnId && !["failed", "interrupted", "missing"].includes(view.turnStatus)) return checkSaved(view).catch(error => notify(error.message));
-    if (failed && ["failed", "interrupted"].includes(view.turnStatus)) { view.idempotencyKey = null; view.turnId = null; view.requestBody = null; }
+    if (failed && view.turnId && !["failed", "cancelled", "interrupted", "missing", "waiting_input"].includes(view.turnStatus)) return checkSaved(view).catch(error => notify(error.message));
+    if (failed && ["failed", "cancelled", "interrupted", "waiting_input"].includes(view.turnStatus)) { view.idempotencyKey = null; view.turnId = null; view.requestBody = null; }
     if (failed && view.clarificationExpired) return send(view.question);
     if (failed && view.clarificationId && view.submittedSelection) return send(view.question, { view, clarification: { id: view.clarificationId, selection: view.submittedSelection } });
     send(view.question, failed ? { view } : {}); }));
@@ -616,6 +644,7 @@ function showActions(view, failed = false) {
 }
 function completeEntry(view, timings, cited) {
   view.cited = cited; view.turnStatus = "completed"; clearPendingTurn(view);
+  view.checkedFindings.hidden = true; view.checkedFindings.replaceChildren();
   view.details.open = false;
   view.steps.hidden = true;
   paintView(view);
@@ -623,6 +652,11 @@ function completeEntry(view, timings, cited) {
   renderSources(view.sources, sources, { at: view.at, episodeId: view.episodeId });
   view.status.textContent = `${sources.length} source${sources.length === 1 ? "" : "s"}${timings?.totalMs != null ? ` · ${seconds(timings.totalMs)}` : ""} · Saved to Ledger${view.quality === "explicitly_unverified" ? " · Unverified" : view.quality === "supported_partial" ? " · Partially supported" : ""}`;
   if (view.responseMode === "fast") view.status.textContent += " · Fast";
+  if (Array.isArray(view.claimCoverage) && view.claimCoverage.length) {
+    const counts = { supported: 0, changed: 0, unresolved: 0 };
+    for (const claim of view.claimCoverage) if (Object.hasOwn(counts, claim.status)) counts[claim.status]++;
+    view.status.textContent += ` · This check: ${counts.supported} supported, ${counts.changed} corrected, ${counts.unresolved} unresolved`;
+  }
   view.status.classList.add("is-complete");
   showActions(view);
 }
@@ -642,12 +676,15 @@ async function checkSaved(view, signal) {
   }
   view.turnId = result.turn.id; rememberPendingTurn(view);
   view.turnStatus = result.turn.status;
+  view.checkpoint = result.checkpoint;
   view.steps.hidden = true;
   if (result.turn.status === "completed") {
     const existing = entries.find(item => item !== view && item.episodeId === result.episode.id);
     if (existing) { view.entry.remove(); entries.splice(entries.indexOf(view), 1); clearPendingTurn(view); return; }
     view.episodeId = result.episode.id; view.text = result.episode.answer; view.quality = result.episode.quality;
     view.responseMode = result.episode.execution?.responseMode ?? "standard";
+    view.reviewFailure = result.episode.execution?.reviewFailure;
+    view.claimCoverage = result.claimCoverage ?? result.episode.execution?.claimCoverage;
     view.dataSources = result.sources ?? []; paintView(view); completeEntry(view, null, view.dataSources.map(source => source.n)); return;
   }
   if (result.turn.status === "running") {
@@ -655,7 +692,18 @@ async function checkSaved(view, signal) {
     view.actions.replaceChildren(buttonAction("Check saved answer ↗", () => checkSaved(view).catch(error => notify(error.message)))); view.actions.hidden = false; return;
   }
   clearPendingTurn(view);
-  view.status.textContent = "This attempt ended before an answer was saved. You can retry your question.";
+  if (result.turn.status === "waiting_input") {
+    if (result.clarification) {
+      const existing = entries.find(item => item !== view && item.clarificationId === result.clarification.id);
+      if (existing) { view.entry.remove(); entries.splice(entries.indexOf(view), 1); showClarification(existing, result.clarification); return; }
+      showClarification(view, result.clarification); return;
+    }
+    view.clarificationExpired = true;
+    view.status.textContent = "This clarification has expired or was already answered. You can ask the question again.";
+  } else view.status.textContent = result.turn.status === "cancelled" ? "Stopped. You can edit or retry your question."
+    : "This attempt ended before an answer was saved. You can retry your question.";
+  if (result.turn.status === "cancelled") view.checkedFindings.hidden = true;
+  else if (!view.checkedFindings.hidden) view.checkedFindings.querySelector("p").textContent = "These findings passed review before the interruption. The remaining check is unfinished.";
   view.answer.replaceChildren(el("p", "failure", view.status.textContent)); showActions(view, true);
 }
 async function restorePendingTurn() {
@@ -668,7 +716,8 @@ async function restorePendingTurn() {
 async function send(message, options = {}) {
   if (inFlight || !message.trim()) return;
   const view = options.view ?? addEntry(message.trim());
-  view.text = ""; view.dataSources = []; view.answer.replaceChildren(); view.actions.hidden = true;
+  view.text = ""; view.dataSources = []; view.reviewFailure = null; view.claimCoverage = null;
+  view.checkedFindings.hidden = true; view.checkedFindings.replaceChildren(); view.answer.replaceChildren(); view.actions.hidden = true;
   view.details.hidden = false;
   view.details.open = true;
   view.status.classList.remove("is-complete", "is-interrupted");
@@ -684,6 +733,7 @@ async function send(message, options = {}) {
   view.requestBody ??= { sessionId, message: message.trim(), tz, mode: view.isEra ? "era" : "live", asOf,
     ...(view.responseMode === "fast" ? { responseMode: "fast" } : {}),
     ...(options.recheckEpisodeId ? { recheckEpisodeId: options.recheckEpisodeId } : {}),
+    ...(options.retryUnfinished ? { retryUnfinished: true } : {}),
     ...(options.clarification ? { clarification: options.clarification } : {}) };
   rememberPendingTurn(view);
   $("compose-context").hidden = true;
@@ -700,16 +750,20 @@ async function send(message, options = {}) {
       if (event.state === "running") stage(view, 0, view.isEra ? "Researching the world at your selected date…" : "Researching current sources…");
     } else if (event.type === "verification") {
       reviewLine ??= traceLine(view.trace, "review", "Era and sources");
-      reviewLine.querySelector(".state").textContent = event.state === "running" ? "checking" : event.state === "unavailable" ? "review unavailable" : `complete · ${seconds(event.ms)}`;
+      reviewLine.querySelector(".state").textContent = event.state === "running" ? "checking" : event.state === "unavailable" ? "review unavailable"
+        : event.state === "partial" ? `partially checked · ${seconds(event.ms)}` : event.state === "failed" ? "check unfinished" : `complete · ${seconds(event.ms)}`;
       stage(view, event.state === "running" ? 1 : 2, event.state === "running" ? "Checking dates, source support, and historical perspective…" : "Preparing your answer…");
-    } else if (event.type === "sources") view.dataSources = event.sources;
+    } else if (event.type === "claim_review") showCheckedFindings(view, event.claims);
+    else if (event.type === "sources") view.dataSources = event.sources;
     else if (event.type === "text") {
       stage(view, 2, "Preparing your answer…"); view.text += event.delta;
       frame ||= requestAnimationFrame(() => { frame = 0; paintView(view); noteRender(); });
-    } else if (event.type === "retract") { view.text = ""; paintView(view); }
+    } else if (event.type === "retract") { view.text = ""; view.checkedFindings.hidden = true; paintView(view); }
     else if (event.type === "done") {
       completed = true; view.episodeId = event.episodeId; view.quality = event.quality; view.turnId = event.turnId ?? view.turnId;
       view.timings.textContent = `Recall ${seconds(event.timings.recallMs)} · ${event.timings.searches} searches · ${event.timings.modelCalls} model calls${event.timings.verificationMs ? ` · review ${seconds(event.timings.verificationMs)}` : ""} · total ${seconds(event.timings.totalMs)}`;
+      view.reviewFailure = event.reviewFailure;
+      view.claimCoverage = event.claimCoverage;
       completeEntry(view, event.timings, event.cited);
     } else if (event.type === "error") throw new Error(displayError(event.message));
   };
@@ -740,7 +794,7 @@ async function send(message, options = {}) {
     cancelAnimationFrame(frame); frame = 0;
     if (view.turnId || view.idempotencyKey) {
       if (view.turnId && abort.signal.aborted) { try { await fetch(`/api/turns/${encodeURIComponent(view.turnId)}`, { method: "POST" }); } catch {} }
-      try { await checkSaved(view); if (view.turnStatus === "completed") { completed = true; return; } if (["running", "missing", "failed", "interrupted"].includes(view.turnStatus)) return; } catch {}
+      try { await checkSaved(view); if (view.turnStatus === "completed") { completed = true; return; } if (["running", "waiting_input", "cancelled", "missing", "failed", "interrupted"].includes(view.turnStatus)) return; } catch {}
     }
     view.steps.hidden = true;
     view.status.classList.remove("is-complete"); view.status.classList.add("is-interrupted");
@@ -812,6 +866,8 @@ async function restoreSession(id, scroll = false) {
     const { episode, sources } = item;
     const view = addEntry(episode.question, { at: episode.askedAt, simulated: Boolean(episode.execution?.time?.simulated ?? episode.execution?.simulation), episodeId: episode.id, restored: true, responseMode: episode.execution?.responseMode });
     view.text = episode.answer; view.dataSources = sources; view.quality = episode.quality;
+    view.reviewFailure = episode.execution?.reviewFailure;
+    view.claimCoverage = item.claimCoverage ?? episode.execution?.claimCoverage;
     if (episode.execution?.clarification) choiceSummary(view, episode.execution.clarification);
     completeEntry(view, null, sources.map(source => source.n));
     view.details.hidden = true;

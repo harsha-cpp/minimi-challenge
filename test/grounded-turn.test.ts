@@ -67,7 +67,7 @@ for (const lookup of ["none", "empty", "failed"] as const) {
       assert.equal(h.events.at(-1)?.type, "done");
       const terminal = h.events.at(-1);
       assert.equal(terminal?.type === "done" && terminal.quality, "explicitly_unverified");
-      assert.match(h.store.episode(1)!.answer, /couldn't verify/);
+      assert.match(h.store.episode(1)!.answer, /remain unverified/);
       assert.doesNotMatch(h.store.episode(1)!.answer, /\$25/);
       assert.equal(h.counts().checks, 0, "absence of evidence is determined before model review");
     } finally { h.store.close(); }
@@ -78,7 +78,7 @@ test("irrelevant passages with valid citation numbers are rejected as unsupporte
   const h = harness({ lookup: "irrelevant", reviews: [rejected(), rejected()], repair: "REJECTED_REPAIR $100 is correct [1]." });
   try {
     await h.run();
-    assert.match(h.store.episode(1)!.answer, /couldn't verify/);
+    assert.match(h.store.episode(1)!.answer, /remain unverified/);
     assert.equal(h.store.episode(1)!.execution!.rejectionObserved, true);
     assert.doesNotMatch(JSON.stringify(h.events), /REJECTED_REPAIR|\$25|\$100/);
   } finally { h.store.close(); }
@@ -99,19 +99,21 @@ test("current verification requires explicit support/applicability checks, then 
 for (const unavailable of [new Error("PRIVATE_REVIEW_FAILURE"), "timeout"]) {
   test(`current verification review ${unavailable instanceof Error ? "outage" : "timeout"} cannot publish an unchecked Verified draft`, async () => {
     const h = harness({ reviews: [unavailable], draft: "Verified: the current price is $25 monthly [1]." });
-    const keepAlive = setTimeout(() => {}, 100);
+    const keepAlive = setInterval(() => {}, 100);
     try {
       await h.run();
       const saved = h.store.episode(1)!;
       assert.equal(saved.quality, "explicitly_unverified");
-      assert.match(saved.answer, /couldn't verify/);
+      assert.match(saved.answer, /remain unverified/);
+      assert.deepEqual(saved.execution!.reviewFailure, { reason: unavailable === "timeout" ? "review_timeout" : "review_unavailable",
+        retryable: true, retryScope: "review" });
       assert.doesNotMatch(saved.answer, /Verified:|\$25|Treat the following as unverified/);
       const prose = h.events.filter(event => event.type === "text").map(event => event.delta).join("");
       assert.equal(prose, saved.answer);
       assert.doesNotMatch(prose, /I could not verify this answer against the available evidence/);
       assert.deepEqual(h.counts(), { generations: 2, checks: 1, lookups: 1 });
       assert.ok(h.events.some(event => event.type === "done" && event.quality === "explicitly_unverified"));
-    } finally { clearTimeout(keepAlive); h.store.close(); }
+    } finally { clearInterval(keepAlive); h.store.close(); }
   });
 }
 
@@ -132,13 +134,13 @@ for (const correction of ["Wrong [99].", "", "x".repeat(6001), "x".repeat(20_000
   for (const second of [new Error("PRIVATE_REVIEW_OUTAGE"), "timeout"]) {
     test(`negative verdict survives malformed correction (${correction.length}) and ${second instanceof Error ? "outage" : second}`, async () => {
       const h = harness({ reviews: [rejected(correction), second], repair: "REJECTED_REPAIR $100 is correct [1]." });
-      const keepAlive = setTimeout(() => {}, 100);
+      const keepAlive = setInterval(() => {}, 100);
       try {
         await h.run();
         assert.equal(h.store.episode(1)!.execution!.rejectionObserved, true);
-        assert.match(h.store.episode(1)!.answer, /couldn't verify/);
+        assert.match(h.store.episode(1)!.answer, /remain unverified/);
         assert.doesNotMatch(JSON.stringify(h.events), /REJECTED_REPAIR|\$25|\$100|PRIVATE_/);
-      } finally { clearTimeout(keepAlive); h.store.close(); }
+      } finally { clearInterval(keepAlive); h.store.close(); }
     });
   }
 }
@@ -146,13 +148,34 @@ for (const correction of ["Wrong [99].", "", "x".repeat(6001), "x".repeat(20_000
 for (const repair of ["error", "timeout"] as const) {
   test(`negative verdict survives repair ${repair}`, async () => {
     const h = harness({ reviews: [rejected(null)], repair });
-    const keepAlive = setTimeout(() => {}, 100);
+    const keepAlive = setInterval(() => {}, 100);
     try {
       await h.run();
-      assert.match(h.store.episode(1)!.answer, /couldn't verify/);
+      assert.match(h.store.episode(1)!.answer, /remain unverified/);
       assert.equal(h.store.episode(1)!.execution!.rejectionObserved, true);
       assert.doesNotMatch(JSON.stringify(h.events), /\$25|PRIVATE_/);
-    } finally { clearTimeout(keepAlive); h.store.close(); }
+    } finally { clearInterval(keepAlive); h.store.close(); }
+  });
+}
+
+for (const repair of ["error", "timeout", "REJECTED_REPAIR $100 is correct [1]."] as const) {
+  test(`a failed repair preserves only independently approved findings: ${repair}`, async () => {
+    const h = harness({ draft: `${answer}\n\nThe Enterprise price is $100 monthly [1].`, repair,
+      reviews: [{ ...rejected(null), approvedFindings: [{ text: answer, sourceNumbers: [1], supported: true, applicable: true, selfContained: true }] }, new Error("PRIVATE_REVIEW_OUTAGE")] });
+    const keepAlive = setInterval(() => {}, 100);
+    try {
+      await h.run();
+      const episode = h.store.episode(1)!;
+      assert.equal(episode.quality, "supported_partial");
+      assert.match(episode.answer, /\$25 monthly \[1\]/);
+      assert.match(episode.answer, /remaining claims are still unverified/);
+      assert.doesNotMatch(episode.answer, /Enterprise|\$100|REJECTED_REPAIR|PRIVATE_/);
+      assert.deepEqual(episode.execution!.reviewFailure, { reason: "insufficient_evidence", retryable: true, retryScope: "unfinished_claims" });
+      const done = h.events.find(event => event.type === "done"); assert.ok(done && done.type === "done");
+      assert.equal(done.quality, "supported_partial");
+      assert.deepEqual(done.cited, [1]);
+      assert.deepEqual(done.reviewFailure, episode.execution!.reviewFailure);
+    } finally { clearInterval(keepAlive); h.store.close(); }
   });
 }
 
@@ -223,7 +246,7 @@ test("an explicitly-unverified reviewer label with no checked claims cannot publ
     await h.run();
     const episode = h.store.episode(1)!;
     assert.equal(episode.quality, "explicitly_unverified");
-    assert.match(episode.answer, /couldn't verify/);
+    assert.match(episode.answer, /remain unverified/);
     assert.doesNotMatch(episode.answer, /\$25/);
     assert.doesNotMatch(JSON.stringify(h.events.filter(event => event.type === "text")), /\$25/);
     assert.deepEqual(h.store.sourcesFor(1), []);
@@ -232,7 +255,7 @@ test("an explicitly-unverified reviewer label with no checked claims cannot publ
 
 test("review summaries persist bounded failure reasons without drafts or review findings", async () => {
   const h = harness({ reviews: ["timeout"] });
-  const keepAlive = setTimeout(() => {}, 100);
+  const keepAlive = setInterval(() => {}, 100);
   try {
     await h.run();
     const summary = h.store.episode(1)!.execution!.review as { kind: string; status: string; reason: string; calls: number; attempts: unknown[] };
@@ -242,5 +265,5 @@ test("review summaries persist bounded failure reasons without drafts or review 
     assert.equal(summary.calls, 1);
     assert.equal(summary.attempts.length, 1);
     assert.doesNotMatch(JSON.stringify(summary), /\$25|question|draft|issues|safeAnswer|sources|PRIVATE_/);
-  } finally { clearTimeout(keepAlive); h.store.close(); }
+  } finally { clearInterval(keepAlive); h.store.close(); }
 });

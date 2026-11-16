@@ -18,7 +18,8 @@ export interface TurnPolicy {
 
 export function turnPolicy(message: string, simulated: boolean, context?: Pick<RequestContext, "kind">): TurnPolicy {
   const verify = context?.kind === "conversation_reference" || context?.kind === "missing_reference"
-    || /\b(still (?:true|correct|accurate|right)|recheck|re-check|verify|verification|confirm|fact[- ]?check|check (?:if|whether)|changed since|up.to.date)\b/i.test(message);
+    || /\b(still (?:true|correct|accurate|right)|recheck|re-check|verify|verification|confirm|fact[- ]?check|check (?:if|whether)|changed since|up.to.date)\b/i.test(message)
+    || /\b(?:changed|changes|shipped|released)\b[^.!?\n]{0,120}\bsince\b/i.test(message);
   const volatile = /\b(pric(?:e|es|ing)|costs?|plans?|versions?|releases?|latest|current|availability|available|news|today|now|what(?:'s| has)? changed|any .{0,30}changes?|this (?:week|month)|last (?:week|month))\b/i.test(message);
   const conversation = /^(?:hi|hello|hey|thanks|thank you|good (?:morning|evening|night))[!.,\s]*$/i.test(message.trim());
 

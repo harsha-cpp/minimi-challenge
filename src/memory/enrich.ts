@@ -4,6 +4,8 @@ import type { Llm } from "../llm.ts";
 import { runWithModelContext } from "../llm/gateway.ts";
 import { finishTrace, newTrace, recordStage, recordUsage, withTrace } from "../runtime/telemetry.ts";
 import type { Claim, Enrichment, MemoryJob, MemoryStore, NewClaim, Source } from "./store.ts";
+import type { ReviewedClaim } from "../agent/claims.ts";
+import { memoryTopicLabels } from "./concepts.ts";
 
 export interface EnrichInput {
   question: string;
@@ -11,6 +13,8 @@ export interface EnrichInput {
   sources: Source[];
 
   priorClaims: Claim[];
+  /** Present only for a foreground-reviewed episode. Empty means no claim was approved. */
+  reviewedClaims?: ReviewedClaim[];
 }
 
 const MAX_CLAIMS = 20;
@@ -37,6 +41,14 @@ If the answer states nothing checkable, return "claims": [].`;
 
 export async function buildEnrichment(llm: Llm, input: EnrichInput, signal?: AbortSignal): Promise<Enrichment> {
   input = boundInput(input);
+  if (input.reviewedClaims !== undefined) {
+    // Foreground records already contain the audited assertions. A second extraction must not
+    // rewrite their values, invent normalized fields, or mint facts after an unresolved review.
+    const claims = input.reviewedClaims.filter(claim => claim.status === "supported");
+    return { summary: [input.question.slice(0, 250), ...claims.slice(0, 3).map(claim => claim.text)].join(" ").slice(0, 1000),
+      topics: [...new Set([...claims.map(claim => claim.entity?.trim().toLowerCase()).filter((value): value is string => Boolean(value)),
+        ...memoryTopicLabels(input.question + " " + input.answer)])].slice(0, MAX_TOPICS), claims: [] };
+  }
   if (!input.sources.length && !input.priorClaims.length && input.answer.length < 500) {
     return { summary: input.question.slice(0, 200), topics: [], claims: [] };
   }
@@ -109,7 +121,8 @@ export class Enricher {
     const episode = this.store.episode(episodeId, ownerId); if (!episode) return;
     const priorClaims = this.store.priorClaimsForEpisode(episodeId, ownerId, 20, input.priorClaims.map(claim => claim.id));
     this.store.enqueueMemoryJob(episodeId, boundInput({ question: episode.question, answer: episode.answer,
-      sources: this.store.sourcesFor(episodeId, ownerId), priorClaims }), ownerId);
+      sources: this.store.sourcesFor(episodeId, ownerId), priorClaims,
+      ...(episode.execution?.reviewedClaimSchemaVersion === 1 ? { reviewedClaims: this.store.reviewedClaimsFor(episodeId, ownerId) } : {}) }), ownerId);
     queueMicrotask(() => this.pump());
   }
 
@@ -156,10 +169,12 @@ export class Enricher {
         const priorClaims = ["conversation", "creative", "transform", "recall"].includes(String(episode.execution?.intent)) ? []
           : this.store.priorClaimsForEpisode(job.episodeId, job.ownerId, 20, requestedClaims);
         const input = boundInput({ question: episode.question, answer: episode.answer,
-          sources: this.store.sourcesFor(job.episodeId, job.ownerId), priorClaims });
+          sources: this.store.sourcesFor(job.episodeId, job.ownerId), priorClaims,
+          ...(episode.execution?.reviewedClaimSchemaVersion === 1 ? { reviewedClaims: this.store.reviewedClaimsFor(job.episodeId, job.ownerId) } : {}) });
+        if (input.reviewedClaims !== undefined) recordStage("memory_claim_reuse", 0, { claims: input.reviewedClaims.length, modelCallSkipped: true });
         if (!payload) recordStage("memory_context_recovery", 0, { priorClaims: input.priorClaims.length, context: "untrusted_conversation" });
         const generationSignal = AbortSignal.any([signal, AbortSignal.timeout(30_000)]);
-        extractionAttempted = !episode.execution?.simulation && Boolean(input.sources.length || input.priorClaims.length || input.answer.length >= 500);
+        extractionAttempted = !episode.execution?.simulation && input.reviewedClaims === undefined && Boolean(input.sources.length || input.priorClaims.length || input.answer.length >= 500);
         // Era simulations remain searchable conversation, without minting extracted fact assertions.
         const enrichment = episode.execution?.simulation
           ? { summary: input.question.slice(0, 200), topics: [], claims: [] }
@@ -218,10 +233,11 @@ function boundInput(input: EnrichInput): EnrichInput {
       title:clipBytes(s.title.slice(0,300),300),url:clipBytes(s.url.slice(0,2048),2048),text:clipBytes(s.text?.slice(0,1000) ?? "",1000) })),
     priorClaims: (Array.isArray(input.priorClaims) ? input.priorClaims : []).slice(0,20).map(c => ({ ...c,
       entity:clipBytes(c.entity.slice(0,200),200),attribute:clipBytes(c.attribute.slice(0,200),200),value:clipBytes(c.value.slice(0,1000),1000),
-      sourceUrl:c.sourceUrl ? clipBytes(c.sourceUrl,2048) : null })) };
+      sourceUrl:c.sourceUrl ? clipBytes(c.sourceUrl,2048) : null })),
+    ...(input.reviewedClaims !== undefined ? { reviewedClaims: input.reviewedClaims.slice(0, 20) } : {}) };
   // Counts and individual fields alone do not bound UTF-8 serialization across languages.
-  while (Buffer.byteLength(JSON.stringify(bounded)) > 64_000 && (bounded.sources.length || bounded.priorClaims.length)) {
-    if (bounded.sources.length > bounded.priorClaims.length) bounded.sources.pop(); else bounded.priorClaims.pop();
+  while (Buffer.byteLength(JSON.stringify(bounded)) > 64_000 && (bounded.sources.length || bounded.priorClaims.length || bounded.reviewedClaims?.length)) {
+    if (bounded.sources.length) bounded.sources.pop(); else if (bounded.priorClaims.length) bounded.priorClaims.pop(); else bounded.reviewedClaims?.pop();
   }
   return bounded;
 }

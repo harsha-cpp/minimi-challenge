@@ -64,8 +64,10 @@ const implementationHash = createHash("sha256").update([
     "src/agent/run.ts", "src/agent/citations.ts", "src/agent/simulation.ts", "src/agent/prompt.ts", "src/agent/prepare.ts", "src/agent/context.ts", "src/agent/evidence.ts", "src/agent/clarification.ts",
     "src/llm.ts", "src/llm/responses.ts", "src/llm/gateway.ts", "src/config.ts", "src/clock.ts", "src/server.ts",
     "src/runtime/spend-store.ts", "src/runtime/provider-spending.ts", "src/runtime/provider-readiness.ts", "src/runtime/spend-scope.ts", "src/runtime/telemetry.ts", "src/runtime/access.ts", "src/runtime/sse.ts",
-    "src/memory/store.ts", "src/memory/recall.ts", "src/memory/enrich.ts", "src/memory/questions.ts",
-    "src/search/exa.ts", "src/search/cache.ts", "src/search/validate.ts", "src/search/limit.ts", "src/search/profiles.ts", "src/search/types.ts",
+    "src/memory/store.ts", "src/memory/recall.ts", "src/memory/enrich.ts", "src/memory/questions.ts", "src/memory/concepts.ts",
+    "src/agent/claims.ts", "src/agent/recheck.ts", "src/agent/review-recovery.ts", "src/agent/response-mode.ts",
+    "src/runtime/versions.ts", "src/runtime/research-checkpoints.ts", "src/runtime/budget-allocation.ts",
+    "src/search/exa.ts", "src/search/passages.ts", "src/search/cache.ts", "src/search/validate.ts", "src/search/limit.ts", "src/search/profiles.ts", "src/search/types.ts",
     "public/citations.js", "package-lock.json", "eval/benchmark.ts", "eval/benchmark/fixtures.ts", "eval/benchmark/score.ts", "eval/pilot/budget.ts",
   ].map(file => file + "\n" + readFileSync(file, "utf8")).join("\n")).digest("hex");
 

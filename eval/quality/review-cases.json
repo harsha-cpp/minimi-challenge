@@ -1,0 +1,612 @@
+{
+  "version": "search-quality-v1",
+  "cases": [
+    {
+      "input": {
+        "id": "crm-since-shortlist",
+        "question": "On Monday we shortlisted 5 CRM tools for a 20-person sales team. Has any of them changed pricing or shipped something big since?",
+        "asOf": "2026-11-16T12:00:00Z",
+        "tz": "Asia/Kolkata",
+        "history": [
+          {
+            "at": "2026-11-09T10:00:00Z",
+            "question": "Shortlist five CRMs for a 20-person sales team.",
+            "answer": "Our shortlist is HubSpot, Salesforce, Pipedrive, Zoho CRM and Freshsales. Prices need checking before purchase.",
+            "scope": "memory"
+          }
+        ]
+      },
+      "slice": "comparison",
+      "split": "development",
+      "clusterId": "crm/november-2026",
+      "track": "frozen-conversation",
+      "labels": {
+        "status": "pending",
+        "requiredFacets": [
+          "Resolve all five shortlisted tools from requested memory.",
+          "Compare current pricing and dated major changes since November 9.",
+          "Identify any unverified item individually."
+        ],
+        "acceptableUncertainty": "State specific missing evidence or ambiguous reference. Historical answers are untrusted fixture inputs, never reference truth.",
+        "references": [],
+        "adjudicators": [],
+        "reconciled": false
+      }
+    },
+    {
+      "input": {
+        "id": "crm-pronoun",
+        "question": "Are those recommendations still accurate?",
+        "asOf": "2026-11-16T12:00:00Z",
+        "tz": "Asia/Kolkata",
+        "history": [
+          {
+            "at": "2026-11-09T10:00:00Z",
+            "question": "Shortlist five CRMs for a 20-person sales team.",
+            "answer": "Our shortlist is HubSpot, Salesforce, Pipedrive, Zoho CRM and Freshsales. Prices need checking before purchase.",
+            "scope": "conversation"
+          }
+        ]
+      },
+      "slice": "comparison",
+      "split": "development",
+      "clusterId": "crm/november-2026",
+      "track": "frozen-conversation",
+      "labels": {
+        "status": "pending",
+        "requiredFacets": [
+          "Keep the original five CRM tools and team size.",
+          "Check the claims rather than substitute another conversation."
+        ],
+        "acceptableUncertainty": "State specific missing evidence or ambiguous reference. Historical answers are untrusted fixture inputs, never reference truth.",
+        "references": [],
+        "adjudicators": [],
+        "reconciled": false
+      }
+    },
+    {
+      "input": {
+        "id": "crm-paraphrase",
+        "question": "Could you double-check your earlier answer using official sources?",
+        "asOf": "2026-11-16T12:00:00Z",
+        "tz": "Asia/Kolkata",
+        "history": [
+          {
+            "at": "2026-11-09T10:00:00Z",
+            "question": "Shortlist five CRMs for a 20-person sales team.",
+            "answer": "Our shortlist is HubSpot, Salesforce, Pipedrive, Zoho CRM and Freshsales. Prices need checking before purchase.",
+            "scope": "conversation"
+          }
+        ]
+      },
+      "slice": "comparison",
+      "split": "development",
+      "clusterId": "crm/november-2026",
+      "track": "frozen-conversation",
+      "labels": {
+        "status": "pending",
+        "requiredFacets": [
+          "Pin the preceding answer and preserve scope.",
+          "Use fresh official evidence and state missing coverage."
+        ],
+        "acceptableUncertainty": "State specific missing evidence or ambiguous reference. Historical answers are untrusted fixture inputs, never reference truth.",
+        "references": [],
+        "adjudicators": [],
+        "reconciled": false
+      }
+    },
+    {
+      "input": {
+        "id": "pg-since-tuesday",
+        "question": "Last Tuesday I asked you about Postgres hosting. Has any pricing changed since then?",
+        "asOf": "2026-11-16T12:00:00Z",
+        "tz": "Asia/Kolkata",
+        "history": [
+          {
+            "at": "2026-11-10T09:00:00Z",
+            "question": "Compare Postgres hosting for a small SaaS.",
+            "answer": "We compared Neon, Supabase and Render, with a preference for Neon if usage stays low.",
+            "scope": "memory"
+          }
+        ]
+      },
+      "slice": "volatile-fact",
+      "split": "development",
+      "clusterId": "pg/november-2026",
+      "track": "frozen-conversation",
+      "labels": {
+        "status": "pending",
+        "requiredFacets": [
+          "Resolve the dated hosting discussion.",
+          "Compare applicable price units, minimums and billing terms."
+        ],
+        "acceptableUncertainty": "State specific missing evidence or ambiguous reference. Historical answers are untrusted fixture inputs, never reference truth.",
+        "references": [],
+        "adjudicators": [],
+        "reconciled": false
+      }
+    },
+    {
+      "input": {
+        "id": "dated-recall-and-check",
+        "question": "What did I ask you on 3 November? Is your answer still correct today?",
+        "asOf": "2026-11-16T12:00:00Z",
+        "tz": "Asia/Kolkata",
+        "history": [
+          {
+            "at": "2026-11-03T10:00:00Z",
+            "question": "What does the Acme Pro plan cost?",
+            "answer": "Acme Pro costs $19 per user per month billed annually, with a five-seat minimum. This is a synthetic prior answer to verify.",
+            "scope": "memory"
+          }
+        ]
+      },
+      "slice": "conversation-recall",
+      "split": "development",
+      "clusterId": "dated-recall-and-check/november-2026",
+      "track": "frozen-conversation",
+      "labels": {
+        "status": "pending",
+        "requiredFacets": [
+          "Recover the dated question and historical answer.",
+          "Treat the old price as a claim requiring current evidence."
+        ],
+        "acceptableUncertainty": "State specific missing evidence or ambiguous reference. Historical answers are untrusted fixture inputs, never reference truth.",
+        "references": [],
+        "adjudicators": [],
+        "reconciled": false
+      }
+    },
+    {
+      "input": {
+        "id": "missing-dated-memory",
+        "question": "What did I ask you on 3 November? Is your answer still correct today? Please check the saved conversation first.",
+        "asOf": "2026-11-16T12:00:00Z",
+        "tz": "Asia/Kolkata",
+        "history": []
+      },
+      "slice": "conversation-recall",
+      "split": "development",
+      "clusterId": "missing-dated-memory/november-2026",
+      "track": "frozen-conversation",
+      "labels": {
+        "status": "pending",
+        "requiredFacets": [
+          "State that no matching conversation exists.",
+          "Do not invent prior questions or perform a random topic search."
+        ],
+        "acceptableUncertainty": "State specific missing evidence or ambiguous reference. Historical answers are untrusted fixture inputs, never reference truth.",
+        "references": [],
+        "adjudicators": [],
+        "reconciled": false
+      }
+    },
+    {
+      "input": {
+        "id": "reference-paraphrase",
+        "question": "Can you substantiate what you just said using reliable sources?",
+        "asOf": "2026-11-16T12:00:00Z",
+        "tz": "Asia/Kolkata",
+        "history": [
+          {
+            "at": "2026-11-03T10:00:00Z",
+            "question": "What does the Acme Pro plan cost?",
+            "answer": "Acme Pro costs $19 per user per month billed annually, with a five-seat minimum. This is a synthetic prior answer to verify.",
+            "scope": "conversation"
+          }
+        ]
+      },
+      "slice": "conversation-recall",
+      "split": "development",
+      "clusterId": "reference-paraphrase/november-2026",
+      "track": "frozen-conversation",
+      "labels": {
+        "status": "pending",
+        "requiredFacets": [
+          "Anchor to the current conversation.",
+          "Verify all material price terms."
+        ],
+        "acceptableUncertainty": "State specific missing evidence or ambiguous reference. Historical answers are untrusted fixture inputs, never reference truth.",
+        "references": [],
+        "adjudicators": [],
+        "reconciled": false
+      }
+    },
+    {
+      "input": {
+        "id": "reference-short",
+        "question": "Is that still true?",
+        "asOf": "2026-11-16T12:00:00Z",
+        "tz": "Asia/Kolkata",
+        "history": [
+          {
+            "at": "2026-11-03T10:00:00Z",
+            "question": "What does the Acme Pro plan cost?",
+            "answer": "Acme Pro costs $19 per user per month billed annually, with a five-seat minimum. This is a synthetic prior answer to verify.",
+            "scope": "conversation"
+          }
+        ]
+      },
+      "slice": "conversation-recall",
+      "split": "development",
+      "clusterId": "reference-short/november-2026",
+      "track": "frozen-conversation",
+      "labels": {
+        "status": "pending",
+        "requiredFacets": [
+          "Resolve that to the immediately preceding answer.",
+          "Do not leak or substitute unrelated memory."
+        ],
+        "acceptableUncertainty": "State specific missing evidence or ambiguous reference. Historical answers are untrusted fixture inputs, never reference truth.",
+        "references": [],
+        "adjudicators": [],
+        "reconciled": false
+      }
+    },
+    {
+      "input": {
+        "id": "reference-without-history",
+        "question": "Is that still true now?",
+        "asOf": "2026-11-16T12:00:00Z",
+        "tz": "Asia/Kolkata",
+        "history": []
+      },
+      "slice": "insufficient-evidence",
+      "split": "development",
+      "clusterId": "reference-without-history/november-2026",
+      "track": "frozen-conversation",
+      "labels": {
+        "status": "pending",
+        "requiredFacets": [
+          "Ask which claim should be checked.",
+          "Do not answer from an unrelated remembered topic."
+        ],
+        "acceptableUncertainty": "State specific missing evidence or ambiguous reference. Historical answers are untrusted fixture inputs, never reference truth.",
+        "references": [],
+        "adjudicators": [],
+        "reconciled": false
+      }
+    },
+    {
+      "input": {
+        "id": "reference-other-chat",
+        "question": "Please verify your last answer.",
+        "asOf": "2026-11-16T12:00:00Z",
+        "tz": "Asia/Kolkata",
+        "history": [
+          {
+            "at": "2026-11-03T10:00:00Z",
+            "question": "What does the Acme Pro plan cost?",
+            "answer": "Acme Pro costs $19 per user per month billed annually, with a five-seat minimum. This is a synthetic prior answer to verify.",
+            "scope": "memory"
+          }
+        ]
+      },
+      "slice": "conversation-recall",
+      "split": "development",
+      "clusterId": "reference-other-chat/november-2026",
+      "track": "frozen-conversation",
+      "labels": {
+        "status": "pending",
+        "requiredFacets": [
+          "Do not use another conversation as this answer\u2019s antecedent.",
+          "Ask for the missing reference."
+        ],
+        "acceptableUncertainty": "State specific missing evidence or ambiguous reference. Historical answers are untrusted fixture inputs, never reference truth.",
+        "references": [],
+        "adjudicators": [],
+        "reconciled": false
+      }
+    },
+    {
+      "input": {
+        "id": "new-subject",
+        "question": "Verify the current PostgreSQL stable version.",
+        "asOf": "2026-11-16T12:00:00Z",
+        "tz": "Asia/Kolkata",
+        "history": [
+          {
+            "at": "2026-11-09T10:00:00Z",
+            "question": "Shortlist five CRMs for a 20-person sales team.",
+            "answer": "Our shortlist is HubSpot, Salesforce, Pipedrive, Zoho CRM and Freshsales. Prices need checking before purchase.",
+            "scope": "conversation"
+          }
+        ]
+      },
+      "slice": "simple-fact",
+      "split": "development",
+      "clusterId": "new-subject/november-2026",
+      "track": "frozen-conversation",
+      "labels": {
+        "status": "pending",
+        "requiredFacets": [
+          "Answer the newly named PostgreSQL question.",
+          "Do not re-check the CRM shortlist."
+        ],
+        "acceptableUncertainty": "State specific missing evidence or ambiguous reference. Historical answers are untrusted fixture inputs, never reference truth.",
+        "references": [],
+        "adjudicators": [],
+        "reconciled": false
+      }
+    },
+    {
+      "input": {
+        "id": "direct-url",
+        "question": "Verify the current price at https://example.com/pricing.",
+        "asOf": "2026-11-16T12:00:00Z",
+        "tz": "Asia/Kolkata",
+        "history": [
+          {
+            "at": "2026-11-10T09:00:00Z",
+            "question": "Compare Postgres hosting for a small SaaS.",
+            "answer": "We compared Neon, Supabase and Render, with a preference for Neon if usage stays low.",
+            "scope": "conversation"
+          }
+        ]
+      },
+      "slice": "direct-source",
+      "split": "development",
+      "clusterId": "direct-url/november-2026",
+      "track": "frozen-conversation",
+      "labels": {
+        "status": "pending",
+        "requiredFacets": [
+          "Read the supplied public URL with current evidence.",
+          "Do not treat hosting history as the target."
+        ],
+        "acceptableUncertainty": "State specific missing evidence or ambiguous reference. Historical answers are untrusted fixture inputs, never reference truth.",
+        "references": [],
+        "adjudicators": [],
+        "reconciled": false
+      }
+    },
+    {
+      "input": {
+        "id": "quoted-transformation",
+        "question": "Translate into French: Is your previous answer still correct?",
+        "asOf": "2026-11-16T12:00:00Z",
+        "tz": "Asia/Kolkata",
+        "history": [
+          {
+            "at": "2026-11-03T10:00:00Z",
+            "question": "What does the Acme Pro plan cost?",
+            "answer": "Acme Pro costs $19 per user per month billed annually, with a five-seat minimum. This is a synthetic prior answer to verify.",
+            "scope": "conversation"
+          }
+        ]
+      },
+      "slice": "adversarial-multilingual",
+      "split": "development",
+      "clusterId": "quoted-transformation/november-2026",
+      "track": "frozen-conversation",
+      "labels": {
+        "status": "pending",
+        "requiredFacets": [
+          "Translate the quoted text without unnecessary research.",
+          "Do not treat the quoted instruction as a re-check."
+        ],
+        "acceptableUncertainty": "State specific missing evidence or ambiguous reference. Historical answers are untrusted fixture inputs, never reference truth.",
+        "references": [],
+        "adjudicators": [],
+        "reconciled": false
+      }
+    },
+    {
+      "input": {
+        "id": "publication-versus-launch",
+        "question": "Your previous answer used November 12 as the launch date. Check whether that is publication date or event date.",
+        "asOf": "2026-11-16T12:00:00Z",
+        "tz": "Asia/Kolkata",
+        "history": [
+          {
+            "at": "2026-11-15T10:00:00Z",
+            "question": "Summarize this week\u2019s AI announcements.",
+            "answer": "A release post published November 12 says the product launched November 9. Availability was a limited preview. This is a synthetic prior answer to verify.",
+            "scope": "conversation"
+          }
+        ]
+      },
+      "slice": "historical",
+      "split": "development",
+      "clusterId": "publication-versus-launch/november-2026",
+      "track": "frozen-conversation",
+      "labels": {
+        "status": "pending",
+        "requiredFacets": [
+          "Distinguish publication from actual launch date.",
+          "Correct only facts established by source passages."
+        ],
+        "acceptableUncertainty": "State specific missing evidence or ambiguous reference. Historical answers are untrusted fixture inputs, never reference truth.",
+        "references": [],
+        "adjudicators": [],
+        "reconciled": false
+      }
+    },
+    {
+      "input": {
+        "id": "asof-availability",
+        "question": "Re-check your previous answer as of 10 November 2026.",
+        "asOf": "2026-11-10T12:00:00Z",
+        "tz": "Asia/Kolkata",
+        "history": [
+          {
+            "at": "2026-11-15T10:00:00Z",
+            "question": "Summarize this week\u2019s AI announcements.",
+            "answer": "A release post published November 12 says the product launched November 9. Availability was a limited preview. This is a synthetic prior answer to verify.",
+            "scope": "conversation"
+          }
+        ]
+      },
+      "slice": "historical",
+      "split": "development",
+      "clusterId": "asof-availability/november-2026",
+      "track": "frozen-conversation",
+      "labels": {
+        "status": "pending",
+        "requiredFacets": [
+          "Use event time at the selected historical viewpoint.",
+          "Do not infer general availability from a limited preview."
+        ],
+        "acceptableUncertainty": "State specific missing evidence or ambiguous reference. Historical answers are untrusted fixture inputs, never reference truth.",
+        "references": [],
+        "adjudicators": [],
+        "reconciled": false
+      }
+    },
+    {
+      "input": {
+        "id": "annual-monthly",
+        "question": "Verify your previous answer, including billing term and minimum seats.",
+        "asOf": "2026-11-16T12:00:00Z",
+        "tz": "Asia/Kolkata",
+        "history": [
+          {
+            "at": "2026-11-03T10:00:00Z",
+            "question": "What does the Acme Pro plan cost?",
+            "answer": "Acme Pro costs $19 per user per month billed annually, with a five-seat minimum. This is a synthetic prior answer to verify.",
+            "scope": "conversation"
+          }
+        ]
+      },
+      "slice": "volatile-fact",
+      "split": "development",
+      "clusterId": "annual-monthly/november-2026",
+      "track": "frozen-conversation",
+      "labels": {
+        "status": "pending",
+        "requiredFacets": [
+          "Separate annual per-seat rate from monthly billing.",
+          "Include the minimum commitment; do not present seat price as team total."
+        ],
+        "acceptableUncertainty": "State specific missing evidence or ambiguous reference. Historical answers are untrusted fixture inputs, never reference truth.",
+        "references": [],
+        "adjudicators": [],
+        "reconciled": false
+      }
+    },
+    {
+      "input": {
+        "id": "currency-region",
+        "question": "Re-check your previous answer for India, including currency and tax.",
+        "asOf": "2026-11-16T12:00:00Z",
+        "tz": "Asia/Kolkata",
+        "history": [
+          {
+            "at": "2026-11-03T10:00:00Z",
+            "question": "What does the Acme Pro plan cost?",
+            "answer": "Acme Pro costs $19 per user per month billed annually, with a five-seat minimum. This is a synthetic prior answer to verify.",
+            "scope": "conversation"
+          }
+        ]
+      },
+      "slice": "volatile-fact",
+      "split": "development",
+      "clusterId": "currency-region/november-2026",
+      "track": "frozen-conversation",
+      "labels": {
+        "status": "pending",
+        "requiredFacets": [
+          "Check regional pricing and currency explicitly.",
+          "Do not silently convert or assume tax inclusion."
+        ],
+        "acceptableUncertainty": "State specific missing evidence or ambiguous reference. Historical answers are untrusted fixture inputs, never reference truth.",
+        "references": [],
+        "adjudicators": [],
+        "reconciled": false
+      }
+    },
+    {
+      "input": {
+        "id": "preview-versus-general",
+        "question": "Check your previous answer: does announced mean generally available?",
+        "asOf": "2026-11-16T12:00:00Z",
+        "tz": "Asia/Kolkata",
+        "history": [
+          {
+            "at": "2026-11-15T10:00:00Z",
+            "question": "Summarize this week\u2019s AI announcements.",
+            "answer": "A release post published November 12 says the product launched November 9. Availability was a limited preview. This is a synthetic prior answer to verify.",
+            "scope": "conversation"
+          }
+        ]
+      },
+      "slice": "volatile-fact",
+      "split": "development",
+      "clusterId": "preview-versus-general/november-2026",
+      "track": "frozen-conversation",
+      "labels": {
+        "status": "pending",
+        "requiredFacets": [
+          "Distinguish announcement, preview access and general availability.",
+          "Do not infer availability beyond source scope."
+        ],
+        "acceptableUncertainty": "State specific missing evidence or ambiguous reference. Historical answers are untrusted fixture inputs, never reference truth.",
+        "references": [],
+        "adjudicators": [],
+        "reconciled": false
+      }
+    },
+    {
+      "input": {
+        "id": "partial-source-failure",
+        "question": "Verify your earlier CRM recommendations; if one source is unavailable, show what you can establish for the others.",
+        "asOf": "2026-11-16T12:00:00Z",
+        "tz": "Asia/Kolkata",
+        "history": [
+          {
+            "at": "2026-11-09T10:00:00Z",
+            "question": "Shortlist five CRMs for a 20-person sales team.",
+            "answer": "Our shortlist is HubSpot, Salesforce, Pipedrive, Zoho CRM and Freshsales. Prices need checking before purchase.",
+            "scope": "conversation"
+          }
+        ]
+      },
+      "slice": "insufficient-evidence",
+      "split": "development",
+      "clusterId": "crm/november-2026",
+      "track": "injected-failure",
+      "labels": {
+        "status": "pending",
+        "requiredFacets": [
+          "Keep independently approved findings.",
+          "Identify unavailable evidence without marking every claim verified."
+        ],
+        "acceptableUncertainty": "State specific missing evidence or ambiguous reference. Historical answers are untrusted fixture inputs, never reference truth.",
+        "references": [],
+        "adjudicators": [],
+        "reconciled": false
+      }
+    },
+    {
+      "input": {
+        "id": "review-timeout",
+        "question": "Re-check your previous answer. If verification cannot finish, distinguish unfinished checks from disproven claims.",
+        "asOf": "2026-11-16T12:00:00Z",
+        "tz": "Asia/Kolkata",
+        "history": [
+          {
+            "at": "2026-11-03T10:00:00Z",
+            "question": "What does the Acme Pro plan cost?",
+            "answer": "Acme Pro costs $19 per user per month billed annually, with a five-seat minimum. This is a synthetic prior answer to verify.",
+            "scope": "conversation"
+          }
+        ]
+      },
+      "slice": "insufficient-evidence",
+      "split": "development",
+      "clusterId": "review-timeout/november-2026",
+      "track": "injected-failure",
+      "labels": {
+        "status": "pending",
+        "requiredFacets": [
+          "Do not equate timeout with factual contradiction.",
+          "Preserve only independently validated claims and offer targeted retry."
+        ],
+        "acceptableUncertainty": "State specific missing evidence or ambiguous reference. Historical answers are untrusted fixture inputs, never reference truth.",
+        "references": [],
+        "adjudicators": [],
+        "reconciled": false
+      }
+    }
+  ]
+}

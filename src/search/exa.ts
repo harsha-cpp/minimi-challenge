@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import type { SearchHit, SearchProvider } from "./types.ts";
 import { PROFILES, RETRIEVAL_POLICY_VERSION } from "./profiles.ts";
+import { FULL_DOCUMENT_CHAR_LIMIT, selectPassages } from "./passages.ts";
 import { recordStage } from "../runtime/telemetry.ts";
 import { currentModelContext } from "../llm/gateway.ts";
 import { defaultProviderSpending, ProviderBudgetError, type ProviderSpendingPolicy } from "../runtime/provider-spending.ts";
@@ -46,7 +47,7 @@ export function createExaSearch(apiKey: string, options: ExaOptions = {}): Searc
         ? { snapshotAsOf: query.asOf.toISOString() }
         : query.mode === "lite" ? {} : { maxAgeHours: query.freshness === "fresh" ? 0 : 24 };
       const contents = {
-        ...(query.content === "full" ? { text: { maxCharacters: excerptChars } } : { highlights: { maxCharacters: excerptChars, ...(query.urls ? { query: query.query } : {}) } }),
+        ...(query.content === "full" ? { text: { maxCharacters: FULL_DOCUMENT_CHAR_LIMIT } } : { highlights: { maxCharacters: excerptChars, ...(query.urls ? { query: query.query } : {}) } }),
         ...freshness,
       };
       const body = query.urls ? { ids: query.urls, ...contents } : {
@@ -162,7 +163,10 @@ export function createExaSearch(apiKey: string, options: ExaOptions = {}): Searc
         if (query.asOf && publishedDate && publishedDate > query.asOf.toISOString().slice(0, 10)) continue;
         if (query.asOf && published && published.length > 10 && Date.parse(published) > query.asOf.getTime()) continue;
         const highlights = Array.isArray(result.highlights) ? result.highlights.filter((x): x is string => typeof x === "string") : [];
-        const text = (query.content === "full" ? string(result.text) ?? "" : highlights.length ? highlights.join(" … ") : string(result.text) ?? "").replaceAll("\0", "").slice(0, excerptChars).trim();
+        const boundedDocument = (string(result.text) ?? "").slice(0, FULL_DOCUMENT_CHAR_LIMIT);
+        const selected = query.content === "full" ? selectPassages(boundedDocument, query.query, excerptChars,
+          { discardTrailingParagraph: boundedDocument.length >= FULL_DOCUMENT_CHAR_LIMIT }) : undefined;
+        const text = selected ? selected.text : (highlights.length ? highlights.join(" … ") : string(result.text) ?? "").replaceAll("\0", "").slice(0, excerptChars).trim();
         if (!text) continue;
         seen.add(url);
         const providerStatus = (Array.isArray(data.statuses) ? data.statuses : []).find(item => [result.id, result.url].includes(object(item).id));
@@ -177,6 +181,7 @@ export function createExaSearch(apiKey: string, options: ExaOptions = {}): Searc
             acquisition: acquisition === "live" || acquisition === "cached" ? acquisition : "unknown",
             contentFetchedAt, ageStatus: contentFetchedAt ? "known" : "unknown" },
           retrieval: { profile, mode: query.mode ?? "auto", content: query.content ?? "highlights", policyVersion: query.policyVersion ?? RETRIEVAL_POLICY_VERSION,
+            ...(selected ? { passageSelection: { selection: selected.selection, receivedCharacters: selected.receivedCharacters, omittedCharacters: selected.omittedCharacters, requestedCharacters: FULL_DOCUMENT_CHAR_LIMIT, acquisitionMayBeTruncated: true, boundedDocumentHash: createHash("sha256").update(boundedDocument).digest("hex") } } : {}),
             ...(typeof providerCost === "number" && Number.isFinite(providerCost) && providerCost >= 0 ? { providerCostDollars: providerCost, providerCostScope: "request" as const } : {}) },
           requestId: string(data.requestId) ?? response.headers.get("x-request-id") ?? undefined,
           contentHash: createHash("sha256").update(text).digest("hex"),

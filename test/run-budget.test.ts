@@ -73,7 +73,8 @@ test("research deadline reserve can finish as explicitly unverified without anot
     await h.run();
     assert.deepEqual(h.started, ["synthesis"]); assert.equal(h.searches, 0);
     assert.equal(h.events.at(-1)?.type, "done");
-    assert.match(h.store.episode(1)!.answer, /couldn't verify/); assert.doesNotMatch(h.store.episode(1)!.answer, /\$25/);
+    assert.match(h.store.episode(1)!.answer, /remain unverified/); assert.doesNotMatch(h.store.episode(1)!.answer, /\$25/);
+    assert.equal((h.store.episode(1)!.execution!.reviewFailure as { reason: string }).reason, "insufficient_evidence");
     assert.equal(h.store.episode(1)!.quality, "explicitly_unverified");
     assert.equal(h.traces[0]!.providerStarted, false); assert.equal(h.traces[0]!.outcome, "deadline");
   } finally { h.store.close(); }

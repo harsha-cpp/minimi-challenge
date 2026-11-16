@@ -47,6 +47,12 @@ export class QuestionStore implements ClarificationPort {
     const saved = this.decode(row);
     return { ...saved.card, ...(saved.selection ? { selection: saved.selection } : {}) };
   }
+  pendingById(id: string, ownerId = "local"): ClarificationCard | null {
+    const row = this.db.prepare("SELECT * FROM clarification_questions WHERE id=? AND owner_id=? AND episode_id IS NULL AND expires_at>=?").get(id, ownerId, Date.now());
+    if (!row) return null;
+    const saved = this.decode(row);
+    return { ...saved.card, ...(saved.selection ? { selection: saved.selection } : {}) };
+  }
   begin(id: string, sessionId: string, selection: ClarificationSelection, ownerId = "local"): SavedQuestion {
     const row = this.db.prepare("SELECT * FROM clarification_questions WHERE id = ? AND session_id = ? AND owner_id = ? AND expires_at >= ?").get(id, sessionId, ownerId, Date.now());
     if (!row) throw new QuestionConflict("This question has expired or belongs to another conversation. Ask your question again.", "clarification_unavailable");

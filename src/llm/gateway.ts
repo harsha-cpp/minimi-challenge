@@ -271,6 +271,8 @@ export interface ModelContext {
   deadlineReserveMs?: number;
   budget?: ModelBudget;
   onCall?: (trace: ModelCallTrace) => void;
+  /** Persist conservative in-flight usage before a provider can receive the request. */
+  beforeProvider?: () => void;
 }
 const context = new AsyncLocalStorage<ModelContext>();
 export function runWithModelContext<T>(value: ModelContext, fn: () => T): T { return context.run(value, fn); }
@@ -300,6 +302,7 @@ export function createModelGateway(llm: Llm, options: { pool: AdmissionPool; def
       acquiredAt = performance.now();
       request.signal?.throwIfAborted();
       quotaReservation = options.quota?.reserve(inputTokens + cap, { completion: purpose === "synthesis" || purpose === "review" || purpose === "repair" });
+      active?.beforeProvider?.();
       providerStarted = true;
       const remainingMs = active?.deadlineAt === undefined ? undefined : Math.max(1, active.deadlineAt - Date.now());
       const deadlineSignal = remainingMs === undefined ? undefined : AbortSignal.timeout(remainingMs);

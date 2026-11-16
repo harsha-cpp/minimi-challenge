@@ -8,7 +8,7 @@ import { PILOT_CASES, PILOT_REFERENCES, pilotLabelQueue } from "../eval/pilot/ca
 import { searchAllowance } from "../eval/pilot/budget.ts";
 import { generationInput } from "../eval/benchmark/score.ts";
 import { exactTextHash, validateDataset } from "../eval/quality/protocol.ts";
-import { retrievalProfile, withProfile } from "../src/search/profiles.ts";
+import { retrievalProfile, withProfile, RETRIEVAL_POLICY_VERSION } from "../src/search/profiles.ts";
 
 test("pilot keeps official captured excerpts and pending human checks separate from generation", () => {
   assert.equal(PILOT_CASES.length, 9);
@@ -56,7 +56,7 @@ test("baseline and candidate default profile policies can be compared without pr
   await withProfile(provider, profile, false).search({ query: "SI base units" });
   await withProfile(provider, profile, true).search({ query: "SI base units" });
   assert.deepEqual(observed[0], { query: "SI base units" });
-  assert.deepEqual(observed[1], { query: "SI base units", profile: "complete-list", policyVersion: "profiles-v1" });
+  assert.deepEqual(observed[1], { query: "SI base units", profile: "complete-list", policyVersion: RETRIEVAL_POLICY_VERSION });
 });
 
 test("pilot preparation starts no providers or ports and exports bounded structured run commands", () => {
