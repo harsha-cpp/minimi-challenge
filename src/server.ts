@@ -217,7 +217,7 @@ export function createApplication(options: { config?: Config; store?: MemoryStor
           const questionPort = { create: (input: Parameters<QuestionStore["create"]>[0]) => questions.create({ ...input, ownerId }) };
           const policy = turnPolicy(message, effectiveMode === "era");
           const requestDeps: Deps = { ...deps, store, clock: { now: () => new Date(effectiveViewpoint ?? Date.now()), simulated: effectiveMode === "era" },
-            ...(responseMode === "fast" ? { llm: deps.fastLlm! } : {}),
+            ...(responseMode === "fast" ? { llm: deps.fastLlm!, repairLlm: deps.llm } : {}),
             questions: questionPort, search: withProfile(deps.search, retrievalProfile(message, { simulated: effectiveMode === "era", verify: policy.requireVerificationEvidence }), config.retrievalProfiles) };
           await runWithModelContext({ ownerId, turnId: turn!.id, budget: budget(), deadlineAt, deadlineReserveMs: Math.min(12_000, Math.floor(config.limits.turnTimeoutMs / 3)) },
             () => runTurn(requestDeps, { ownerId, turnId: turn!.id, sessionId, message, tz, responseMode, asOf: effectiveViewpoint === null ? undefined : new Date(effectiveViewpoint), clarification,

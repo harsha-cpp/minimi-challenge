@@ -37,6 +37,7 @@ export interface Deps {
   enricher: Pick<Enricher, "schedule">;
 
   verifier?: Pick<Llm, "json">;
+  repairLlm?: Pick<Llm, "stream">;
 
   questions?: ClarificationPort;
 
@@ -360,7 +361,7 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
           try {
             modelCalls++;
             const repairTimeout = deps.repairTimeoutMs ?? 15_000;
-            const repair = await abortable(llm.stream({ messages: repairMessages, tools: [], toolChoice: "none", purpose: "repair",
+            const repair = await abortable((deps.repairLlm ?? llm).stream({ messages: repairMessages, tools: [], toolChoice: "none", purpose: "repair",
               ...(fast ? { maxOutputTokens: FAST_LIMITS.outputTokens } : {}),
               signal: AbortSignal.any([signal, AbortSignal.timeout(repairTimeout)]), onText() {} }), signal, repairTimeout);
             signal.throwIfAborted();

@@ -45,6 +45,41 @@ test("Fast bounds research to four lookups in one round and retains the full ver
   } finally { store.close(); }
 });
 
+for (const approved of [true, false]) {
+  test(`HTTP Fast escalates rejected drafts to the main model and requires approval=${approved}`, async () => {
+    const store = new MemoryStore(":memory:");
+    let fastCalls = 0, repairs = 0, reviews = 0;
+    const rejected = { status: "needs_revision", issues: [{ code: "unsupported_claim", detail: "The price is incorrect." }] };
+    const llm: Llm = {
+      json: async () => ++reviews === 1 || !approved ? rejected : { status: "approved", issues: [], quality: "supported",
+        claimChecks: [{ claim: "Acme costs $25 monthly", sourceNumbers: [1], supported: true, applicable: true }] },
+      stream: async request => {
+        repairs++;
+        assert.equal(request.purpose, "repair");
+        assert.equal(request.toolChoice, "none");
+        assert.equal(request.maxOutputTokens, FAST_LIMITS.outputTokens);
+        return { text: answer, toolCalls: [] };
+      },
+    };
+    const fastLlm: Llm = { json: async () => { throw new Error("Fast must not review"); }, stream: async request => {
+      assert.notEqual(request.purpose, "repair");
+      return ++fastCalls === 1 ? { text: "", toolCalls: [lookup(1)] } : { text: "Acme costs $50 monthly [1].", toolCalls: [] };
+    } };
+    const app = createApplication({ config: settings(), store, deps: { llm, fastLlm, store, clock: { now: () => now, simulated: false },
+      search: { search: async () => [hit] }, enricher: { schedule() {} } } });
+    app.server.listen(0, "127.0.0.1"); await once(app.server, "listening");
+    const address = app.server.address(); assert.ok(address && typeof address !== "string");
+    try {
+      const events = await decode(await fetch(`http://127.0.0.1:${address.port}/api/chat`, { method: "POST",
+        headers: { "content-type": "application/json" }, body: JSON.stringify({ sessionId: "repair", message: "Verify Acme's current price", tz: "UTC", mode: "live", responseMode: "fast" }) }));
+      const done = events.find(e => e.type === "done"); assert.ok(done);
+      assert.equal(fastCalls, 2); assert.equal(repairs, 1); assert.equal(reviews, 2);
+      assert.equal(done.quality, approved ? "supported" : "explicitly_unverified");
+      assert.equal(store.episode(done.episodeId)!.answer === answer, approved);
+    } finally { await app.shutdown(); }
+  });
+}
+
 for (const recovers of [true, false]) {
   test(`Fast corrects invalid tool arguments once, recovery=${recovers}`, async () => {
     const store = new MemoryStore(":memory:");

@@ -18,7 +18,7 @@ These questions need an existing conversation history. A fresh installation star
 
 The date picker also supports **era simulation**: answer from a selected historical perspective while researching the live web. Modern sources can establish historical events, but later outcomes should not be presented as knowledge available in that era. This is a reconstructed perspective, not a frozen historical internet.
 
-Choose **Standard** for fuller research, or **Fast** for a shorter answer using the smaller configured model. Fast uses one research round, at most four lookups, a ten-second deadline per lookup, and a smaller output allowance. Explicit verification and factual era answers retain the main model's evidence review, so those checks can still take longer. Fast is a research-depth tradeoff, not a guaranteed response time or a provider priority tier.
+Choose **Standard** for fuller research, or **Fast** for a shorter answer using the smaller configured model. Fast uses one research round, at most four lookups, a ten-second deadline per lookup, and a smaller output allowance. Explicit verification and factual era answers retain the main model's evidence review; rejected drafts also use the main model for correction and must pass review again. Those checks can still take longer. Fast is a research-depth tradeoff, not a guaranteed response time or a provider priority tier.
 
 ## Architecture
 
