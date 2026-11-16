@@ -90,3 +90,38 @@ test("explicit re-check selects the clicked answer beyond the recent history win
     assert.equal((store.episode(done.episodeId)!.execution!.requestContext as { anchorEpisodeId: number }).anchorEpisodeId, original);
   } finally { store.close(); }
 });
+
+test("explicit historical selection verifies only that record inside the current chat", async () => {
+  const store = new MemoryStore(":memory:");
+  const original = store.saveEpisode({ ownerId: "alice", sessionId: "old", askedAt: now.getTime() - 1000, tz: "UTC",
+    question: "What is Acme's price?", answer: "Acme costs $25 monthly [1].", sources: [{ n: 1, url: "https://example.com/pricing", title: "Acme pricing", text: "STALE SOURCE MUST NOT BECOME FRESH EVIDENCE" }] });
+  for (const sessionId of ["old", "current"]) store.saveEpisode({ ownerId: "alice", sessionId, askedAt: now.getTime(), tz: "UTC", question: "UNRELATED PRIVATE SUBJECT", answer: "UNRELATED PRIVATE ANSWER", sources: [] });
+  let searches = 0;
+  const llm: Llm = {
+    stream: async request => {
+      assert.ok(!request.tools?.some(tool => tool.function.name === "ask_clarification"));
+      const text = JSON.stringify(request.messages);
+      assert.match(text, /Acme costs \$25 monthly/); assert.doesNotMatch(text, /UNRELATED PRIVATE|STALE SOURCE/);
+      return { text: "Acme costs $25 monthly [1].", toolCalls: [] };
+    },
+    json: async request => {
+      const { reference } = JSON.parse(request.user);
+      assert.equal(reference.episodeId, original); assert.equal(reference.sessionId, "old");
+      return { status: "approved", issues: [], quality: "supported", referenceCheck: { episodeId: original, answerHash: reference.answerHash, addressesTarget: true, coverage: "complete" },
+        claimChecks: [{ claim: "Acme costs $25 monthly.", sourceNumbers: [1], supported: true, applicable: true }] };
+    },
+  };
+  try {
+    const events: AgentEvent[] = [];
+    await runTurn({ store, llm, clock: { now: () => now, simulated: false }, enricher: { schedule() {} }, questions: { create() { throw new Error("Selected topic must remain pinned rather than start unbound clarification"); } },
+      search: { search: async () => { searches++; return [{ url: "https://example.com/pricing", title: "Acme pricing", text: "Acme costs $25 monthly." }]; } } },
+    { ownerId: "alice", sessionId: "current", message: "Verify your earlier pricing recommendations.", memoryReferenceEpisodeId: original, tz: "UTC" }, event => events.push(event));
+    const done = events.find(event => event.type === "done"); assert.ok(done && done.type === "done", JSON.stringify(events));
+    const saved = store.episode(done.episodeId, "alice")!;
+    assert.equal(done.quality, "supported"); assert.ok(searches > 0);
+    assert.equal(saved.sessionId, "current"); assert.equal(saved.question, "Verify your earlier pricing recommendations."); assert.equal(saved.askedAt, now.getTime());
+    assert.equal(saved.execution!.memoryReferenceEpisodeId, original);
+    assert.equal((saved.execution!.requestContext as { referenceScope: string }).referenceScope, "selected_memory");
+    assert.equal(store.currentConversationHistory("old", 20, "alice").length, 2);
+  } finally { store.close(); }
+});

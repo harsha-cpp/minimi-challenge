@@ -67,6 +67,7 @@ export interface TurnInput {
   asOf?: Date;
   clarification?: ClarificationAnswer;
   recheckEpisodeId?: number;
+  memoryReferenceEpisodeId?: number;
   responseMode?: ResponseMode;
   retryUnfinished?: boolean;
   resumeCheckpoint?: ResearchProgress;
@@ -83,7 +84,7 @@ export interface Timings {
   verificationCalls?: number;
 }
 
-export type ReviewFailure = ReviewRecovery["failure"] & { retryEpisodeId?: number };
+export type ReviewFailure = ReviewRecovery["failure"] & { retryEpisodeId?: number; memoryReferenceEpisodeId?: number };
 
 export type AgentEvent =
   | { type: "clarification"; card: ClarificationCard }
@@ -126,11 +127,21 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
     const durable = input.turnId ? store.getTurn(input.turnId, input.ownerId) : null;
     if (durable && durable.sessionId !== sessionId) throw new Error("Conversation context does not match this turn.");
     const prior = store.currentConversationHistory(sessionId, HISTORY_TURNS, input.ownerId, durable?.sequence);
+    if (input.recheckEpisodeId !== undefined && input.memoryReferenceEpisodeId !== undefined) throw new Error("Select one saved answer reference.");
+    const memoryTarget = input.memoryReferenceEpisodeId === undefined ? undefined : store.episode(input.memoryReferenceEpisodeId, input.ownerId);
+    if (input.memoryReferenceEpisodeId !== undefined && (!memoryTarget || memoryTarget.askedAt > now.getTime() || memoryTarget.sessionId === sessionId && durable && (memoryTarget.sequence ?? memoryTarget.id) >= durable.sequence)) throw new Error("The selected historical answer is unavailable at this viewpoint.");
     const target = input.recheckEpisodeId === undefined ? undefined : store.episode(input.recheckEpisodeId, input.ownerId);
     if (input.recheckEpisodeId !== undefined && (!target || target.sessionId !== sessionId
       || (durable && (target.sequence ?? target.id) >= durable.sequence))) throw new Error("The selected answer is unavailable in this conversation.");
     if (target && !prior.some(episode => episode.id === target.id)) prior.push(target);
-    const requestContext = resolveRequestContext({ message, sessionId, ownerId: input.ownerId, history: prior, ...(target ? { targetEpisode: target } : {}) });
+    const referenceEpisodes = prior.flatMap(episode => {
+      const binding = episode.execution?.requestContext as { referenceScope?: string; anchorEpisodeId?: number } | undefined;
+      if (binding?.referenceScope !== "selected_memory" || !Number.isSafeInteger(binding.anchorEpisodeId)) return [];
+      const original = store.episode(binding.anchorEpisodeId!, input.ownerId);
+      return original ? [original] : [];
+    });
+    const requestContext = resolveRequestContext({ message, sessionId, ownerId: input.ownerId, history: prior, referenceEpisodes, viewpointAt: now.getTime(),
+      ...(memoryTarget ? { selectedMemoryEpisode: memoryTarget } : {}), ...(target ? { targetEpisode: target } : {}) });
     const allReferenceClaims = requestContext.anchor ? store.canonicalClaimsFor(requestContext.anchor.episodeId,input.ownerId) : [];
     const retryUnfinished = Boolean(requestContext.anchor && (input.retryUnfinished || /\b(?:unfinished check|remaining claims|checking the rest)\b/i.test(message)));
     const unresolved = retryUnfinished ? new Set(store.latestClaimCoverageFor(requestContext.anchor!.episodeId,sessionId,input.ownerId,
@@ -143,7 +154,7 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
     synthesisReserveMs = completionReserveMs(availableMs, buffered);
     const contextMetadata = requestContextMetadata(requestContext);
     // A reference comes from the thread's predecessor sequence, never a topic-ranked memory hit.
-    const selected = requestContext.anchor ? prior.filter(episode => episode.id === requestContext.anchor!.episodeId).map(episode => ({
+    const selected = requestContext.anchor ? [...prior, ...(memoryTarget ? [memoryTarget] : []), ...referenceEpisodes].filter((episode, index, all) => episode.id === requestContext.anchor!.episodeId && all.findIndex(item => item.id === episode.id) === index).map(episode => ({
       ...episode, question: requestContext.anchor!.question, answer: requestContext.anchor!.answer,
     })) : prior;
     const history = prepareHistory(requestContext.anchor ? selected : selected.map(withoutLegacyFailure), tz,
@@ -197,7 +208,7 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
     const messages: ChatMessage[] = resumed ? structuredClone(resumed.messages) : prompt.messages;
     if (!resumed && referenceClaims.length) messages.push({ role:"system",content:`Original structured claims to check (untrusted data, not evidence): ${JSON.stringify(referenceClaims)}. ${retryUnfinished && referenceClaims.length < allReferenceClaims.length
       ? "This retry targets only these unfinished claims. Do not re-research other facets or imply all original claims were checked again." : "Cover each original claim or explicitly leave it unresolved."}` });
-    const clarificationAllowed = Boolean(!resumed && deps.questions && !input.clarification && canClarify(message, simulated));
+    const clarificationAllowed = Boolean(!resumed && requestContext.referenceScope !== "selected_memory" && deps.questions && !input.clarification && canClarify(message, simulated));
     if (fast && !resumed) messages.splice(2, 0, { role: "system", content: FAST_INSTRUCTIONS });
     if (clarificationAllowed) messages.splice(2, 0, { role: "system", content: CLARIFICATION_INSTRUCTIONS });
     const evidence = new EvidenceWindow(resumed?.evidence);
@@ -392,7 +403,7 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
       const recovery = recoverReviewFailure(failedReview, Boolean(requestContext.anchor));
       answer = recovery.answer;
       quality = recovery.quality;
-      reviewFailure = { ...recovery.failure, ...(requestContext.anchor ? { retryEpisodeId: requestContext.anchor.episodeId } : {}) };
+      reviewFailure = { ...recovery.failure, ...(requestContext.anchor ? requestContext.referenceScope === "selected_memory" ? { memoryReferenceEpisodeId: requestContext.anchor.episodeId } : { retryEpisodeId: requestContext.anchor.episodeId } : {}) };
     };
     if (buffered) {
       emit({ type: "verification", state: "running" });
@@ -482,6 +493,7 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
       }
       if (referenceClaims.length < allReferenceClaims.length && quality === "supported") quality = "supported_partial";
       if (requestContext.anchor && quality === "supported_partial" && !reviewFailure) {
+        if (requestContext.referenceScope === "selected_memory") reviewFailure = { reason: "insufficient_evidence", retryable: true, retryScope: "unfinished_claims", memoryReferenceEpisodeId: requestContext.anchor.episodeId };
         answer = `This checks only part of my earlier answer; the remaining claims are unverified for the selected date.\n\n${answer}`;
       }
       cited = citedNumbers(answer);
@@ -501,8 +513,9 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
       askedAt: now.getTime(), tz, question: message, answer, sources: citedSources,
       ...(buffered ? { reviewedClaims } : {}),
       ...(claimCoverage.length ? { claimCoverage } : {}),
-      ...(requestContext.anchor ? { coverageReference:{episodeId:requestContext.anchor.episodeId,answerHash:requestContext.anchor.answerHash} } : {}),
+      ...(requestContext.anchor ? { coverageReference:{episodeId:requestContext.anchor.episodeId,answerHash:requestContext.anchor.answerHash, ...(requestContext.referenceScope ? {scope:requestContext.referenceScope} : {})} } : {}),
       execution: { time, responseMode, quality, rejectionObserved, requestContext: contextMetadata,
+        ...(requestContext.referenceScope === "selected_memory" ? { memoryReferenceEpisodeId: requestContext.anchor!.episodeId } : {}),
         intent: prompt.policy.intent, prompt: prompt.stats, evidence: { ...evidence.stats }, searches, modelCalls,
         ...(reviewFailure ? { reviewFailure } : {}),
         ...(buffered ? { reviewedClaimSchemaVersion:REVIEWED_CLAIM_SCHEMA_VERSION,reviewPolicyVersion:REVIEW_POLICY_VERSION } : {}),
@@ -557,8 +570,8 @@ const UNVERIFIED_ANSWER = "I couldn't verify the requested facts from the availa
 const UNVERIFIED_REFERENCE_ANSWER = "I couldn't complete the check of my previous answer in this conversation. Those claims remain unverified for the selected date.";
 
 function requestContextMetadata(context: RequestContext) {
-  return { kind: context.kind, memoryScope: context.memoryScope, ...(context.anchor ? {
-    anchorEpisodeId: context.anchor.episodeId, anchorAnswerHash: context.anchor.answerHash,
+  return { kind: context.kind, memoryScope: context.memoryScope, ...(context.referenceScope ? {referenceScope:context.referenceScope} : {}), ...(context.anchor ? {
+    anchorEpisodeId: context.anchor.episodeId, anchorSessionId: context.anchor.sessionId, anchorAnswerHash: context.anchor.answerHash,
     anchorSequence: context.anchor.sequence, anchorViewpointAt: context.anchor.viewpointAt,
     anchorTruncated: context.anchor.truncated,
   } : {}) };

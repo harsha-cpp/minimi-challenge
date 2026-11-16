@@ -19,6 +19,7 @@ export interface RequestContext {
   kind: "standalone" | "conversation_reference" | "missing_reference";
   memoryScope: "none" | "explicit_memory";
   anchor?: ConversationAnchor;
+  referenceScope?: "selected_memory";
 }
 export interface RequestContextInput {
   message: string;
@@ -28,6 +29,10 @@ export interface RequestContextInput {
   history: Episode[];
   /** Explicit UI selection, loaded from the owner-scoped store rather than supplied answer text. */
   targetEpisode?: Episode;
+  selectedMemoryEpisode?: Episode;
+  /** Owner-scoped records loaded only from persisted explicit selection bindings. */
+  referenceEpisodes?: Episode[];
+  viewpointAt?: number;
 }
 
 const object = (value: unknown): Record<string, unknown> | undefined => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
@@ -177,6 +182,13 @@ function anchorFor(episode: Episode, ownerId: string): ConversationAnchor | unde
 
 export function resolveRequestContext(input: RequestContextInput): RequestContext {
   const ownerId = input.ownerId ?? "local";
+  if (input.selectedMemoryEpisode) {
+    const target = input.selectedMemoryEpisode;
+    const anchor = (target.ownerId ?? "local") === ownerId && Number.isSafeInteger(target.id) && target.id > 0
+      && Number.isFinite(input.viewpointAt) && target.askedAt <= input.viewpointAt! ? anchorFor(target, ownerId) : undefined;
+    return anchor ? { kind: "conversation_reference", memoryScope: "none", referenceScope: "selected_memory", anchor }
+      : { kind: "missing_reference", memoryScope: "none" };
+  }
   if (input.targetEpisode) {
     const target = input.targetEpisode;
     const anchor = target.sessionId === input.sessionId && (target.ownerId ?? "local") === ownerId
@@ -199,17 +211,23 @@ export function resolveRequestContext(input: RequestContextInput): RequestContex
     byId.set(episode.id, episode);
     sequences.add(sequence(episode)!);
   }
+  const external = new Map((input.referenceEpisodes ?? []).filter(episode => (episode.ownerId ?? "local") === ownerId).map(episode => [episode.id, episode]));
+  const boundTarget = (context: Record<string, unknown>) => context.referenceScope === "selected_memory"
+    ? byId.get(context.anchorEpisodeId as number) ?? external.get(context.anchorEpisodeId as number)
+    : byId.get(context.anchorEpisodeId as number);
   const validBinding = (episode: Episode, visited = new Set<number>()): boolean => {
     if (visited.has(episode.id)) return false;
     visited.add(episode.id);
     const context = metadata(episode);
     if (context?.kind !== "conversation_reference" || !Number.isSafeInteger(context.anchorEpisodeId)
       || typeof context.anchorAnswerHash !== "string" || !/^[a-f\d]{64}$/i.test(context.anchorAnswerHash)) return false;
-    const target = byId.get(context.anchorEpisodeId as number);
-    if (!target || sequence(target)! >= sequence(episode)! || metadata(target)?.kind === "missing_reference"
+    const target = boundTarget(context);
+    const selected = context.referenceScope === "selected_memory";
+    if (!target || (selected ? context.anchorSessionId !== target.sessionId || target.askedAt > episode.askedAt || target.sessionId === episode.sessionId && sequence(target)! >= sequence(episode)!
+      : sequence(target)! >= sequence(episode)!) || metadata(target)?.kind === "missing_reference"
       || !anchorFor(target, ownerId) || hash(target.answer) !== context.anchorAnswerHash.toLowerCase()) return false;
     const targetKind = metadata(target)?.kind;
-    return targetKind === "standalone" || !(referenceForm(target.question) || targetKind === "conversation_reference") || validBinding(target, visited);
+    return selected || targetKind === "standalone" || !(referenceForm(target.question) || targetKind === "conversation_reference") || validBinding(target, visited);
   };
   for (let index = 0; index < history.length; index++) {
     const episode = history[index]!;
@@ -223,26 +241,30 @@ export function resolveRequestContext(input: RequestContextInput): RequestContex
     if (!legacyReference || context?.kind === "standalone" || context?.kind === "conversation_reference") {
       let subject = episode;
       const followed = new Set<number>();
+      let referenceScope: "selected_memory" | undefined;
       while (true) {
         const binding = metadata(subject);
         const recovery = object(subject.execution?.reviewFailure);
         const unfinished = (subject.quality === "supported_partial" || subject.execution?.quality === "supported_partial")
           && recovery?.retryScope === "unfinished_claims";
         if (unfinished && (binding?.kind !== "conversation_reference" || recovery.retryable !== true
-          || !Number.isSafeInteger(recovery.retryEpisodeId) || recovery.retryEpisodeId !== binding.anchorEpisodeId)) return missing;
+          || !Number.isSafeInteger(recovery.memoryReferenceEpisodeId ?? recovery.retryEpisodeId) || (recovery.memoryReferenceEpisodeId ?? recovery.retryEpisodeId) !== binding.anchorEpisodeId)) return missing;
         if (binding?.kind !== "conversation_reference"
           || !(unfinished || subject.quality === "explicitly_unverified" || subject.execution?.quality === "explicitly_unverified")) break;
         if (followed.has(subject.id)) return missing;
         followed.add(subject.id);
         // Unresolved prose and approved subsets of failed checks do not replace the original claim set.
         // The binding was validated above; follow that exact parent rather than an adjacent turn.
-        const parent = byId.get(binding.anchorEpisodeId as number);
+        const parent = boundTarget(binding);
+        if (binding.referenceScope === "selected_memory") referenceScope = "selected_memory";
         if (!parent) return missing;
         subject = parent;
+        if (referenceScope === "selected_memory") break;
       }
       const anchor = anchorFor(subject, ownerId);
+      if (anchor && referenceScope === "selected_memory" && Number.isFinite(input.viewpointAt) && anchor.viewpointAt > input.viewpointAt!) return missing;
       if (anchor && !matchesReferenceTopic(scope?.topic, anchor)) return { kind: "standalone", memoryScope: "none" };
-      return anchor ? { kind: "conversation_reference", memoryScope: "none", anchor } : missing;
+      return anchor ? { kind: "conversation_reference", memoryScope: "none", anchor, ...(referenceScope ? { referenceScope } : {}) } : missing;
     }
     // Legacy unbound follow-up prose may already contain cross-conversation contamination.
     // Follow only the actual same-conversation predecessor, never that prose or a topic/FTS match.

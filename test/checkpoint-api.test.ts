@@ -200,3 +200,43 @@ test("SIGKILL during synthesis preserves research and its in-flight allowance fo
     assert.equal(done.timings.modelCalls, 3); assert.equal(app.calls(), 1); assert.equal(app.searches(), 0);
   } finally { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); await app?.shutdown(); rmSync(dir, { recursive: true, force: true }); }
 });
+
+test("selected historical references reject foreign, future, ambiguous and ordinary cross-chat targets before providers", async () => {
+  const app = await start(":memory:", "fail");
+  try {
+    const save = (ownerId: string, askedAt = Date.now() - 5000) => app.store.saveEpisode({ ownerId, sessionId: "old", askedAt, tz: "UTC", question: "Acme pricing", answer: "Acme costs $25.", sources: [] });
+    const own = save("alice"), foreign = save("bob");
+    for (const [body, status] of [
+      [{ memoryReferenceEpisodeId: foreign }, 404], [{ memoryReferenceEpisodeId: 999999 }, 404],
+      [{ recheckEpisodeId: own }, 404], [{ memoryReferenceEpisodeId: own, recheckEpisodeId: own }, 400],
+      [{ memoryReferenceEpisodeId: "1" }, 400], [{ memoryReferenceEpisodeId: -1 }, 400],
+      [{ memoryReferenceEpisodeId: own, mode: "era", asOf: "2020-01-01T00:00:00Z" }, 400],
+    ] as const) assert.equal((await app.post({ ...question, ...body }, `invalid-${JSON.stringify(body)}`.replace(/[^a-zA-Z0-9_.:-]/g, ""))).status, status);
+    assert.equal(app.calls(), 0); assert.equal(app.searches(), 0);
+  } finally { await app.shutdown(); }
+});
+
+test("selected historical reference survives checkpoint resume and cannot be changed by retries", async () => {
+  const app = await start(":memory:", "fail");
+  try {
+    const save = (question: string) => app.store.saveEpisode({ ownerId: "alice", sessionId: "old", askedAt: Date.now() - 5000, tz: "UTC", question, answer: "Acme costs $25.", sources: [] });
+    const target = save("Acme pricing"), other = save("Other pricing");
+    const request = { ...question, message: "Verify your claims now.", memoryReferenceEpisodeId: target };
+    const response = await app.post(request, "selected"); const turnId = response.headers.get("x-turn-id")!;
+    assert.ok((await decode(response)).some(event => event.type === "error"));
+    const checkpoint = app.checkpoints.get(turnId, "alice"); assert.ok(checkpoint);
+    assert.equal(checkpoint.request.memoryReferenceEpisodeId, target);
+    assert.equal(checkpoint.request.sessionId, question.sessionId);
+    assert.equal((await app.post({ ...request, memoryReferenceEpisodeId: other }, "selected")).status, 409);
+    const before = app.calls();
+    assert.equal((await app.post({ resumeTurnId: turnId, memoryReferenceEpisodeId: other }, "changed-memory")).status, 409);
+    assert.equal((await app.post({ resumeTurnId: turnId, recheckEpisodeId: target }, "changed-kind")).status, 409);
+    assert.equal(app.calls(), before);
+    const resumed = await app.post({ resumeTurnId: turnId }, "resume-memory");
+    assert.equal(resumed.status, 200); await decode(resumed);
+    const resumedId = resumed.headers.get("x-turn-id")!;
+    assert.equal(app.checkpoints.get(resumedId, "alice")!.request.memoryReferenceEpisodeId, target);
+    assert.equal(app.store.getTurn(resumedId, "alice")!.sessionId, question.sessionId);
+    assert.equal(app.store.currentConversationHistory("old", 20, "alice").length, 2);
+  } finally { await app.shutdown(); }
+});

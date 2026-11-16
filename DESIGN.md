@@ -6,7 +6,7 @@
 
 ## How it works
 
-For “Last Tuesday I asked about Postgres hosting. Has pricing changed?”, code resolves Tuesday in the user's timezone and retrieves the relevant conversation. The earlier answer identifies claims to investigate; it never counts as current evidence. Missing or ambiguous history stays explicit. Other conversations enter context only through an explicit personal-memory request.
+For “Last Tuesday I asked about Postgres hosting. Has pricing changed?”, code resolves Tuesday in the user's timezone and retrieves the relevant conversation. The earlier answer identifies claims to investigate; it never counts as current evidence. Missing or ambiguous history stays explicit. Other conversations enter context only through an explicit personal-memory request or a selected saved answer. Selecting an answer starts an isolated verification run inside the current chat: the original question, date and visible transcript stay intact, while only the selected record enters model context.
 
 One TypeScript/Node service owns admission, dates, conversation boundaries, validation and persistence. The model proposes lookups and writes answers. Exa Search and Contents share one `web_search` tool. Independent lookups run concurrently. Long-document reads select whole, relevant paragraphs locally, with explicit omissions; admitted evidence stays bounded and deduplicated. Re-check pins the saved answer and reads its cited URLs fresh before broader research. An unchanged announcement page cannot establish an unchanged current price.
 

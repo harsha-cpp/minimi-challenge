@@ -364,3 +364,28 @@ test("bounded anchors hash the full immutable answer and never split a surrogate
   assert.equal(complete.truncated, false);
   assert.equal(complete.answerHash, hash(complete.answer));
 });
+
+test("explicit selected memory is owner and viewpoint scoped without granting ambient recall", () => {
+  const selected = episode(90, { sessionId: "old", sequence: 30 });
+  const input = { message: "Verify your claims now.", sessionId: "visible", history: [episode(22)], selectedMemoryEpisode: selected, viewpointAt: selected.askedAt };
+  const result = resolveRequestContext(input);
+  assert.equal(result.anchor?.episodeId, 90); assert.equal(result.referenceScope, "selected_memory"); assert.equal(result.memoryScope, "none");
+  assert.deepEqual(resolveRequestContext({ ...input, ownerId: "other" }), missing);
+  assert.deepEqual(resolveRequestContext({ ...input, viewpointAt: selected.askedAt - 1 }), missing);
+  assert.deepEqual(resolveRequestContext({ ...input, selectedMemoryEpisode: undefined, targetEpisode: selected }), missing);
+});
+
+test("selected-memory continuity validates exact lineage and recovers unresolved originals only", () => {
+  const original = episode(90, { sessionId: "old", sequence: 30 });
+  const checked = episode(22, { quality: "explicitly_unverified", question: "Verify your claims now.", answer: "The check is unfinished.",
+    execution: { requestContext: { kind: "conversation_reference", referenceScope: "selected_memory", anchorSessionId: "old", anchorEpisodeId: original.id, anchorAnswerHash: hash(original.answer) } } });
+  const input = { message: "Is that still true?", sessionId: "visible", history: [checked], referenceEpisodes: [original], viewpointAt: original.askedAt };
+  assert.equal(resolveRequestContext(input).anchor?.episodeId, original.id);
+  assert.equal(resolveRequestContext(input).referenceScope, "selected_memory");
+  assert.deepEqual(resolveRequestContext({ ...input, referenceEpisodes: [{ ...original, answer: "Changed answer" }] }), missing);
+  assert.deepEqual(resolveRequestContext({ ...input, referenceEpisodes: [{ ...original, ownerId: "other" }] }), missing);
+  assert.deepEqual(resolveRequestContext({ ...input, referenceEpisodes: [] }), missing);
+  assert.deepEqual(resolveRequestContext({ ...input, viewpointAt: original.askedAt - 1 }), missing);
+  const completed = { ...checked, quality: "supported" as const, answer: "Acme still costs $25." };
+  assert.equal(resolveRequestContext({ ...input, history: [completed] }).anchor?.episodeId, completed.id);
+});

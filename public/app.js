@@ -26,7 +26,7 @@ let chooserGeneration = 0;
 let choosingHistory = false;
 let starterOffset = Math.floor(Math.random() * 3) * 3;
 let starterEra;
-function dismissHistoryChooser() { chooserGeneration++; $("history-chooser")?.remove(); }
+function dismissHistoryChooser() { chooserGeneration++; $("history-chooser")?.remove(); if ($("empty")) $("empty").hidden = false; }
 
 
 let clockOffset = 0;
@@ -642,7 +642,8 @@ function showActions(view, failed = false) {
     if (inFlight) return notify("Finish or stop the current answer first.");
     const retry = addEntry(view.question, { at: view.at, simulated: view.isEra, responseMode: view.responseMode });
     send(view.question, { view: retry, recheckEpisodeId: view.reviewFailure.retryEpisodeId,
-      retryUnfinished: Boolean(view.reviewFailure.retryEpisodeId && view.reviewFailure.retryScope === "unfinished_claims") });
+      memoryReferenceEpisodeId: view.reviewFailure.memoryReferenceEpisodeId ?? view.memoryReferenceEpisodeId,
+      retryUnfinished: Boolean((view.reviewFailure.retryEpisodeId || view.reviewFailure.memoryReferenceEpisodeId || view.memoryReferenceEpisodeId) && view.reviewFailure.retryScope === "unfinished_claims") });
   }));
   if (failed && view.checkpoint?.available && view.turnStatus !== "cancelled") view.actions.append(buttonAction("Resume saved research ↗", () => {
     if (inFlight) return notify("Finish or stop the current answer first.");
@@ -656,7 +657,7 @@ function showActions(view, failed = false) {
     if (failed && ["failed", "cancelled", "interrupted", "waiting_input"].includes(view.turnStatus)) { view.idempotencyKey = null; view.turnId = null; view.requestBody = null; }
     if (failed && view.clarificationExpired) return send(view.question);
     if (failed && view.clarificationId && view.submittedSelection) return send(view.question, { view, clarification: { id: view.clarificationId, selection: view.submittedSelection } });
-    send(view.question, failed ? { view } : {}); }));
+    send(view.question, failed ? { view } : { memoryReferenceEpisodeId: view.memoryReferenceEpisodeId }); }));
   if (!failed && view.isEra) view.actions.append(buttonAction("Re-check now ↗", () => recheck(view.episodeId)));
 }
 function completeEntry(view, timings, cited) {
@@ -701,6 +702,7 @@ async function checkSaved(view, signal) {
     view.episodeId = result.episode.id; view.text = result.episode.answer; view.quality = result.episode.quality;
     view.responseMode = result.episode.execution?.responseMode ?? "standard";
     view.reviewFailure = result.episode.execution?.reviewFailure;
+    view.memoryReferenceEpisodeId = result.episode.execution?.memoryReferenceEpisodeId ?? view.memoryReferenceEpisodeId;
     view.claimCoverage = result.claimCoverage ?? result.episode.execution?.claimCoverage;
     view.dataSources = result.sources ?? []; paintView(view); completeEntry(view, null, view.dataSources.map(source => source.n)); return;
   }
@@ -727,6 +729,7 @@ async function restorePendingTurn() {
   let saved; try { saved = JSON.parse(sessionStorage.getItem("asof.pending.turn") || "null"); } catch { return; }
   if (!saved || saved.sessionId !== sessionId) return;
   const view = addEntry(saved.question, { at: saved.at, simulated: saved.isEra, restored: true, responseMode: saved.requestBody?.responseMode });
+  view.memoryReferenceEpisodeId = saved.requestBody?.memoryReferenceEpisodeId;
   view.turnId = saved.turnId; view.idempotencyKey = saved.idempotencyKey; view.requestBody = saved.requestBody;
   try { await checkSaved(view); } catch (error) { view.status.textContent = error.message; view.turnStatus = "running"; showActions(view, true); }
 }
@@ -734,6 +737,7 @@ async function send(message, options = {}) {
   if (inFlight || !message.trim()) return;
   dismissHistoryChooser();
   const view = options.view ?? addEntry(message.trim());
+  view.memoryReferenceEpisodeId ??= options.memoryReferenceEpisodeId ?? view.requestBody?.memoryReferenceEpisodeId;
   view.text = ""; view.dataSources = []; view.reviewFailure = null; view.claimCoverage = null;
   view.checkedFindings.hidden = true; view.checkedFindings.replaceChildren(); view.answer.replaceChildren(); view.actions.hidden = true;
   view.details.hidden = false;
@@ -751,6 +755,7 @@ async function send(message, options = {}) {
   view.requestBody ??= { sessionId, message: message.trim(), tz, mode: view.isEra ? "era" : "live", asOf,
     ...(view.responseMode === "fast" ? { responseMode: "fast" } : {}),
     ...(options.recheckEpisodeId ? { recheckEpisodeId: options.recheckEpisodeId } : {}),
+    ...(view.memoryReferenceEpisodeId ? { memoryReferenceEpisodeId: view.memoryReferenceEpisodeId } : {}),
     ...(options.retryUnfinished ? { retryUnfinished: true } : {}),
     ...(options.clarification ? { clarification: options.clarification } : {}) };
   rememberPendingTurn(view);
@@ -884,10 +889,24 @@ function submitQuestion(message) {
   if (priorAnswerRequest(message)) return choosePriorAnswer(message);
   return send(message);
 }
+function usefulHistoryEpisode(episode) {
+  if (episode.quality === "non_factual" || ["conversation", "creative", "transform", "recall"].includes(episode.execution?.intent)) return false;
+  const question = episode.question.trim();
+  if (priorAnswerRequest(question)
+    || /^(?:(?:hey|hi|hello)[,! ]*)?(?:thanks?(?: you)?|thank you|thx|ok(?:ay)?|got it|great|cool|bye)[.! ]*$/i.test(question)
+    || /^(?:hey|hi|hello)[!. ]*$/i.test(question)
+    || /^(?:hey[,! ]+)?what updates? (?:do )?(?:you|u) have[?!. ]*$/i.test(question)
+    || /\b(?:hardest|best|difficult|challenging) questions?\b.{0,60}\b(?:check|test|evaluate)\b.{0,40}\b(?:search engine|chatbot|agent)\b/i.test(question)
+    || /^re[- ]?check your (?:previous|earlier|last|prior) answer\b/i.test(question)) return false;
+  // A saved chat message is not automatically a research topic. Keep provisional factual
+  // answers, but require a source or extracted assertion rather than a failed search attempt.
+  return [episode.sources, episode.claims, episode.verifiedStatements].some(items => Array.isArray(items) && items.length > 0);
+}
 async function choosePriorAnswer(message) {
   dismissHistoryChooser();
   const generation = chooserGeneration, originSession = sessionId, era = simulated, cutoff = agentNow().getTime();
   const current = () => generation === chooserGeneration && sessionId === originSession && !inFlight;
+  if ($("empty")) $("empty").hidden = true;
   const panel = el("section", "history-chooser"); panel.id = "history-chooser";
   panel.setAttribute("aria-label", "Choose a saved answer to check");
   panel.append(el("h2", "", "Which saved answer should I check?"), el("p", "", "Loading your saved questions…"));
@@ -900,11 +919,11 @@ async function choosePriorAnswer(message) {
     const topic = historyTopic(message), seen = new Set();
     const choices = (Array.isArray(page.episodes) ? page.episodes : []).filter(episode => {
       if (!Number.isSafeInteger(episode.id) || !episode.sessionId || typeof episode.question !== "string" || !episode.answer?.trim()
-        || !Number.isFinite(episode.askedAt) || (era && episode.askedAt > cutoff) || priorAnswerRequest(episode.question)) return false;
+        || !Number.isFinite(episode.askedAt) || (era && episode.askedAt > cutoff) || !usefulHistoryEpisode(episode)) return false;
       const key = episode.question.toLowerCase().replace(/\s+/g, " ").trim();
       if (seen.has(key) || (topic.length && !topic.every(term => key.includes(term)))) return false;
       seen.add(key); return true;
-    }).slice(0, 6);
+    }).sort((a, b) => Number(b.sessionId === originSession) - Number(a.sessionId === originSession)).slice(0, 4);
     panel.replaceChildren(el("h2", "", "Which saved answer should I check?"));
     if (!choices.length) panel.append(el("p", "", "No matching saved questions were found in your recent history for this date. Paste the claim you want checked, or open the Ledger to find an older answer."));
     else {
@@ -915,18 +934,14 @@ async function choosePriorAnswer(message) {
           if (!current() || choosingHistory) return;
           const selection = {}; choosingHistory = selection;
           for (const option of list.querySelectorAll("button")) option.disabled = true;
-          const selectedMode = $("response-mode").value, selectedAt = agentNow(), selectedEra = simulated;
           try {
-            if (!await restoreSession(episode.sessionId, true, { preserveViewpoint: true, isCurrent: current })) throw new Error("That saved conversation is no longer available.");
-            // Restore only the conversation. Keep the user's current research date and answer mode.
-            const restoredGeneration = chooserGeneration;
-            if (!await setClock(selectedEra ? selectedAt.toISOString() : null, () => sessionId === episode.sessionId && chooserGeneration === restoredGeneration)) throw new Error("The selected date could not be preserved. Please try again.");
-            if (sessionId !== episode.sessionId || chooserGeneration !== restoredGeneration + 1) return;
-            $("response-mode").value = selectedMode; updateResponseMode();
-            send(`Re-check your answer to “${episode.question}” from ${dayLabel(new Date(episode.askedAt))}. What is still correct, and what needs correcting?`, { recheckEpisodeId: episode.id });
+            // The selected record is server-loaded context for a fresh run in this chat.
+            // Never reopen its conversation, import its transcript, or rewrite the user's question.
+            await send(message, { memoryReferenceEpisodeId: episode.id });
           } catch (error) { if (choosingHistory === selection) notify(error.message); }
           finally { if (choosingHistory === selection) choosingHistory = false; }
         }, "history-choice");
+        button.title = episode.question;
         button.append(el("span", "", episode.question), el("small", "", dayLabel(new Date(episode.askedAt)))); list.append(button);
       }
       panel.append(list);
@@ -964,6 +979,7 @@ async function restoreSession(id, scroll = false, options = {}) {
     const view = addEntry(episode.question, { at: episode.askedAt, simulated: Boolean(episode.execution?.time?.simulated ?? episode.execution?.simulation), episodeId: episode.id, restored: true, responseMode: episode.execution?.responseMode });
     view.text = episode.answer; view.dataSources = sources; view.quality = episode.quality;
     view.reviewFailure = episode.execution?.reviewFailure;
+    view.memoryReferenceEpisodeId = episode.execution?.memoryReferenceEpisodeId;
     view.claimCoverage = item.claimCoverage ?? episode.execution?.claimCoverage;
     if (episode.execution?.clarification) choiceSummary(view, episode.execution.clarification);
     completeEntry(view, null, sources.map(source => source.n));

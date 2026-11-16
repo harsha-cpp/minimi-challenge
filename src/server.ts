@@ -100,7 +100,8 @@ export function createApplication(options: { config?: Config; store?: MemoryStor
     retrievalProfiles: config.retrievalProfiles });
   const checkpointContext = (request: ResearchRequest, ownerId: string) => {
     const conversation = store.conversation(request.sessionId, ownerId);
-    const target = request.recheckEpisodeId === undefined ? null : store.episode(request.recheckEpisodeId, ownerId);
+    const targetId = request.recheckEpisodeId ?? request.memoryReferenceEpisodeId;
+    const target = targetId === undefined ? null : store.episode(targetId, ownerId);
     return digest({ episodes: store.count(Number.MAX_SAFE_INTEGER, ownerId), mode: conversation?.mode, viewpointAt: conversation?.viewpointAt,
       history: store.currentConversationHistory(request.sessionId, 8, ownerId).map(episode => [episode.id, episode.sequence, digest([episode.question, episode.answer]), digest(store.canonicalClaimsFor(episode.id, ownerId))]),
       target: target ? [target.id, digest(target.answer), digest(store.canonicalClaimsFor(target.id, ownerId))] : null });
@@ -183,11 +184,13 @@ export function createApplication(options: { config?: Config; store?: MemoryStor
     const savedBody = { sessionId: original.sessionId, message: original.message, tz: original.tz, mode: original.mode,
       asOf: original.asOf === null ? null : new Date(original.asOf).toISOString(), responseMode: original.responseMode,
       retryUnfinished: original.retryUnfinished ?? false,
-      ...(original.recheckEpisodeId !== undefined ? { recheckEpisodeId: original.recheckEpisodeId } : {}) };
+      ...(original.recheckEpisodeId !== undefined ? { recheckEpisodeId: original.recheckEpisodeId } : {}),
+      ...(original.memoryReferenceEpisodeId !== undefined ? { memoryReferenceEpisodeId: original.memoryReferenceEpisodeId } : {}) };
     for (const [name, value] of Object.entries(savedBody)) {
       if (body[name] !== undefined && body[name] !== value) throw new RequestError("Resume the original request, or start fresh research for changed input.", 409, "checkpoint_request_changed");
     }
-    if (body.clarification !== undefined || body.recheckEpisodeId !== undefined && original.recheckEpisodeId === undefined) throw new RequestError("Research checkpoint request changed.", 409, "checkpoint_request_changed");
+    if (body.clarification !== undefined || body.recheckEpisodeId !== undefined && original.recheckEpisodeId === undefined
+      || body.memoryReferenceEpisodeId !== undefined && original.memoryReferenceEpisodeId === undefined) throw new RequestError("Research checkpoint request changed.", 409, "checkpoint_request_changed");
     return { ...body, ...savedBody };
   };
   async function handleChat(req: IncomingMessage, res: ServerResponse, ownerId: string): Promise<void> {
@@ -221,8 +224,13 @@ export function createApplication(options: { config?: Config; store?: MemoryStor
     const sessionId = body.sessionId;
     if (body.responseMode !== undefined && body.responseMode !== "standard" && body.responseMode !== "fast") throw new RequestError("responseMode must be standard or fast.", 400);
     const recheckEpisodeId = body.recheckEpisodeId;
+    const memoryReferenceEpisodeId = body.memoryReferenceEpisodeId;
+    if (recheckEpisodeId !== undefined && memoryReferenceEpisodeId !== undefined) throw new RequestError("Select one saved answer reference.", 400);
+    if (memoryReferenceEpisodeId !== undefined && (!Number.isSafeInteger(memoryReferenceEpisodeId) || Number(memoryReferenceEpisodeId) < 1 || body.clarification !== undefined)) throw new RequestError("Invalid historical answer reference.", 400);
+    const memoryTarget = memoryReferenceEpisodeId === undefined ? null : store.episode(Number(memoryReferenceEpisodeId), ownerId);
+    if (memoryReferenceEpisodeId !== undefined && !memoryTarget) throw new RequestError("Historical answer not found.", 404);
     if (body.retryUnfinished !== undefined && typeof body.retryUnfinished !== "boolean") throw new RequestError("retryUnfinished must be a boolean.", 400);
-    if (body.retryUnfinished === true && recheckEpisodeId === undefined) throw new RequestError("Retrying unfinished claims requires a saved answer.", 400, "invalid_retry_target");
+    if (body.retryUnfinished === true && recheckEpisodeId === undefined && memoryReferenceEpisodeId === undefined) throw new RequestError("Retrying unfinished claims requires a saved answer.", 400, "invalid_retry_target");
     if (recheckEpisodeId !== undefined) {
       if (!Number.isSafeInteger(recheckEpisodeId) || Number(recheckEpisodeId) < 1 || body.clarification !== undefined) throw new RequestError("Invalid saved answer reference.", 400);
       const target = store.episode(Number(recheckEpisodeId), ownerId);
@@ -265,6 +273,7 @@ export function createApplication(options: { config?: Config; store?: MemoryStor
       }
       const effectiveViewpoint = resumed ? resumed.card.time.simulated ? Date.parse(resumed.card.time.effectiveAt) : null : selected?.getTime() ?? null;
       if (effectiveViewpoint !== null && effectiveViewpoint > Date.now()) throw new RequestError("Choose a date and time in the past, or return to live mode.", 400, "future_viewpoint");
+      if (memoryTarget && memoryTarget.askedAt > (effectiveViewpoint ?? Date.now())) throw new RequestError("Choose a topic from on or before the selected date.", 400, "future_memory_reference");
       const effectiveMode = effectiveViewpoint === null ? "live" : "era";
       const responseMode = resumed?.card.responseMode ?? (body.responseMode === "fast" ? "fast" : "standard");
       if (responseMode === "fast" && !deps?.fastLlm) throw new RequestError("Fast mode is not configured. Choose Standard mode.", 400, "fast_mode_unavailable");
@@ -274,7 +283,8 @@ export function createApplication(options: { config?: Config; store?: MemoryStor
       const requestIdentity = { sessionId, message, tz, mode: effectiveMode, asOf: effectiveViewpoint, clarification: clarification ?? null,
         ...(responseMode === "fast" ? { responseMode } : {}),
         ...(body.retryUnfinished === true ? { retryUnfinished: true } : {}),
-        ...(recheckEpisodeId !== undefined ? { recheckEpisodeId } : {}) };
+        ...(recheckEpisodeId !== undefined ? { recheckEpisodeId } : {}),
+        ...(memoryReferenceEpisodeId !== undefined ? { memoryReferenceEpisodeId } : {}) };
       const researchRequestHash = digest(requestIdentity);
       if (resumedResearch && resumedResearch.requestHash !== researchRequestHash) throw new RequestError("Research checkpoint request changed.", 409, "checkpoint_request_changed");
       const requestHash = resumeTurnId === undefined ? researchRequestHash : digest({ ...requestIdentity, resumeTurnId });
@@ -318,7 +328,8 @@ export function createApplication(options: { config?: Config; store?: MemoryStor
           const policy = turnPolicy(message, effectiveMode === "era");
           const checkpointRequest: ResearchRequest = { sessionId, message, tz, mode: effectiveMode, asOf: effectiveViewpoint, responseMode,
             ...(clarification ? { clarification } : {}), ...(body.retryUnfinished === true ? { retryUnfinished: true } : {}),
-            ...(recheckEpisodeId !== undefined ? { recheckEpisodeId: Number(recheckEpisodeId) } : {}) };
+            ...(recheckEpisodeId !== undefined ? { recheckEpisodeId: Number(recheckEpisodeId) } : {}),
+            ...(memoryReferenceEpisodeId !== undefined ? { memoryReferenceEpisodeId: Number(memoryReferenceEpisodeId) } : {}) };
           const checkpointCreatedAt = resumedResearch?.createdAt ?? Date.now();
           const checkpointEffectiveAt = resumedResearch?.effectiveAt ?? new Date(effectiveViewpoint ?? Date.now()).toISOString();
           const checkpointContextHash = checkpointContext(checkpointRequest, ownerId);
@@ -353,6 +364,7 @@ export function createApplication(options: { config?: Config; store?: MemoryStor
             } },
             () => runTurn(requestDeps, { ownerId, turnId: turn!.id, sessionId, message, tz, responseMode, asOf: effectiveViewpoint === null ? undefined : new Date(effectiveViewpoint), clarification,
               ...(recheckEpisodeId !== undefined ? { recheckEpisodeId: Number(recheckEpisodeId) } : {}),
+            ...(memoryReferenceEpisodeId !== undefined ? { memoryReferenceEpisodeId: Number(memoryReferenceEpisodeId) } : {}),
               ...(body.retryUnfinished === true ? { retryUnfinished: true } : {}),
               ...(resumedResearch ? { resumeCheckpoint: resumedResearch.progress } : {}), deadlineAt, signal }, event => {
               if (event.type === "text") serverEmission();

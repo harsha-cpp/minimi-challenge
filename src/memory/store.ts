@@ -514,7 +514,7 @@ export class MemoryStore {
   }
 
   saveEpisode(e: Omit<Episode, "id" | "summary" | "topics"> & { sources: Source[]; verifiedStatements?: NewVerifiedStatement[];
-    reviewedClaims?: ReviewedClaim[]; claimCoverage?: ClaimCoverage[]; coverageReference?: { episodeId: number; answerHash: string } }): number {
+    reviewedClaims?: ReviewedClaim[]; claimCoverage?: ClaimCoverage[]; coverageReference?: { episodeId: number; answerHash: string; scope?: "selected_memory" } }): number {
     const verifiedStatements = validateStatements(e.verifiedStatements, e.sources, e.askedAt);
     const reviewedClaims = validateReviewedClaims(e.reviewedClaims, e.sources, e.askedAt);
     const execution = e.reviewedClaims !== undefined ? { ...e.execution,reviewedClaimSchemaVersion:REVIEWED_CLAIM_SCHEMA_VERSION,reviewPolicyVersion:REVIEW_POLICY_VERSION } : e.execution;
@@ -532,8 +532,15 @@ export class MemoryStore {
         this.db.prepare("UPDATE conversations SET next_sequence=next_sequence+1 WHERE owner_id=? AND session_id=?").run(ownerId,e.sessionId);
       }
       const reference = e.coverageReference, original = reference ? this.episode(reference.episodeId,ownerId) : null;
-      if (reference && (!original || original.sessionId !== e.sessionId || (original.sequence ?? original.id) >= sequence
-        || createHash("sha256").update(original.answer).digest("hex") !== reference.answerHash)) throw new Error("Invalid claim coverage reference.");
+      // An explicit memory selection may cross conversations, but remains bound to one
+      // owner-scoped immutable answer. Ordinary re-checks retain their session boundary.
+      const selectedMemory = reference?.scope === "selected_memory";
+      if (reference && (!original
+        || createHash("sha256").update(original.answer).digest("hex") !== reference.answerHash
+        || (original.sessionId === e.sessionId ? (original.sequence ?? original.id) >= sequence : !selectedMemory)
+        || selectedMemory && (!selectedMemoryBinding(e.execution,original,reference.answerHash) || original.askedAt > e.askedAt))) {
+        throw new Error("Invalid claim coverage reference.");
+      }
       const originalClaimIds = new Set(original ? this.canonicalClaimsFor(original.id,ownerId).map(claim => claim.id) : []);
       if (reviewedClaims.some(claim => claim.scope.referenceAnswerHash !== (reference?.answerHash ?? null)
         || claim.referenceClaimId !== null && !originalClaimIds.has(claim.referenceClaimId))) throw new Error("Reviewed claim has an invalid original binding.");
@@ -742,19 +749,23 @@ export class MemoryStore {
     return row ? JSON.parse(row.record_json as string) : [];
   }
   latestClaimCoverageFor(referenceEpisodeId: number, sessionId: string, ownerId = "local", scope?: {viewpointAt:number;simulated:boolean;tz:string;receivedAt:number}): ClaimCoverage[] {
-    const original = this.episode(referenceEpisodeId,ownerId); if (!original || original.sessionId !== sessionId) return [];
+    const original = this.episode(referenceEpisodeId,ownerId); if (!original) return [];
     const hash = createHash("sha256").update(original.answer).digest("hex");
     const rows = this.db.prepare(`SELECT c.record_json,e.execution_json,e.asked_at,e.created_at FROM claim_coverage c JOIN episodes e ON e.id=c.episode_id
       WHERE c.reference_episode_id=? AND c.reference_answer_hash=? AND e.owner_id=? AND e.session_id=? ORDER BY e.sequence DESC LIMIT 100`)
       .all(referenceEpisodeId,hash,ownerId,sessionId) as Row[];
     const decisions = new Map<string,ClaimCoverage>();
+    let selectedMemoryFound = false;
     for (const row of rows) {
       const execution = row.execution_json ? JSON.parse(row.execution_json as string) : null;
+      if (original.sessionId !== sessionId && (!selectedMemoryBinding(execution,original,hash) || original.askedAt > Number(row.asked_at))) continue;
+      selectedMemoryFound = true;
       if (!scope || execution?.reviewPolicyVersion !== REVIEW_POLICY_VERSION || execution?.time?.simulated !== scope.simulated || execution?.time?.tz !== scope.tz
         || (scope.simulated ? row.asked_at !== scope.viewpointAt : typeof row.created_at !== "number" || row.created_at > scope.receivedAt
           || scope.receivedAt-row.created_at > 120_000 || Math.abs(Number(row.asked_at)-scope.viewpointAt)>120_000)) continue;
       for (const claim of JSON.parse(row.record_json as string) as ClaimCoverage[]) if (!decisions.has(claim.claimId)) decisions.set(claim.claimId,claim);
     }
+    if (original.sessionId !== sessionId && !selectedMemoryFound) return [];
     return this.canonicalClaimsFor(referenceEpisodeId,ownerId).map(claim => decisions.get(claim.id) ?? { claimId:claim.id,status:"unresolved",sourceNumbers:[] });
   }
   sourcesFor(episodeId: number, ownerId = "local"): Source[] {
@@ -783,6 +794,14 @@ export class MemoryStore {
   count(knownAt = Number.MAX_SAFE_INTEGER, ownerId = "local"): number {
     return (this.db.prepare("SELECT count(*) AS n FROM episodes WHERE owner_id=? AND asked_at<=?").get(ownerId,knownAt) as { n:number }).n;
   }
+}
+
+function selectedMemoryBinding(execution: Record<string,unknown> | undefined, original: Episode, answerHash: string): boolean {
+  const context = execution?.requestContext;
+  if (!context || typeof context !== "object" || Array.isArray(context)) return false;
+  const binding = context as Record<string,unknown>;
+  return binding.kind === "conversation_reference" && binding.referenceScope === "selected_memory"
+    && binding.anchorEpisodeId === original.id && binding.anchorAnswerHash === answerHash && binding.anchorSessionId === original.sessionId;
 }
 
 function groupStatements(rows: Row[]): VerifiedStatement[] {

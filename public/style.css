@@ -1295,14 +1295,16 @@ dialog.source-dialog { width: min(43rem, calc(100vw - 2rem)); max-height: calc(1
 .checked-findings ul { padding-left: 1.2rem; margin: 0; }
 .checked-findings li + li { margin-top: .5rem; }
 
-.history-chooser { margin: 2rem 0; padding: 1.2rem; border: 1px solid var(--rule); }
-.history-chooser h2 { font-size: 1.1rem; margin: 0 0 .65rem; }
+.history-chooser { width: min(var(--measure), calc(100% - var(--gutter) - 6rem)); margin: 2rem 1.5rem 2rem calc(var(--gutter) + 4.5rem); padding: 1.2rem; border: 1px solid var(--rule); scroll-margin-block: 1rem; }
+.history-chooser h2 { font: 700 1.65rem/1.2 var(--display); margin: 0 0 .65rem; }
 .history-chooser p { font: .8rem/1.6 var(--mono); color: var(--ink-soft); }
 .history-choices { display: grid; gap: .55rem; margin: 1rem 0; }
-.history-choice { display: flex; justify-content: space-between; gap: 1rem; padding: .8rem; text-align: left; background: transparent; border: 1px solid var(--rule); color: var(--ink); cursor: pointer; font: inherit; }
+.history-choice { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; min-width: 0; padding: .8rem; text-align: left; background: transparent; border: 1px solid var(--rule); color: var(--ink); cursor: pointer; font: .8rem/1.65 var(--mono); }
+.history-choice > span { min-width: 0; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
 .history-choice:hover, .history-choice:focus-visible { border-color: var(--red); }
 .history-choice:disabled { cursor: wait; opacity: .65; }
-.history-choice small { flex-shrink: 0; color: var(--ink-soft); }
+.history-choice small { flex-shrink: 0; white-space: nowrap; color: var(--ink-soft); font-size: .62rem; }
 .starter-heading { gap: .75rem; flex-wrap: wrap; }
 .starter-heading [data-refresh-starters] { margin-left: auto; font-size: .65rem; }
-@media (max-width: 600px) { .history-choice { flex-direction: column; gap: .35rem; } }
+@media (max-width: 760px) { .history-chooser { width: calc(100% - 2rem); margin: 1.5rem 1rem; padding: 1rem; } }
+@media (max-width: 600px) { .history-choice { flex-direction: column; align-items: stretch; gap: .35rem; } }

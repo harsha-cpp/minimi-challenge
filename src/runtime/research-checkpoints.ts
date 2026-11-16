@@ -20,7 +20,7 @@ export interface ResearchProgress {
 
 export interface ResearchRequest {
   sessionId: string; message: string; tz: string; mode: "live" | "era"; asOf: number | null;
-  responseMode: ResponseMode; recheckEpisodeId?: number; clarification?: ClarificationAnswer; retryUnfinished?: boolean;
+  responseMode: ResponseMode; recheckEpisodeId?: number; memoryReferenceEpisodeId?: number; clarification?: ClarificationAnswer; retryUnfinished?: boolean;
 }
 export interface ResearchResumption { ownerId: string; idempotencyKey: string; turnId: string; fromTurnId: string; request: ResearchRequest; }
 
@@ -103,6 +103,8 @@ export class ResearchCheckpoints {
     if (request.sessionId !== value.sessionId || typeof request.message !== "string" || !request.message.trim() || request.message.length > 8000
       || typeof request.tz !== "string" || !["live", "era"].includes(String(request.mode)) || !["standard", "fast"].includes(String(request.responseMode))
       || (request.mode === "live" ? request.asOf !== null : !Number.isSafeInteger(request.asOf))
+      || [request.recheckEpisodeId, request.memoryReferenceEpisodeId].some(id => id !== undefined && (!Number.isSafeInteger(id) || Number(id) < 1))
+      || request.recheckEpisodeId !== undefined && request.memoryReferenceEpisodeId !== undefined
       || !["researched", "drafted", "reviewed"].includes(String(progress.stage))
       || !Array.isArray(progress.messages) || progress.messages.length > 128 || !Array.isArray(progress.sources) || progress.sources.length > 64
       || !Number.isSafeInteger(progress.searches) || Number(progress.searches) < 0 || Number(progress.searches) > 100
