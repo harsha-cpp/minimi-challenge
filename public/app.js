@@ -28,6 +28,15 @@ let simulated = false;
 let clockSaving = false;
 let clarificationsEnabled = false;
 let pendingView = null;
+let responseModeInitialized = false;
+function updateResponseMode() {
+  $("response-mode-hint").textContent = $("response-mode").value === "fast"
+    ? "Shorter answers, lighter research" : "More complete research";
+}
+$("response-mode").addEventListener("change", () => {
+  try { sessionStorage.setItem("asof.response-mode", $("response-mode").value); } catch {}
+  updateResponseMode();
+});
 
 const agentNow = () => new Date(Date.now() + clockOffset);
 const dayLabel = (date) => date.toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short", year: "numeric" });
@@ -40,6 +49,13 @@ function applyState(state) {
   clockOffset = new Date(state.now).getTime() - Date.now();
   simulated = state.simulated;
   clarificationsEnabled = Boolean(state.features?.clarifications);
+  $("response-mode").querySelector('[value="fast"]').disabled = !state.features?.fastMode;
+  if (!responseModeInitialized) {
+    try { if (state.features?.fastMode && sessionStorage.getItem("asof.response-mode") === "fast") $("response-mode").value = "fast"; } catch {}
+  }
+  responseModeInitialized = true;
+  if (!state.features?.fastMode) $("response-mode").value = "standard";
+  updateResponseMode();
   const notice = $("notice");
   notice.hidden = state.missing.length === 0;
   notice.textContent = state.missing.length
@@ -495,6 +511,7 @@ function addEntry(question, options = {}) {
   const gutter = el("div", "gutter"); gutter.append(el("time", "", timeLabel(now)), el("span", "", dayLabel(now)), el("span", "entry-mode", isEra ? "SIMULATION" : "LIVE"));
   const body = el("div", "body");
   const view = { entry, at: now.toISOString(), isEra, question, trace: el("ul", "trace"), answer: el("div", "answer"), sources: el("ol", "sources"), timings: el("div", "timings"), status: el("div", "answer-status"), steps: el("ol", "answer-steps"), actions: el("div", "answer-actions"), details: el("details", "answer-details"), text: "", dataSources: [], episodeId: options.episodeId };
+  view.responseMode = options.responseMode ?? (options.restored ? "standard" : $("response-mode").value);
   view.clarification = el("div", "clarification-slot");
   view.status.setAttribute("role", "status");
   for (const [i, title] of ["Researching", "Checking era", "Preparing answer"].entries()) view.steps.append(el("li", "", `${String(i + 1).padStart(2, "0")} ${title}`));
@@ -605,6 +622,7 @@ function completeEntry(view, timings, cited) {
   const sources = view.dataSources.filter(source => cited.includes(source.n));
   renderSources(view.sources, sources, { at: view.at, episodeId: view.episodeId });
   view.status.textContent = `${sources.length} source${sources.length === 1 ? "" : "s"}${timings?.totalMs != null ? ` · ${seconds(timings.totalMs)}` : ""} · Saved to Ledger${view.quality === "explicitly_unverified" ? " · Unverified" : view.quality === "supported_partial" ? " · Partially supported" : ""}`;
+  if (view.responseMode === "fast") view.status.textContent += " · Fast";
   view.status.classList.add("is-complete");
   showActions(view);
 }
@@ -629,6 +647,7 @@ async function checkSaved(view, signal) {
     const existing = entries.find(item => item !== view && item.episodeId === result.episode.id);
     if (existing) { view.entry.remove(); entries.splice(entries.indexOf(view), 1); clearPendingTurn(view); return; }
     view.episodeId = result.episode.id; view.text = result.episode.answer; view.quality = result.episode.quality;
+    view.responseMode = result.episode.execution?.responseMode ?? "standard";
     view.dataSources = result.sources ?? []; paintView(view); completeEntry(view, null, view.dataSources.map(source => source.n)); return;
   }
   if (result.turn.status === "running") {
@@ -642,7 +661,7 @@ async function checkSaved(view, signal) {
 async function restorePendingTurn() {
   let saved; try { saved = JSON.parse(sessionStorage.getItem("asof.pending.turn") || "null"); } catch { return; }
   if (!saved || saved.sessionId !== sessionId) return;
-  const view = addEntry(saved.question, { at: saved.at, simulated: saved.isEra, restored: true });
+  const view = addEntry(saved.question, { at: saved.at, simulated: saved.isEra, restored: true, responseMode: saved.requestBody?.responseMode });
   view.turnId = saved.turnId; view.idempotencyKey = saved.idempotencyKey; view.requestBody = saved.requestBody;
   try { await checkSaved(view); } catch (error) { view.status.textContent = error.message; view.turnStatus = "running"; showActions(view, true); }
 }
@@ -663,6 +682,7 @@ async function send(message, options = {}) {
   const asOf = view.isEra ? new Date(view.at).toISOString() : undefined;
   view.idempotencyKey ??= crypto.randomUUID();
   view.requestBody ??= { sessionId, message: message.trim(), tz, mode: view.isEra ? "era" : "live", asOf,
+    ...(view.responseMode === "fast" ? { responseMode: "fast" } : {}),
     ...(options.recheckEpisodeId ? { recheckEpisodeId: options.recheckEpisodeId } : {}),
     ...(options.clarification ? { clarification: options.clarification } : {}) };
   rememberPendingTurn(view);
@@ -740,6 +760,7 @@ async function send(message, options = {}) {
 
 const input = $("input");
 function setBusy(busy) {
+  $("response-mode").disabled = busy;
   $("send").textContent = busy ? "Stop" : pendingView?.card.selection ? "Continue ↗" : pendingView ? "Add detail ↗" : "Send ↗";
   $("send").setAttribute("aria-label", busy ? "Stop answer" : pendingView?.card.selection ? "Continue with saved choice" : pendingView ? "Submit clarification detail" : "Send message");
   if (!busy) (pendingView?.clarification.querySelector("h3, .clarification-resume") ?? input).focus({ preventScroll: true });
@@ -789,7 +810,7 @@ async function restoreSession(id, scroll = false) {
   resetThread(); sessionId = id; rememberSession();
   for (const item of episodes) {
     const { episode, sources } = item;
-    const view = addEntry(episode.question, { at: episode.askedAt, simulated: Boolean(episode.execution?.time?.simulated ?? episode.execution?.simulation), episodeId: episode.id, restored: true });
+    const view = addEntry(episode.question, { at: episode.askedAt, simulated: Boolean(episode.execution?.time?.simulated ?? episode.execution?.simulation), episodeId: episode.id, restored: true, responseMode: episode.execution?.responseMode });
     view.text = episode.answer; view.dataSources = sources; view.quality = episode.quality;
     if (episode.execution?.clarification) choiceSummary(view, episode.execution.clarification);
     completeEntry(view, null, sources.map(source => source.n));
@@ -804,7 +825,7 @@ async function restorePending(id) {
   if (!response.ok) return;
   const { card } = await response.json();
   if (!card) return;
-  const view = addEntry(card.message, { at: card.time.effectiveAt, simulated: card.time.simulated, restored: true });
+  const view = addEntry(card.message, { at: card.time.effectiveAt, simulated: card.time.simulated, restored: true, responseMode: card.responseMode });
   showClarification(view, card);
 }
 async function openConversation(episode) {

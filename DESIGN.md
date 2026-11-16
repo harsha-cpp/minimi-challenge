@@ -18,6 +18,8 @@ Conversation and supplied-text transformations take a direct model path without 
 
 Ordinary text streams provisionally over SSE. Verification and factual simulation commit before publishing final prose. Durable turn IDs and idempotency keys recover saved answers after a lost connection without generating duplicates. Summaries and claims are extracted through a durable background queue, with lower priority than foreground responses. Shared request, token and deadline limits keep research and background work from overwhelming the model gateway.
 
+An optional Fast mode uses the smaller deployment, one research round and shorter answers; explicit verification retains the main reviewer. Both modes share admission and spending controls. The selection survives retries and clarification replies. This trades research depth for speed without representing unchecked claims as verified.
+
 ## Why this architecture
 
 One modular service and local SQLite keep transactions, recovery and deployment understandable. Full-text recall avoids an extra retrieval service; explicit model, search and clock interfaces make failures reproducible in tests. The public demo runs behind HTTPS on one Azure VM, with credentials fetched through managed identity and daily private database backups. A signed browser cookie gives each visitor separate memory without a login; private owner access stays authenticated. The tradeoff is a single-host design with lexical recall and external-provider latency. Multiple application instances would need shared storage and coordination.

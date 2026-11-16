@@ -1,6 +1,7 @@
 import type { ToolDefinition } from "../llm.ts";
 import type { TurnTime } from "../clock.ts";
 import { turnPolicy } from "./prepare.ts";
+import type { ResponseMode } from "./response-mode.ts";
 
 export interface ClarificationQuestion {
   question: string;
@@ -12,6 +13,7 @@ export interface ClarificationCard extends ClarificationQuestion {
   message: string;
   time: TurnTime;
   selection?: ClarificationAnswer;
+  responseMode?: ResponseMode;
 }
 export type ClarificationSelection = { optionId: string } | { text: string } | { skip: true };
 export interface ClarificationAnswer {
@@ -22,7 +24,7 @@ export interface ClarificationAnswer {
   optionId?: string;
 }
 export interface ClarificationPort {
-  create(input: { sessionId: string; message: string; time: TurnTime; question: ClarificationQuestion }): ClarificationCard;
+  create(input: { sessionId: string; message: string; time: TurnTime; question: ClarificationQuestion; responseMode?: ResponseMode }): ClarificationCard;
 }
 
 export function canClarify(message: string, simulated: boolean): boolean {

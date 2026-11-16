@@ -11,12 +11,12 @@ import { citationTextNodes } from "../public/citations.js";
 const html = readFileSync(new URL("../public/index.html", import.meta.url), "utf8");
 const app = readFileSync(new URL("../public/app.js", import.meta.url), "utf8").replace('import { citationTextNodes } from "./citations.js";\n', "").replace('import { readTurn } from "./recovery.js";\n', "");
 
-async function mount(options: { date?: Date; post?: (body: { now: string | null }) => Promise<Response>; chatEvents?: Array<Record<string, unknown>>; chatReplies?: Array<Array<Record<string, unknown>> | { status: number; error: string; code: string }>; pendingCard?: Record<string, unknown>; memoryEpisodes?: Array<Record<string, unknown>>; savedSession?: string; turnReplies?: Array<Record<string, unknown>>; pendingTurn?: Record<string, unknown>; chatBeforeHeadersFailure?: boolean; beforeChatReply?: () => Promise<void> } = {}) {
+async function mount(options: { fastMode?: boolean; date?: Date; post?: (body: { now: string | null }) => Promise<Response>; chatEvents?: Array<Record<string, unknown>>; chatReplies?: Array<Array<Record<string, unknown>> | { status: number; error: string; code: string }>; pendingCard?: Record<string, unknown>; memoryEpisodes?: Array<Record<string, unknown>>; savedSession?: string; turnReplies?: Array<Record<string, unknown>>; pendingTurn?: Record<string, unknown>; chatBeforeHeadersFailure?: boolean; beforeChatReply?: () => Promise<void> } = {}) {
   const dom = new JSDOM(html, { url: "http://localhost:3000/", runScripts: "outside-only", pretendToBeVisual: true });
   const { window } = dom;
   if (options.savedSession) window.sessionStorage.setItem("asof.preview.session.v2", options.savedSession);
   if (options.pendingTurn) window.sessionStorage.setItem("asof.pending.turn", JSON.stringify(options.pendingTurn));
-  const state = { now: (options.date ?? new Date(2026, 10, 13, 15, 0)).toISOString(), simulated: false, missing: [], model: "test", episodes: 0, features: { clarifications: Boolean(options.pendingCard) } };
+  const state = { now: (options.date ?? new Date(2026, 10, 13, 15, 0)).toISOString(), simulated: false, missing: [], model: "test", episodes: 0, features: { clarifications: Boolean(options.pendingCard), fastMode: Boolean(options.fastMode) } };
   const requests: Array<{ now: string | null }> = [];
   const chatRequests: Array<Record<string, unknown>> = [];
   const chatKeys: string[] = [];
@@ -563,6 +563,28 @@ test("clarification cards end normally, have no preselection, and resume the ori
     assert.match(ui.window.document.querySelector(".answer")!.textContent!, /For your small team/);
     assert.equal((ui.window.document.querySelector(".answer-details") as HTMLElement).hidden, false);
   } finally { ui.dom.window.close(); }
+});
+
+test("Fast selection survives clarification and is visible on the completed answer", async () => {
+  const ui = await mount({ fastMode: true, chatReplies: [[{ type: "clarification", card: { ...clarificationCard, responseMode: "fast" } }], clarificationDone] });
+  try {
+    const mode = ui.window.document.getElementById("response-mode") as HTMLSelectElement;
+    mode.value = "fast"; mode.dispatchEvent(new ui.window.Event("change"));
+    assert.match(ui.window.document.getElementById("response-mode-hint")!.textContent!, /lighter research/);
+    (ui.window.document.getElementById("input") as HTMLTextAreaElement).value = clarificationCard.message;
+    ui.button("#send").click(); await flushChat();
+    assert.equal(ui.chatRequests[0]!.responseMode, "fast");
+    mode.value = "standard"; mode.dispatchEvent(new ui.window.Event("change"));
+    ui.button(".clarification-option").click(); await flushChat();
+    assert.equal(ui.chatRequests[1]!.responseMode, "fast");
+    assert.match(ui.window.document.querySelector(".answer-status")!.textContent!, /Fast/);
+  } finally { ui.dom.window.close(); }
+});
+
+test("Fast cannot be selected when the server has no fast deployment", async () => {
+  const ui = await mount();
+  try { assert.equal(ui.button('#response-mode option[value="fast"]').disabled, true); }
+  finally { ui.dom.window.close(); }
 });
 
 for (const kind of ["freeform", "skip", "composer"] as const) {

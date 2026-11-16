@@ -18,6 +18,8 @@ These questions need an existing conversation history. A fresh installation star
 
 The date picker also supports **era simulation**: answer from a selected historical perspective while researching the live web. Modern sources can establish historical events, but later outcomes should not be presented as knowledge available in that era. This is a reconstructed perspective, not a frozen historical internet.
 
+Choose **Standard** for fuller research, or **Fast** for a shorter answer using the smaller configured model. Fast uses one research round, at most four lookups, a ten-second deadline per lookup, and a smaller output allowance. Explicit verification and factual era answers retain the main model's evidence review, so those checks can still take longer. Fast is a research-depth tradeoff, not a guaranteed response time or a provider priority tier.
+
 ## Architecture
 
 ![asof architecture: browser, Node.js and TypeScript backend, model gateway, Exa search, SQLite, and background memory worker](docs/assets/asof-architecture-dark.png)
@@ -43,13 +45,13 @@ See the [backend capabilities](docs/architecture/README.md) and [conversation/me
 | Frontend | HTML, CSS and browser JavaScript |
 | Transport | HTTP/JSON requests and server-sent events (SSE) |
 | Answer generation, evidence review and repair | Azure Foundry deployment `gpt-6.1-sol-1` |
-| Background memory extraction | Azure Foundry deployment `gpt-6-luna-1` |
+| Fast answers and background memory extraction | Azure Foundry deployment `gpt-6-luna-1` |
 | Model protocol | Responses API in the current configuration; Chat Completions adapter also available |
 | Web retrieval | Exa Search and Contents |
 | Persistence | Native Node SQLite, WAL and full-text search |
 | Answer rendering | Markdown with HTML sanitization |
 
-The model names above are this project's **configured Azure deployment names**. Set `LLM_MODEL` and `LLM_FAST_MODEL` to deployments available in your own account. They are not hardcoded requirements. If `LLM_FAST_MODEL` is empty, extraction uses the main model. The current configuration uses `LLM_REASONING_EFFORT=low`.
+The model names above are this project's **configured Azure deployment names**. Set `LLM_MODEL` and `LLM_FAST_MODEL` to deployments available in your own account. They are not hardcoded requirements. If `LLM_FAST_MODEL` is empty, Fast mode is unavailable and extraction uses the main model. The fast deployment must support tool calling as well as JSON output. The current configuration uses `LLM_REASONING_EFFORT=low`.
 
 ## Folder structure
 
@@ -120,7 +122,7 @@ Two provider keys are needed for live answers:
 | `EXA_API_KEY` | Your Exa API key |
 | `LLM_BASE_URL` | The OpenAI-compatible base URL for your Foundry resource |
 | `LLM_MODEL` | Your answer/review deployment name |
-| `LLM_FAST_MODEL` | Optional memory-extraction deployment name |
+| `LLM_FAST_MODEL` | Optional Fast-mode and memory-extraction deployment name |
 | `LLM_API_MODE` | `responses` for this project's current configuration, or `chat_completions` for a compatible host |
 | `LLM_REASONING_EFFORT` | Optional reasoning setting supported by your deployment; current configuration is `low` |
 

@@ -17,6 +17,7 @@ import { EvidenceWindow } from "./evidence.ts";
 import { reviewSimulationAnswer, type EvidenceQuality, type SimulationReview } from "./simulation.ts";
 import { recordStage } from "../runtime/telemetry.ts";
 import { citedNumbers } from "./citations.ts";
+import { FAST_INSTRUCTIONS, FAST_LIMITS, type ResponseMode } from "./response-mode.ts";
 import { ASK_CLARIFICATION_TOOL, CLARIFICATION_INSTRUCTIONS, canClarify, parseClarification,
   type ClarificationAnswer, type ClarificationCard, type ClarificationPort } from "./clarification.ts";
 export { citedNumbers } from "./citations.ts";
@@ -29,6 +30,7 @@ const HISTORY_TURNS = 8;
 
 export interface Deps {
   llm: Llm;
+  fastLlm?: Llm;
   search: SearchProvider;
   store: MemoryStore;
   clock: Clock;
@@ -57,6 +59,7 @@ export interface TurnInput {
   asOf?: Date;
   clarification?: ClarificationAnswer;
   recheckEpisodeId?: number;
+  responseMode?: ResponseMode;
 }
 
 export interface Timings {
@@ -87,6 +90,8 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
   const elapsed = () => Math.round(performance.now() - started);
   const { llm, store, clock } = deps;
   const { sessionId, message, tz } = input;
+  const responseMode = input.responseMode ?? "standard";
+  const fast = responseMode === "fast";
   const deadlineAt = input.deadlineAt ?? Date.now() + TURN_TIMEOUT_MS;
   const availableMs = Math.max(1, Math.ceil(deadlineAt - Date.now()));
   const synthesisReserveMs = Math.min(15_000, Math.floor(availableMs / 3));
@@ -128,7 +133,7 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
       const commitBegan = performance.now();
       const episodeId = store.saveEpisode({ sessionId, ownerId: input.ownerId, turnId: input.turnId,
         quality: "non_factual", createdAt: Date.parse(time.receivedAt), askedAt: now.getTime(), tz,
-        question: message, answer, sources: [], execution: { time, quality: "non_factual", intent: policy.intent,
+        question: message, answer, sources: [], execution: { time, responseMode, quality: "non_factual", intent: policy.intent,
           requestContext: contextMetadata, searches: 0, modelCalls: 0 } });
       recordStage("commit", performance.now() - commitBegan);
       emit({ type: "text", delta: answer });
@@ -152,7 +157,7 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
       const answer = "I couldn't find a matching earlier discussion in the history available to this browser. If you used another browser or cleared its cookies, that history won't appear here. Paste the earlier answer or tell me the topic, and I can check it using current sources.";
       const episodeId = store.saveEpisode({ sessionId, ownerId: input.ownerId, turnId: input.turnId,
         quality: "non_factual", createdAt: Date.parse(time.receivedAt), askedAt: now.getTime(), tz,
-        question: message, answer, sources: [], execution: { time, quality: "non_factual", intent: "recall",
+        question: message, answer, sources: [], execution: { time, responseMode, quality: "non_factual", intent: "recall",
           requestContext: contextMetadata, memoryLookup: "no_match", searches: 0, modelCalls: 0 } });
       emit({ type: "text", delta: answer });
       emit({ type: "done", episodeId, turnId: input.turnId, quality: "non_factual", cited: [],
@@ -168,6 +173,7 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
     const prompt = preparePrompt({ message, time, history, memory: renderMemory(cleanMemory, tz), requestContext, clarification: input.clarification });
     const messages: ChatMessage[] = prompt.messages;
     const clarificationAllowed = Boolean(deps.questions && !input.clarification && canClarify(message, simulated));
+    if (fast) messages.splice(2, 0, { role: "system", content: FAST_INSTRUCTIONS });
     if (clarificationAllowed) messages.splice(2, 0, { role: "system", content: CLARIFICATION_INSTRUCTIONS });
     const evidence = new EvidenceWindow();
 
@@ -198,7 +204,7 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
         recordStage("search_admission", 0, { outcome: "rejected", code: "deadline_reserve" });
         return "Research deadline reached. Use the existing passages, identify unresolved facts, and finish the answer now.";
       }
-      if (searches >= MAX_SEARCH_CALLS) {
+      if (searches >= (fast ? FAST_LIMITS.searches : MAX_SEARCH_CALLS)) {
         recordStage("search_admission", 0, { outcome: "rejected", code: "search_budget" });
         return "Search budget exhausted. Answer using existing evidence and identify anything unverified.";
       }
@@ -209,7 +215,7 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
         ...(!buffered && query.publishedAfter ? { publishedAfter: query.publishedAfter } : {}) } as const;
       emit({ ...base, state: "running" });
       try {
-        const hits = await search.search(query, signal);
+        const hits = await search.search(query, fast ? AbortSignal.any([signal, AbortSignal.timeout(FAST_LIMITS.searchTimeoutMs)]) : signal);
         signal.throwIfAborted();
         emit({ ...base, state: "done", results: hits.length, ms: Math.round(performance.now() - began) });
         return { query, hits };
@@ -228,7 +234,7 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
     let modelCalls = 0;
 
     for (let round = 1; ; round++) {
-      let mustAnswer = round > MAX_SEARCH_ROUNDS || remainingMs() < synthesisReserveMs;
+      let mustAnswer = round > (fast ? FAST_LIMITS.searchRounds : MAX_SEARCH_ROUNDS) || remainingMs() < synthesisReserveMs;
       let mayAsk = clarificationAllowed && round === 1 && !mustAnswer;
       const generate = () => {
         modelCalls++;
@@ -238,6 +244,7 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
           toolChoice: mustAnswer ? "none" : "auto",
           signal,
           purpose: mustAnswer ? "synthesis" : "research",
+          ...(fast ? { maxOutputTokens: FAST_LIMITS.outputTokens } : {}),
           onText: (delta) => {
             if (buffered || mayAsk) return;
             firstTokenMs ??= elapsed();
@@ -270,7 +277,7 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
         const question = parseClarification(questions[0]!.function.arguments);
         if (question) {
           signal.throwIfAborted();
-          const card = deps.questions!.create({ sessionId, message, time, question });
+          const card = deps.questions!.create({ sessionId, message, time, question, responseMode });
           emit({ type: "clarification", card });
           return;
         }
@@ -348,6 +355,7 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
             modelCalls++;
             const repairTimeout = deps.repairTimeoutMs ?? 15_000;
             const repair = await abortable(llm.stream({ messages: repairMessages, tools: [], toolChoice: "none", purpose: "repair",
+              ...(fast ? { maxOutputTokens: FAST_LIMITS.outputTokens } : {}),
               signal: AbortSignal.any([signal, AbortSignal.timeout(repairTimeout)]), onText() {} }), signal, repairTimeout);
             signal.throwIfAborted();
             if (!repair.toolCalls.length && repair.text.trim() && repair.text.length <= 20_000) {
@@ -395,7 +403,7 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
     const episodeId = store.saveEpisode({
       sessionId, ownerId: input.ownerId, turnId: input.turnId, quality, createdAt: Date.parse(time.receivedAt),
       askedAt: now.getTime(), tz, question: message, answer, sources: citedSources,
-      execution: { time, quality, rejectionObserved, requestContext: contextMetadata,
+      execution: { time, responseMode, quality, rejectionObserved, requestContext: contextMetadata,
         intent: prompt.policy.intent, prompt: prompt.stats, evidence: { ...evidence.stats }, searches, modelCalls,
         ...(review ? { review: { kind: reviewKind, status: review.status, reason: review.reason ?? (reviewAttempts.length ? null : "no_usable_evidence"),
           calls: reviewCalls, ms: reviewMs, attempts: reviewAttempts } } : {}),

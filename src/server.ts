@@ -13,6 +13,7 @@ import { Enricher } from "./memory/enrich.ts";
 import { MemoryStore, StoreConflictError, type DurableTurn } from "./memory/store.ts";
 import { createExaSearch, withCache, withConcurrency, withProfile, retrievalProfile } from "./search.ts";
 import { turnPolicy } from "./agent/prepare.ts";
+import { FAST_LIMITS } from "./agent/response-mode.ts";
 import { validTimeZone } from "./time/zone.ts";
 import { parseInstant } from "./time/instant.ts";
 import { QuestionStore, QuestionConflict } from "./memory/questions.ts";
@@ -87,14 +88,17 @@ export function createApplication(options: { config?: Config; store?: MemoryStor
     if (!issues.length) {
       const llm = createModelGateway(createLlm(config.llm, { spendPolicy: spendingPolicy }), { pool: models, quota, defaultBudget: { maxCalls: config.limits.turnModelCalls, maxTokens: config.limits.turnTokens, ...(prices ? { prices, maxSpendUsd: config.limits.maxTurnDollars } : {}) }, outputTokens: config.limits.maxOutputTokens, onCall: modelTrace });
       const verifier = createModelGateway(createLlm({ ...config.llm, fastModel: config.llm.model, maxJsonOutputTokens: 4000 }, { spendPolicy: spendingPolicy }), { pool: models, quota, defaultBudget: { maxCalls: config.limits.turnModelCalls, maxTokens: config.limits.turnTokens, ...(prices ? { prices, maxSpendUsd: config.limits.maxTurnDollars } : {}) }, onCall: modelTrace });
+      const fastLlm = config.llm.fastModel ? createModelGateway(createLlm({ ...config.llm, model: config.llm.fastModel, maxOutputTokens: FAST_LIMITS.outputTokens }, { spendPolicy: spendingPolicy }),
+        { pool: models, quota, outputTokens: FAST_LIMITS.outputTokens, onCall: modelTrace }) : undefined;
       worker = new Enricher(llm, store);
-      deps = { llm, verifier, clock, store, search: withCache(withConcurrency(createExaSearch(config.exaApiKey, { spendPolicy: spendingPolicy, maxAttemptCostDollars: config.limits.searchAttemptDollars ?? null }), 4, 16)), enricher: worker, questions };
+      deps = { llm, fastLlm, verifier, clock, store, search: withCache(withConcurrency(createExaSearch(config.exaApiKey, { spendPolicy: spendingPolicy, maxAttemptCostDollars: config.limits.searchAttemptDollars ?? null }), 4, 16)), enricher: worker, questions };
     }
   }
   if (options.deps) {
     const llm = createModelGateway(options.deps.llm, { pool: models, quota, defaultBudget: { maxCalls: config.limits.turnModelCalls, maxTokens: config.limits.turnTokens, ...(prices ? { prices, maxSpendUsd: config.limits.maxTurnDollars } : {}) }, outputTokens: config.limits.maxOutputTokens, onCall: modelTrace });
     const reviewer = options.deps.verifier ? { ...options.deps.llm, json: options.deps.verifier.json.bind(options.deps.verifier) } : options.deps.llm;
     deps = { ...options.deps, llm, verifier: createModelGateway(reviewer, { pool: models, quota, defaultBudget: { maxCalls: config.limits.turnModelCalls, maxTokens: config.limits.turnTokens, ...(prices ? { prices, maxSpendUsd: config.limits.maxTurnDollars } : {}) }, onCall: modelTrace }) };
+    if (options.deps.fastLlm) deps.fastLlm = createModelGateway(options.deps.fastLlm, { pool: models, quota, outputTokens: FAST_LIMITS.outputTokens, onCall: modelTrace });
   }
   const eventLoop = monitorEventLoopDelay({ resolution: 20 }); eventLoop.enable();
   let draining = false;
@@ -110,7 +114,7 @@ export function createApplication(options: { config?: Config; store?: MemoryStor
       mode: viewpoint !== null ? "era" : "live", model: config.llm?.model ?? null, missing,
       episodes: store.count(Number.MAX_SAFE_INTEGER, ownerId), policyVersion: POLICY_VERSION,
       simulation: { mode: "era", research: "live-web", review: "event-time-and-sources" },
-      features: { clarifications: true, durableTurns: true, conversationTime: true },
+      features: { clarifications: true, durableTurns: true, conversationTime: true, fastMode: Boolean(deps?.fastLlm) },
       ...(conversation ? { conversation } : {}) };
   };
   const turnResult = (turn: DurableTurn, ownerId: string) => ({ turn,
@@ -132,6 +136,7 @@ export function createApplication(options: { config?: Config; store?: MemoryStor
     let message = typeof body.message === "string" ? body.message.trim() : "";
     if ((!body.clarification && (!message || message.length > 8000)) || !validSession(body.sessionId)) throw new RequestError("Expected a session ID and a message of 1 to 8000 characters.", 400);
     const sessionId = body.sessionId;
+    if (body.responseMode !== undefined && body.responseMode !== "standard" && body.responseMode !== "fast") throw new RequestError("responseMode must be standard or fast.", 400);
     const recheckEpisodeId = body.recheckEpisodeId;
     if (recheckEpisodeId !== undefined) {
       if (!Number.isSafeInteger(recheckEpisodeId) || Number(recheckEpisodeId) < 1 || body.clarification !== undefined) throw new RequestError("Invalid saved answer reference.", 400);
@@ -175,10 +180,13 @@ export function createApplication(options: { config?: Config; store?: MemoryStor
       const effectiveViewpoint = resumed ? resumed.card.time.simulated ? Date.parse(resumed.card.time.effectiveAt) : null : selected?.getTime() ?? null;
       if (effectiveViewpoint !== null && effectiveViewpoint > Date.now()) throw new RequestError("Choose a date and time in the past, or return to live mode.", 400, "future_viewpoint");
       const effectiveMode = effectiveViewpoint === null ? "live" : "era";
+      const responseMode = resumed?.card.responseMode ?? (body.responseMode === "fast" ? "fast" : "standard");
+      if (responseMode === "fast" && !deps?.fastLlm) throw new RequestError("Fast mode is not configured. Choose Standard mode.", 400, "fast_mode_unavailable");
       const tz = resumed?.card.time.tz ?? validTimeZone(typeof body.tz === "string" ? body.tz : undefined);
       const key = req.headers["idempotency-key"] ?? body.idempotencyKey ?? randomUUID();
       if (typeof key !== "string" || !/^[a-zA-Z0-9_.:-]{1,128}$/.test(key)) throw new RequestError("Invalid idempotency key.", 400);
       const requestHash = createHash("sha256").update(JSON.stringify({ sessionId, message, tz, mode: effectiveMode, asOf: effectiveViewpoint, clarification: clarification ?? null,
+        ...(responseMode === "fast" ? { responseMode } : {}),
         ...(recheckEpisodeId !== undefined ? { recheckEpisodeId } : {}) })).digest("hex");
       const begun = store.beginTurn({ ownerId, sessionId, idempotencyKey: key, requestHash, viewpointAt: effectiveViewpoint, mode: effectiveMode });
       turn = begun.turn;
@@ -189,7 +197,7 @@ export function createApplication(options: { config?: Config; store?: MemoryStor
         res.setHeader("retry-after", "1");
         return sendJson(res, turn.status === "running" ? 202 : 409, { ...turnResult(turn, ownerId), code: turn.status === "running" ? "turn_in_progress" : "turn_terminal", error: turn.status === "running" ? "This answer is already running." : "This attempt ended. Submit a new key to try again." });
       }
-      const trace = newTrace(turn.id, config.llm?.model ?? null, effectiveMode);
+      const trace = newTrace(turn.id, (responseMode === "fast" ? config.llm?.fastModel : config.llm?.model) ?? null, effectiveMode);
       const persistTrace = (updated: TurnTrace) => {
         try { const priorTrace = store.traceFor(turn!.id, ownerId); store.saveTrace(turn!.id, ownerId,
           { ...updated, clientFirstRenderMs: priorTrace?.clientFirstRenderMs ?? updated.clientFirstRenderMs }); }
@@ -197,6 +205,7 @@ export function createApplication(options: { config?: Config; store?: MemoryStor
       };
       persistTrace(trace);
       await withTrace(trace, async () => {
+        recordStage("response_mode", 0, { mode: responseMode });
         let outcome = "failed";
         try {
           const admissionStarted = performance.now();
@@ -208,9 +217,10 @@ export function createApplication(options: { config?: Config; store?: MemoryStor
           const questionPort = { create: (input: Parameters<QuestionStore["create"]>[0]) => questions.create({ ...input, ownerId }) };
           const policy = turnPolicy(message, effectiveMode === "era");
           const requestDeps: Deps = { ...deps, store, clock: { now: () => new Date(effectiveViewpoint ?? Date.now()), simulated: effectiveMode === "era" },
+            ...(responseMode === "fast" ? { llm: deps.fastLlm! } : {}),
             questions: questionPort, search: withProfile(deps.search, retrievalProfile(message, { simulated: effectiveMode === "era", verify: policy.requireVerificationEvidence }), config.retrievalProfiles) };
           await runWithModelContext({ ownerId, turnId: turn!.id, budget: budget(), deadlineAt, deadlineReserveMs: Math.min(12_000, Math.floor(config.limits.turnTimeoutMs / 3)) },
-            () => runTurn(requestDeps, { ownerId, turnId: turn!.id, sessionId, message, tz, asOf: effectiveViewpoint === null ? undefined : new Date(effectiveViewpoint), clarification,
+            () => runTurn(requestDeps, { ownerId, turnId: turn!.id, sessionId, message, tz, responseMode, asOf: effectiveViewpoint === null ? undefined : new Date(effectiveViewpoint), clarification,
               ...(recheckEpisodeId !== undefined ? { recheckEpisodeId: Number(recheckEpisodeId) } : {}), deadlineAt, signal }, event => {
               if (event.type === "text") serverEmission();
               if (event.type === "done") { outcome = "completed"; trace.quality = event.quality; count(`quality_${event.quality}`); if (resumed) questions.finish(resumed.card.id, event.episodeId); }

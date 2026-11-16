@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import type { TurnTime } from "../clock.ts";
 import type { ClarificationAnswer, ClarificationCard, ClarificationPort, ClarificationQuestion, ClarificationSelection } from "../agent/clarification.ts";
+import type { ResponseMode } from "../agent/response-mode.ts";
 
 interface SavedQuestion {
   card: ClarificationCard;
@@ -29,13 +30,16 @@ export class QuestionStore implements ClarificationPort {
       this.db.exec("ALTER TABLE clarification_questions ADD COLUMN owner_id TEXT NOT NULL DEFAULT 'local'");
     }
     this.db.exec("CREATE INDEX IF NOT EXISTS questions_by_owner_session ON clarification_questions(owner_id, session_id, created_at)");
+    if (!(this.db.prepare("PRAGMA table_info(clarification_questions)").all() as Array<{name:string}>).some(row => row.name === "response_mode")) {
+      this.db.exec("ALTER TABLE clarification_questions ADD COLUMN response_mode TEXT NOT NULL DEFAULT 'standard'");
+    }
   }
-  create(input: { ownerId?: string; sessionId: string; message: string; time: TurnTime; question: ClarificationQuestion }): ClarificationCard {
+  create(input: { ownerId?: string; sessionId: string; message: string; time: TurnTime; question: ClarificationQuestion; responseMode?: ResponseMode }): ClarificationCard {
     const id = randomUUID(), now = Date.now();
     this.db.prepare("DELETE FROM clarification_questions WHERE expires_at < ? AND episode_id IS NULL").run(now);
-    this.db.prepare(`INSERT INTO clarification_questions (id, session_id, message, time_json, question_json, created_at, expires_at, owner_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(id, input.sessionId, input.message, JSON.stringify(input.time), JSON.stringify(input.question), now, now + 86_400_000, input.ownerId ?? "local");
-    return { id, message: input.message, time: input.time, ...input.question };
+    this.db.prepare(`INSERT INTO clarification_questions (id, session_id, message, time_json, question_json, created_at, expires_at, owner_id, response_mode)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, input.sessionId, input.message, JSON.stringify(input.time), JSON.stringify(input.question), now, now + 86_400_000, input.ownerId ?? "local", input.responseMode ?? "standard");
+    return { id, message: input.message, time: input.time, ...input.question, responseMode: input.responseMode ?? "standard" };
   }
   pending(sessionId: string, ownerId = "local"): ClarificationCard | null {
     const row = this.db.prepare("SELECT * FROM clarification_questions WHERE session_id = ? AND owner_id = ? AND episode_id IS NULL AND expires_at >= ? ORDER BY created_at DESC, rowid DESC LIMIT 1").get(sessionId, ownerId, Date.now());
@@ -65,7 +69,7 @@ export class QuestionStore implements ClarificationPort {
   close() { this.db.close(); }
   private decode(row: Record<string, unknown>): SavedQuestion {
     return { sessionId: row.session_id as string,
-      card: { id: row.id as string, message: row.message as string, time: JSON.parse(row.time_json as string), ...JSON.parse(row.question_json as string) },
+      card: { id: row.id as string, message: row.message as string, time: JSON.parse(row.time_json as string), ...JSON.parse(row.question_json as string), responseMode: row.response_mode as ResponseMode },
       selection: row.selection_json ? JSON.parse(row.selection_json as string) : null,
       episodeId: row.episode_id as number | null };
   }
