@@ -11,6 +11,7 @@ import { QuestionStore } from "../src/memory/questions.ts";
 import { createApplication } from "../src/server.ts";
 import type { Config } from "../src/config.ts";
 import type { Llm } from "../src/llm.ts";
+import { createExaSearch } from "../src/search/exa.ts";
 
 const now = new Date("2026-11-16T12:00:00Z");
 const lookup = (id: number) => ({ id: `s${id}`, type: "function" as const, function: { name: "web_search", arguments: JSON.stringify({ query: `official price ${id}` }) } });
@@ -88,7 +89,7 @@ for (const recovers of [true, false]) {
       calls++;
       if (calls <= 2) {
         assert.equal(request.toolChoice, "auto");
-        assert.deepEqual(Object.keys((request.tools[0]!.function.parameters as any).properties), ["query", "urls"]);
+        assert.deepEqual(Object.keys((request.tools[0]!.function.parameters as any).properties), ["query", "content", "urls"]);
         const call = lookup(1);
         if (calls === 1 || !recovers) call.function.arguments = '{"query":"price","urls":42}';
         return { text: "", toolCalls: [call] };
@@ -165,4 +166,74 @@ test("clarification mode survives reopening storage", () => {
     assert.equal(questions.pending("persist")!.responseMode, "fast");
     assert.equal(questions.begin(card.id, "persist", { skip: true }).card.responseMode, "fast");
   } finally { questions.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+
+test("Fast exposes and honors a full-content source read on its first research round", async () => {
+  const store = new MemoryStore(":memory:");
+  let calls = 0, searches = 0, reviews = 0;
+  const llm: Llm = { json: async () => { throw new Error("Use the verifier"); }, stream: async request => {
+    if (calls++ === 0) {
+      const properties = (request.tools[0]!.function.parameters as any).properties;
+      assert.deepEqual(properties.content.enum, ["highlights", "full"]);
+      assert.match(JSON.stringify(request.messages), /set content to full on that first lookup/);
+      return { text: "", toolCalls: [{ id: "full-source", type: "function", function: { name: "web_search",
+        arguments: JSON.stringify({ query: "What is Acme's monthly price?", urls: [hit.url], content: "full" }) } }] };
+    }
+    assert.equal(request.toolChoice, "none");
+    assert.match(JSON.stringify(request.messages), /Acme costs \$25 monthly/);
+    return { text: answer, toolCalls: [] };
+  } };
+  try {
+    const events: AgentEvent[] = [];
+    await runTurn({ store, llm, clock: { now: () => now, simulated: false }, enricher: { schedule() {} },
+      search: { search: async query => { searches++; assert.equal(query.content, "full"); assert.deepEqual(query.urls, [hit.url]);
+        assert.equal(query.freshness, "fresh"); return [hit]; } },
+      verifier: { json: async () => { reviews++; return { status: "approved", issues: [], quality: "supported",
+        claimChecks: [{ claim: "Acme costs $25 monthly", sourceNumbers: [1], supported: true, applicable: true }] }; } } },
+      { sessionId: "full-read", message: `Read ${hit.url} using full content. Verify the monthly price.`, tz: "UTC", responseMode: "fast" }, event => events.push(event));
+    const done = events.find(event => event.type === "done"); assert.ok(done && done.type === "done");
+    assert.equal(searches, 1); assert.equal(calls, 2); assert.equal(reviews, 1); assert.equal(done.quality, "supported");
+  } finally { store.close(); }
+});
+
+for (const found of [true, false]) test(`Fast first full read acquires bounded deep evidence and retains verification, evidence=${found}`, async () => {
+  const store = new MemoryStore(":memory:");
+  const url = "https://example.com/rfc", definition = "The 404 status code means the server did not find a current representation or is not willing to disclose that one exists. It does not establish whether this is temporary or permanent.";
+  const document = "Contents: HTTP 404\n\n" + "Unrelated connection details.\n\n".repeat(11_000) + "HTTP 404 status\n\n" + definition + "\n\nCaching depends on the stated cache controls.";
+  assert.ok(document.indexOf(definition) > 300_000);
+  let generations = 0, requests = 0, reviews = 0;
+  const search = createExaSearch("test-key", { spendPolicy: null, fetch: (async (_url, options) => {
+    requests++;
+    const body = JSON.parse(String(options?.body));
+    assert.equal(body.text.maxCharacters, 400_000); assert.equal(body.maxAgeHours, 0); assert.deepEqual(body.ids, [url]);
+    return new Response(JSON.stringify({ results: found ? [{ url, title: "HTTP semantics", text: document }] : [],
+      statuses: [{ id: url, status: "success", source: "live" }] }));
+  }) as typeof fetch });
+  const llm: Llm = { json: async () => { throw new Error("Fast must not replace the reviewer"); }, stream: async request => {
+    if (++generations === 1) {
+      assert.deepEqual((request.tools[0]!.function.parameters as any).properties.content.enum, ["highlights", "full"]);
+      return { text: "", toolCalls: [{ id: "first-full", type: "function", function: { name: "web_search",
+        arguments: JSON.stringify({ query: "What does HTTP 404 status mean?", urls: [url], content: "full" }) } }] };
+    }
+    assert.equal(request.toolChoice, "none");
+    if (found) assert.match(JSON.stringify(request.messages), /not willing to disclose/);
+    return { text: `${definition} [1]`, toolCalls: [] };
+  } };
+  try {
+    const events: AgentEvent[] = [];
+    await runTurn({ store, llm, search, clock: { now: () => now, simulated: false }, enricher: { schedule() {} },
+      verifier: { json: async request => {
+        reviews++;
+        const payload = JSON.parse(request.user);
+        assert.ok(payload.sources[0].text.includes(definition)); assert.ok(payload.sources[0].text.length <= 12_000);
+        assert.equal(payload.sources[0].passageSelection.acquisitionMayBeTruncated, true);
+        return { status: "approved", issues: [], quality: "supported", claimChecks: [{ claim: definition, sourceNumbers: [1], supported: true, applicable: true }] };
+      } } }, { sessionId: "deep-full", message: `Read ${url} using full content and verify the meaning of HTTP 404.`, tz: "UTC", responseMode: "fast" }, event => events.push(event));
+    const done = events.find(event => event.type === "done"); assert.ok(done && done.type === "done");
+    assert.equal(requests, 1); assert.equal(generations, 2); assert.equal(reviews, found ? 1 : 0);
+    assert.equal(done.quality, found ? "supported" : "explicitly_unverified");
+    assert.deepEqual(done.cited, found ? [1] : []);
+    if (!found) assert.doesNotMatch(store.episode(done.episodeId)!.answer, /not willing to disclose|temporary or permanent/);
+  } finally { store.close(); }
 });
