@@ -23,7 +23,8 @@
     "db:check": "tsx --disable-warning=ExperimentalWarning scripts/ops.ts check",
     "db:prune": "tsx --disable-warning=ExperimentalWarning scripts/ops.ts prune",
     "eval:quality": "tsx --disable-warning=ExperimentalWarning eval/quality.ts",
-    "eval:pilot": "tsx --disable-warning=ExperimentalWarning eval/pilot.ts"
+    "eval:pilot": "tsx --disable-warning=ExperimentalWarning eval/pilot.ts",
+    "eval:comparison": "tsx --disable-warning=ExperimentalWarning eval/comparison-regression.ts"
   },
   "dependencies": {
     "@fontsource/barlow-condensed": "^5.3.0",

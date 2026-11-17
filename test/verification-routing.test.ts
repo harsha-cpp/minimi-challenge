@@ -61,6 +61,12 @@ const price = { n: 1, url: "https://example.com/Acme", title: "Acme pricing", te
 const seats = { ...price, n: 2, url: "https://example.com/Acme/seats", title: "Acme seats", text: "Acme requires five seats." };
 const previousAt = now.getTime() - 60_000;
 
+function singleLineSupport(sources: Array<{n:number;numberedText?:string}>, passage: string) {
+  const source = sources.find(source => source.numberedText === `1: ${passage}`);
+  assert.ok(source, `The comparison payload must contain the exact numbered current passage: ${passage}`);
+  return { n: source.n, startLine: 1, endLine: 1 };
+}
+
 async function comparisonCase(options: { mode?: "explicit" | "auto" | "same"; scenario?: "same" | "changed" | "partial" | "invalid-source" | "empty" | "failure" } = {}) {
   const store = new MemoryStore(":memory:");
   const originals = [price, seats].map(source => makeReviewedClaim({ claim: source.text, sourceNumbers: [source.n] },
@@ -81,12 +87,13 @@ async function comparisonCase(options: { mode?: "explicit" | "auto" | "same"; sc
     assert.doesNotMatch(request.user, /PrivateCorp/);
     assert.equal(input.originalClaims.length, 2);
     if (options.scenario === "failure") throw new Error("Provider unavailable");
-    const sourceNumber = (needle: string) => input.sources.find((source: {text?:string}) => source.text?.includes(needle))?.n;
+    const supports = [singleLineSupport(input.sources, options.scenario === "changed" ? "Acme costs $30 monthly." : price.text),
+      singleLineSupport(input.sources, seats.text)];
     const items = (input.originalClaims as CanonicalClaim[]).map((claim, index) => ({ referenceClaimId: claim.id, original: claim.text,
       status: options.scenario === "partial" && index === 1 ? "unresolved" : options.scenario === "changed" && index === 0 ? "changed" : "supported",
       statement: options.scenario === "changed" && index === 0 ? "Acme costs $30 monthly." : claim.text,
-      sourceNumbers: options.scenario === "partial" && index === 1 ? [] : [options.scenario === "invalid-source" && index === 1 ? 999 : sourceNumber(index ? "five seats" : "monthly")],
-      support: options.scenario === "partial" && index === 1 ? [] : [{ n: sourceNumber(index ? "five seats" : "monthly"), quote: index ? seats.text : options.scenario === "changed" ? "Acme costs $30 monthly." : price.text }],
+      sourceNumbers: options.scenario === "partial" && index === 1 ? [] : [options.scenario === "invalid-source" && index === 1 ? 999 : supports[index]!.n],
+      support: options.scenario === "partial" && index === 1 ? [] : [supports[index]!],
     }));
     return { referenceCheck: { episodeId: original, answerHash: input.reference.answerHash, addressesTarget: true,
       coverage: options.scenario === "partial" ? "partial" : "complete" }, items };
@@ -100,7 +107,7 @@ async function comparisonCase(options: { mode?: "explicit" | "auto" | "same"; sc
       clock: { now: () => now, simulated: false }, enricher: { schedule() {} } },
     { ownerId: "alice", sessionId: "current", message, tz: "UTC", ...(options.mode !== "auto" && options.mode !== "same" ? { memoryReferenceEpisodeId: original } : {}) }, event => events.push(event));
     assert.equal(oldModelCalls, 0);
-    assert.ok(searches.length >= 1 && searches.length <= 2, `bounded search count: ${searches.length}`);
+    assert.ok(searches.length >= 1 && searches.length <= 4, `bounded search count: ${searches.length}`);
     assert.ok(searches.every(query => query.freshness === "fresh"));
     assert.equal(comparisons, options.scenario === "empty" ? 0 : 1);
     const done = events.find(event => event.type === "done");
@@ -108,6 +115,7 @@ async function comparisonCase(options: { mode?: "explicit" | "auto" | "same"; sc
     const saved = store.episode(done.episodeId, "alice")!;
     assert.equal(saved.sessionId, "current"); assert.equal(saved.question, message);
     assert.equal((saved.execution!.requestContext as {anchorEpisodeId:number}).anchorEpisodeId, original);
+    if (done.quality === "supported" || done.quality === "supported_partial") assert.equal((saved.execution!.review as {reason:string|null}).reason,null);
     assert.equal(store.currentConversationHistory(originalSession, 10, "alice").length, options.mode === "same" ? 2 : 1);
     return { answer: saved.answer, quality: done.quality, coverage: store.claimCoverageFor(saved.id, "alice"), originals, comparisons };
   } finally { store.close(); }
@@ -180,9 +188,9 @@ test("an unfinished live comparison retries only missing details and resumes its
           return {referenceCheck:{episodeId:original,answerHash:input.reference.answerHash,addressesTarget:true,coverage:phase==="first"?"partial":"complete"},
             items:input.originalClaims.map((claim:CanonicalClaim)=>{
               const missing=phase==="first" && claim.id===originals[1]!.id;
-              const source=input.sources.find((entry:{text?:string})=>entry.text===claim.text);
+              const support=singleLineSupport(input.sources,claim.text);
               return {referenceClaimId:claim.id,original:claim.text,status:missing?"unresolved":"supported",statement:claim.text,
-                sourceNumbers:missing?[]:[source.n],support:missing?[]:[{n:source.n,quote:claim.text}]};
+                sourceNumbers:missing?[]:[support.n],support:missing?[]:[support]};
             })};
         }}},
       {ownerId:"alice",sessionId:"current",message:phase==="first"?"Verify the selected answer":"Retry the unfinished check",tz:"UTC",memoryReferenceEpisodeId:original,
@@ -199,8 +207,8 @@ test("an unfinished live comparison retries only missing details and resumes its
       }
     }
     assert.deepEqual(requested,[originals.map(claim=>claim.id),[originals[1]!.id]]);
-    assert.deepEqual(directReads,[ [price.url,seats.url], [seats.url] ]);
-    assert.equal(comparisons,2);assert.equal(searchCalls,4);
+    assert.deepEqual(directReads,[ [price.url], [seats.url], [seats.url] ]);
+    assert.equal(comparisons,2);assert.equal(searchCalls,6);
     assert.ok(store.latestClaimCoverageFor(original,"current","alice",{viewpointAt:now.getTime(),simulated:false,tz:"UTC",receivedAt:Date.now()}).every(item=>item.status==="supported"));
   } finally {store.close();}
 });

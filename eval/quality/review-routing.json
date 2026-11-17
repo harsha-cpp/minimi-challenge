@@ -78,5 +78,25 @@
   "review-timeout": {
     "kind": "conversation_reference",
     "memoryScope": "none"
+  },
+  "hosting-billing-recheck": {
+    "kind": "standalone",
+    "memoryScope": "explicit_memory"
+  },
+  "unfinished-price-retry": {
+    "kind": "conversation_reference",
+    "memoryScope": "none"
+  },
+  "invalid-support-quote": {
+    "kind": "conversation_reference",
+    "memoryScope": "none"
+  },
+  "full-answer-outside-extracted-facts": {
+    "kind": "conversation_reference",
+    "memoryScope": "none"
+  },
+  "ordinal-option-followup": {
+    "kind": "conversation_reference",
+    "memoryScope": "none"
   }
 }

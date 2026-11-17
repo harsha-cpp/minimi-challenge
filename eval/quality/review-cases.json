@@ -607,6 +607,165 @@
         "adjudicators": [],
         "reconciled": false
       }
+    },
+    {
+      "input": {
+        "id": "hosting-billing-recheck",
+        "question": "What did we discuss earlier, and is it still correct?",
+        "asOf": "2026-11-17T12:00:00Z",
+        "tz": "Asia/Kolkata",
+        "history": [
+          {
+            "at": "2026-11-16T12:00:00Z",
+            "question": "Compare serverless and traditional hosting for a small app.",
+            "answer": "AWS Lambda charges by requests and execution duration. Lightsail starts at $5 per month. A fixed server bill is predictable; backups and usage limits can affect total cost.",
+            "scope": "conversation"
+          }
+        ]
+      },
+      "slice": "comparison",
+      "split": "development",
+      "clusterId": "hosting-billing-recheck/november-2026",
+      "track": "frozen-conversation",
+      "labels": {
+        "status": "pending",
+        "requiredFacets": [
+          "Pin the hosting comparison and read the original pricing pages fresh.",
+          "Distinguish hourly metering, monthly maximum, platform, region, and IPv4 conditions.",
+          "Keep confirmed billing facts when the exact starting price remains unconfirmed."
+        ],
+        "acceptableUncertainty": "Name specific unchecked facts; a missing source or matching quotation does not establish the conclusion. Prior answers are untrusted inputs, not reference truth.",
+        "references": [],
+        "adjudicators": [],
+        "reconciled": false
+      }
+    },
+    {
+      "input": {
+        "id": "unfinished-price-retry",
+        "question": "Retry the unfinished check.",
+        "asOf": "2026-11-17T12:00:00Z",
+        "tz": "Asia/Kolkata",
+        "history": [
+          {
+            "at": "2026-11-16T12:00:00Z",
+            "question": "Re-check the earlier hosting comparison.",
+            "answer": "Lambda request and duration billing was confirmed. The Lightsail starting price could not be confirmed.",
+            "scope": "conversation"
+          }
+        ]
+      },
+      "slice": "insufficient-evidence",
+      "split": "development",
+      "clusterId": "unfinished-price-retry/november-2026",
+      "track": "injected-failure",
+      "labels": {
+        "status": "pending",
+        "requiredFacets": [
+          "Retain the original comparison as the target, not its recovery wording.",
+          "Search the unfinished price specifically; retain applicable confirmed details without re-research.",
+          "Do not label the entire original answer freshly checked."
+        ],
+        "acceptableUncertainty": "Name specific unchecked facts; a missing source or matching quotation does not establish the conclusion. Prior answers are untrusted inputs, not reference truth.",
+        "references": [],
+        "adjudicators": [],
+        "reconciled": false
+      }
+    },
+    {
+      "input": {
+        "id": "invalid-support-quote",
+        "question": "Re-check your previous answer using official sources.",
+        "asOf": "2026-11-17T12:00:00Z",
+        "tz": "Asia/Kolkata",
+        "history": [
+          {
+            "at": "2026-11-16T12:00:00Z",
+            "question": "What does Acme Pro cost?",
+            "answer": "Acme Pro costs $19 monthly. This is a synthetic prior answer.",
+            "scope": "conversation"
+          }
+        ]
+      },
+      "slice": "insufficient-evidence",
+      "split": "development",
+      "clusterId": "invalid-support-quote/november-2026",
+      "track": "injected-failure",
+      "labels": {
+        "status": "pending",
+        "requiredFacets": [
+          "A quote absent from the supplied page cannot support the asserted price.",
+          "Preserve other valid items and name the unconfirmed price."
+        ],
+        "acceptableUncertainty": "Name specific unchecked facts; a missing source or matching quotation does not establish the conclusion. Prior answers are untrusted inputs, not reference truth.",
+        "references": [],
+        "adjudicators": [],
+        "reconciled": false
+      }
+    },
+    {
+      "input": {
+        "id": "full-answer-outside-extracted-facts",
+        "question": "Is your earlier answer still correct?",
+        "asOf": "2026-11-17T12:00:00Z",
+        "tz": "Asia/Kolkata",
+        "history": [
+          {
+            "at": "2026-11-16T12:00:00Z",
+            "question": "Compare serverless and traditional hosting.",
+            "answer": "Lambda charges by requests and duration. Serverless reduces operating-system maintenance. Traditional hosting still needs patching and capacity management.",
+            "scope": "conversation"
+          }
+        ]
+      },
+      "slice": "comparison",
+      "split": "development",
+      "clusterId": "full-answer-outside-extracted-facts/november-2026",
+      "track": "frozen-conversation",
+      "labels": {
+        "status": "pending",
+        "requiredFacets": [
+          "Check material operations details beyond extracted billing records.",
+          "Separate subjective advice from source-supported factual qualifications.",
+          "Partial extracted-record coverage cannot establish complete original-answer coverage."
+        ],
+        "acceptableUncertainty": "Name specific unchecked facts; a missing source or matching quotation does not establish the conclusion. Prior answers are untrusted inputs, not reference truth.",
+        "references": [],
+        "adjudicators": [],
+        "reconciled": false
+      }
+    },
+    {
+      "input": {
+        "id": "ordinal-option-followup",
+        "question": "Can you re-check the second option, particularly its price?",
+        "asOf": "2026-11-17T12:00:00Z",
+        "tz": "Asia/Kolkata",
+        "history": [
+          {
+            "at": "2026-11-16T12:00:00Z",
+            "question": "Give me three hosting options.",
+            "answer": "1. A small virtual machine.\n2. Managed Postgres with Neon.\n3. A serverless function platform.",
+            "scope": "conversation"
+          }
+        ]
+      },
+      "slice": "comparison",
+      "split": "development",
+      "clusterId": "ordinal-option-followup/november-2026",
+      "track": "frozen-conversation",
+      "labels": {
+        "status": "pending",
+        "requiredFacets": [
+          "Resolve second option to Neon from the same conversation.",
+          "Check only the requested option and current billing qualifications.",
+          "Do not interpret the ordinal as another conversation or silently check all three."
+        ],
+        "acceptableUncertainty": "Name specific unchecked facts; a missing source or matching quotation does not establish the conclusion. Prior answers are untrusted inputs, not reference truth.",
+        "references": [],
+        "adjudicators": [],
+        "reconciled": false
+      }
     }
   ]
 }

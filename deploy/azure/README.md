@@ -119,3 +119,23 @@ The daily timer runs at 02:00 UTC with up to 15 minutes of jitter. Journals are 
 Do not run a blue/green pair against the same SQLite file. Do not stop the current previews, provision paid resources or perform cutover merely by running the read-only plan script.
 
 At cutover, 26 episodes across 16 conversations were preserved. The deployment copy maps the `local` owner to `harsha` across all owner-scoped tables, while the original protected snapshot retains its original ownership. A separate `reviewer` token cannot access that history. The provider wallet was copied unchanged, with zero pending reservations; all subsequent paid checks charge that same campaign on the VM. The first off-host backup and a post-validation backup both completed. Do not reactivate the archived local credentials without reconciling the newest remote wallet and conversation data.
+
+### Website activity
+
+Successful `GET /` responses now record page-load timestamps separately from chat turns. The record contains a salted browser-credential pseudonym, not an IP address, user agent, cookie, query string or question. Reloads and bots count as page requests. A pseudonym is not a unique person and cannot identify a Minimi reviewer. No activity API is exposed publicly.
+
+Read the last day without modifying the database:
+
+```sh
+node --import tsx --disable-warning=ExperimentalWarning scripts/activity.ts report data/asof.db --tz Asia/Kolkata
+```
+
+Use explicit-offset timestamps for a different interval, for example `--since 2026-11-16T18:00:00+05:30 --until 2026-11-17T06:00:00+05:30`. `--limit 200` bounds displayed rows; totals still include the entire requested retained interval. The report separates page loads, completed chats, waiting for input, cancellation and provider failures. Three failed/interrupted turns within the interval's last 15 minutes produce a local report alert. Three completed answers marked could-not-confirm produce a separate alert, without treating them as provider failures. These are local report alerts, not external notifications.
+
+After identifying a deployment test's browser ID in that report, an operator can label it:
+
+```sh
+node --import tsx --disable-warning=ExperimentalWarning scripts/activity.ts mark-test data/asof.db v_REPLACE_WITH_REPORTED_ID release-smoke
+```
+
+These labels are operator assertions, retained for 14 days, and test traffic remains included in totals. Public request headers cannot label traffic as tests. Page records retain at most 14 days or 20,000 loads, whichever is smaller. An hourly cleanup also runs while the server is idle, and read-only reports always exclude page records outside the current retention window. Chat totals are aggregated in SQLite and displayed rows are bounded by `--limit`. A bounded queue writes after the response and drops telemetry on SQLite contention instead of delaying chat. Reports therefore describe best-effort recorded activity, not complete access logs; they cannot reconstruct visits before this feature was deployed. The local metrics endpoint exposes in-process written/dropped counters, and startup logs `visit_logging_unavailable` if instrumentation could not initialize. The existing database backup includes these tables; no API key or external analytics service is required.

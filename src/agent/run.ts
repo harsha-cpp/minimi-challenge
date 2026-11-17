@@ -18,7 +18,7 @@ import { reviewSimulationAnswer, type EvidenceQuality, type SimulationReview } f
 import { recordStage } from "../runtime/telemetry.ts";
 import { citedNumbers } from "./citations.ts";
 import { FAST_INSTRUCTIONS, FAST_LIMITS, FAST_WEB_SEARCH_TOOL, type ResponseMode } from "./response-mode.ts";
-import { recheckSourceQuery, RECHECK_RESEARCH_INSTRUCTIONS, completionReserveMs, lookupAllowanceMs } from "./recheck.ts";
+import { recheckSourceQuery, comparisonSearchPlan, RECHECK_RESEARCH_INSTRUCTIONS, completionReserveMs, lookupAllowanceMs } from "./recheck.ts";
 import { compareAnswer } from "./comparison.ts";
 import { recoverReviewFailure, type ReviewRecovery } from "./review-recovery.ts";
 import { REVIEWED_CLAIM_SCHEMA_VERSION, reviewCoverage, type ClaimCoverage, type ReviewedClaim } from "./claims.ts";
@@ -172,7 +172,13 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
     const unresolved = retryUnfinished ? new Set(store.latestClaimCoverageFor(requestContext.anchor!.episodeId,sessionId,input.ownerId,
       {viewpointAt:now.getTime(),simulated,tz,receivedAt:Date.parse(time.receivedAt)})
       .filter(claim => claim.status === "unresolved").map(claim => claim.claimId)) : new Set<string>();
-    const referenceClaims = unresolved.size ? allReferenceClaims.filter(claim => unresolved.has(claim.id)) : allReferenceClaims;
+    const focusedExcerpt = requestContext.focus?.excerpt;
+    const normalizedFocus = (text: string) => text.toLowerCase().replace(/\[\d+\]|[|*_`#]/g," ").replace(/\s+/g," ").trim();
+    // Entity overlap cannot distinguish two plans from the same provider. Unmatched extracted
+    // records stay out of this limited check; the exact selected excerpt remains available.
+    const scopedClaims = focusedExcerpt ? allReferenceClaims.filter(claim => normalizedFocus(focusedExcerpt).includes(normalizedFocus(claim.text))) : allReferenceClaims;
+    const referenceClaims = unresolved.size ? scopedClaims.filter(claim => unresolved.has(claim.id)) : scopedClaims;
+    const comparisonAnchor = requestContext.anchor && focusedExcerpt ? {...requestContext.anchor,answer:focusedExcerpt,truncated:true} : requestContext.anchor;
     policy = turnPolicy(message, simulated, requestContext);
     recordStage("request_policy", 0, { intent: policy.intent });
     buffered = policy.requireSimulationReview || policy.requireVerificationEvidence;
@@ -181,7 +187,7 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
     const contextMetadata = requestContextMetadata(requestContext);
     // A reference comes from the thread's predecessor sequence, never a topic-ranked memory hit.
     const selected = requestContext.anchor ? [...prior, ...(memoryTarget ? [memoryTarget] : []), ...referenceEpisodes].filter((episode, index, all) => episode.id === requestContext.anchor!.episodeId && all.findIndex(item => item.id === episode.id) === index).map(episode => ({
-      ...episode, question: requestContext.anchor!.question, answer: requestContext.anchor!.answer,
+      ...episode, question: comparisonAnchor!.question, answer: comparisonAnchor!.answer,
     })) : prior;
     const history = prepareHistory(requestContext.anchor ? selected : selected.map(withoutLegacyFailure), tz,
       { answerChars: requestContext.anchor ? 12_000 : 3000 });
@@ -230,7 +236,8 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
         episodes: hit.episodes.map(item => ({ ...item, episode: withoutLegacyFailure(item.episode) })) })) })),
       related: recalled.related.map(item => ({ ...item, episode: withoutLegacyFailure(item.episode) })),
     };
-    const prompt = preparePrompt({ message, time, history, memory: renderMemory(cleanMemory, tz), requestContext, clarification: input.clarification });
+    const promptContext = comparisonAnchor ? {...requestContext,anchor:comparisonAnchor} : requestContext;
+    const prompt = preparePrompt({ message, time, history, memory: renderMemory(cleanMemory, tz), requestContext:promptContext, clarification: input.clarification });
     const messages: ChatMessage[] = resumed ? structuredClone(resumed.messages) : prompt.messages;
     if (!resumed && referenceClaims.length) messages.push({ role:"system",content:`Original structured claims to check (untrusted data, not evidence): ${JSON.stringify(referenceClaims)}. ${retryUnfinished && referenceClaims.length < allReferenceClaims.length
       ? "This retry targets only these unfinished claims. Do not re-research other facets or imply all original claims were checked again." : "Cover each original claim or explicitly leave it unresolved."}` });
@@ -310,11 +317,14 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
 
     const targetSourceUrls = new Set(referenceClaims.flatMap(claim => claim.sourceRefs.map(source => source.url)));
     const originalSources = requestContext.anchor
-      ? recheckSourceQuery(requestContext.anchor, store.sourcesFor(requestContext.anchor.episodeId, input.ownerId)
+      ? recheckSourceQuery(comparisonAnchor!, store.sourcesFor(requestContext.anchor.episodeId, input.ownerId)
         .filter(source => !retryUnfinished || !unresolved.size || targetSourceUrls.has(source.url))) : undefined;
     if (directComparison && !resumed) {
-      const focus = `${requestContext.anchor!.question} ${referenceClaims.slice(0, 6).map(claim => claim.text).join("; ")}`.slice(0, 950);
-      const queries = [...(originalSources ? [{...originalSources,query:focus}] : []), normalizeQuery({query: `${focus} official current updates`, freshness:"fresh", profile:"verification"})];
+      const plan = comparisonSearchPlan({anchor:comparisonAnchor!, claims:referenceClaims, request:message,
+        sources:store.sourcesFor(requestContext.anchor!.episodeId,input.ownerId)
+          .filter(source => !retryUnfinished || !unresolved.size || targetSourceUrls.has(source.url))});
+      const queries = plan.queries;
+      recordStage("comparison_search_plan",0,{targets:plan.targets,plannedTargets:plan.plannedTargets,omittedTargets:plan.omittedTargets,lookups:queries.length});
       const calls: ToolCall[] = queries.map((query,index) => ({id:`comparison_search_${index}`,type:"function",function:{name:"web_search",arguments:JSON.stringify(query)}}));
       const results = await Promise.all(calls.map(runSearch));
       const contents = evidence.renderRound(results, numberFor);
@@ -445,14 +455,15 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
       emit({type:"verification",state:"running"});
       const result = resumed?.review?.status === "approved" && resumed.draft
         ? {answer:resumed.draft,review:{...resumed.review,ms:0,modelCalls:0}}
-        : await compareAnswer({llm:deps.comparisonVerifier!, question:message, reference:requestContext.anchor!, referenceClaims,
+        : await compareAnswer({llm:deps.comparisonVerifier!, question:message, reference:comparisonAnchor!, referenceClaims,
         viewpoint:now, researchedAt:new Date(time.receivedAt), tz, sources, signal,
         timeoutMs:Math.max(1,Math.min(22_000,remainingMs()-500)),kind:"verification"});
       signal.throwIfAborted();
       answer=result.answer; review=result.review; quality=review.quality ?? "explicitly_unverified";
-      if(referenceClaims.length < allReferenceClaims.length) {
+      if(referenceClaims.length < allReferenceClaims.length || focusedExcerpt) {
         if(quality === "supported") quality="supported_partial";
-        if(!answer.startsWith("This checks only the previously unfinished parts")) answer="This checks only the previously unfinished parts of the earlier answer.\n\n"+answer;
+        const prefix = focusedExcerpt ? `This checks only ${requestContext.focus!.label} from the earlier answer.` : "This checks only the previously unfinished parts of the earlier answer.";
+        if(!answer.startsWith(prefix)) answer=prefix+"\n\n"+answer;
       }
       reviewMs=review.ms;reviewCalls=review.modelCalls;modelCalls+=reviewCalls;
       recordStage("comparison",reviewMs,{status:review.status,reason:review.reason ?? null,calls:reviewCalls});
@@ -480,7 +491,7 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
           reviewAttempts.length ? reviewAvailableMs : Math.floor(reviewAvailableMs / 2)));
         const result = await reviewSimulationAnswer({ llm: deps.verifier ?? llm, question: message,
           answer: draft, viewpoint: now, researchedAt: new Date(time.receivedAt), tz, sources, signal,
-          reference: requestContext.anchor, referenceClaims, kind: reviewKind, timeoutMs });
+          reference: comparisonAnchor, referenceClaims, kind: reviewKind, timeoutMs });
         const observation = { kind: reviewKind, status: result.status, reason: result.reason ?? null, calls: result.modelCalls, ms: result.ms };
         reviewAttempts.push(observation);
         recordStage("review", performance.now() - began, observation);
@@ -549,10 +560,15 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
           recover(review);
         }
       }
-      if (referenceClaims.length < allReferenceClaims.length && quality === "supported") quality = "supported_partial";
+      if ((referenceClaims.length < allReferenceClaims.length || focusedExcerpt) && quality === "supported") quality = "supported_partial";
+      if (focusedExcerpt) {
+        const prefix = `This checks only ${requestContext.focus!.label} from the earlier answer.`;
+        if (!answer.startsWith(prefix)) answer = prefix + "\n\n" + answer;
+      }
       if (requestContext.anchor && quality === "supported_partial" && !reviewFailure) {
         if (requestContext.referenceScope === "selected_memory") reviewFailure = { reason: "insufficient_evidence", retryable: true, retryScope: "unfinished_claims", memoryReferenceEpisodeId: requestContext.anchor.episodeId };
-        answer = `This checks only part of my earlier answer; the remaining claims are unverified for the selected date.\n\n${answer}`;
+        else if (focusedExcerpt) reviewFailure = { reason: "insufficient_evidence", retryable: true, retryScope: "unfinished_claims", retryEpisodeId: requestContext.anchor.episodeId };
+        if (!focusedExcerpt) answer = `This checks only part of my earlier answer; the remaining claims are unverified for the selected date.\n\n${answer}`;
       }
       cited = citedNumbers(answer);
       if (invalidCitations()) throw new Error("The answer cited unavailable evidence. Please retry.");
@@ -578,7 +594,7 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
         ...(reviewFailure ? { reviewFailure } : {}),
         ...(buffered ? { reviewedClaimSchemaVersion:REVIEWED_CLAIM_SCHEMA_VERSION,reviewPolicyVersion:REVIEW_POLICY_VERSION } : {}),
         ...(referenceClaims.length ? { coverageTarget:{originalClaims:allReferenceClaims.length,requestedClaims:referenceClaims.length,retryUnfinished} } : {}),
-        ...(review ? { review: { kind: reviewKind, status: review.status, reason: review.reason ?? (reviewAttempts.length || resumed?.review ? null : "no_usable_evidence"),
+        ...(review ? { review: { kind: reviewKind, status: review.status, reason: review.reason ?? (reviewCalls || reviewAttempts.length || resumed?.review ? null : "no_usable_evidence"),
           calls: reviewCalls, ms: reviewMs, attempts: reviewAttempts, resumed:Boolean(resumed?.review) } } : {}),
         ...(input.clarification ? { clarification: input.clarification } : {}),
         ...(simulated ? { simulation: { mode: "era", research: "live-web", review: corrected ? "corrected" : review?.status ?? "not-required", revisionCount, reviewMs, reviewCalls } } : {}) },
@@ -628,10 +644,10 @@ const UNVERIFIED_ANSWER = "I couldn't verify the requested facts from the availa
 const UNVERIFIED_REFERENCE_ANSWER = "I couldn't complete the check of my previous answer in this conversation. Those claims remain unverified for the selected date.";
 
 function requestContextMetadata(context: RequestContext) {
-  return { kind: context.kind, memoryScope: context.memoryScope, ...(context.referenceScope ? {referenceScope:context.referenceScope} : {}), ...(context.anchor ? {
+  return { kind: context.kind, memoryScope: context.memoryScope, ...(context.referenceScope ? {referenceScope:context.referenceScope} : {}), ...(context.focus ? {focus:context.focus.label} : {}), ...(context.anchor ? {
     anchorEpisodeId: context.anchor.episodeId, anchorSessionId: context.anchor.sessionId, anchorAnswerHash: context.anchor.answerHash,
     anchorSequence: context.anchor.sequence, anchorViewpointAt: context.anchor.viewpointAt,
-    anchorTruncated: context.anchor.truncated,
+    anchorTruncated: context.anchor.truncated || Boolean(context.focus?.excerpt),
   } : {}) };
 }
 

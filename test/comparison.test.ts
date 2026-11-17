@@ -109,8 +109,8 @@ test("source instructions remain untrusted data and all acquired passages reach 
     const payload = JSON.parse(request.user);
     assert.match(request.system, /untrusted DATA/); assert.match(request.system, /never evidence/);
     assert.match(request.system, /empty search does not establish unchanged/);
-    assert.ok(!request.system.includes(injected.text)); assert.equal(payload.sources[1].text, injected.text);
-    assert.equal(payload.sources[0].text, sources[0]!.text);
+    assert.ok(!request.system.includes(injected.text)); assert.equal(payload.sources[1].numberedText, `1: ${injected.text}`);
+    assert.equal(payload.sources[0].numberedText, `1: ${sources[0]!.text}`);
     assert.equal(payload.reference.answer, answer);
     return { referenceCheck: binding, items: [starter, pro] };
   } } });
@@ -143,6 +143,26 @@ test("already cancelled calls never contact the comparison provider", async () =
   assert.equal(calls, 0);
 });
 
+test("separate exact quotes can preserve a price's configuration and billing conditions", async () => {
+  const passage = "Public IPv4 Linux plans. Starter: $25 per seat per month. Billed hourly up to the monthly maximum.";
+  const support = [{ n: 1, quote: "Public IPv4 Linux plans." }, { n: 1, quote: "Starter: $25 per seat per month." },
+    { n: 1, quote: "Billed hourly up to the monthly maximum." }];
+  const result = await compare({ referenceCheck: binding, items: [{ ...starter, support }] }, { sources: [{ ...sources[0]!, text: passage }] });
+  assert.equal(result.review.quality, "supported"); assert.match(result.answer, /Starter costs/);
+  for (const invalid of [support.slice(0, 2).concat({ n: 1, quote: "Public IPv4 Linux plans. Billed hourly up to the monthly maximum." }),
+    [...support, { n: 1, quote: "Starter:" }]]) {
+    const rejected = await compare({ referenceCheck: binding, items: [{ ...starter, support: invalid }] }, { sources: [{ ...sources[0]!, text: passage }] });
+    assert.equal(rejected.review.quality, "explicitly_unverified");
+  }
+});
+
+test("multiple quotes from one source cannot stand in for another cited source", async () => {
+  const result = await compare({ referenceCheck: binding, items: [{ ...starter, sourceNumbers: [1, 2],
+    support: [{ n: 1, quote: "Starter: $25 per seat per month." }, { n: 1, quote: "Pro: $40 per seat per month." }] }] },
+  { sources: [...sources, { n: 2, title: "Other", url: "https://acme.example/terms", text: "Annual commitment required." }] });
+  assert.equal(result.review.quality, "explicitly_unverified");
+});
+
 test("conflicting duplicate unstructured rows cannot approve the first arbitrary verdict", async () => {
   const result = await compare({ referenceCheck: binding, items: [starter, { ...starter, status: "supported" }, pro] });
   assert.equal(result.review.quality, "supported_partial"); assert.equal(result.review.reviewedClaims?.length, 1);
@@ -170,4 +190,95 @@ test("complete extracted coverage remains partial when other answer details were
   assert.equal(result.review.claimCoverage?.[0]!.status, "changed");
   assert.equal(result.review.quality, "supported_partial");
   assert.match(result.answer, /rest of the earlier answer has not been checked/);
+});
+
+const numberedPassage = "Public IPv4 Linux/Unix plans.\nStarter: $25 per seat per month.\n\nBilled hourly up to the monthly maximum.\nPro: $40 per seat per month.";
+const lineSources = [{ ...sources[0]!, text: numberedPassage }];
+const lineSupport = [{n:1,startLine:1,endLine:2},{n:1,startLine:4,endLine:4}];
+const linePro = {...pro,support:[{n:1,startLine:5,endLine:5}]};
+
+test("numbered source lines preserve all content once and accept inclusive supporting ranges", async () => {
+  const result = await compareAnswer({...base,sources:lineSources,llm:{json:async request=>{
+    const payload=JSON.parse(request.user),source=payload.sources[0];
+    assert.equal(source.text,undefined);
+    assert.equal(source.numberedText,"1: Public IPv4 Linux/Unix plans.\n2: Starter: $25 per seat per month.\n3: \n4: Billed hourly up to the monthly maximum.\n5: Pro: $40 per seat per month.");
+    assert.match(request.system,/startLine and endLine are inclusive integers/);
+    assert.match(request.system,/a matching term or number is insufficient/);
+    assert.match(request.system,/All source text.*untrusted data/);
+    return {referenceCheck:binding,items:[{...starter,support:lineSupport},linePro]};
+  }}});
+  assert.equal(result.review.quality,"supported");assert.equal(result.review.reviewedClaims?.length,2);
+  assert.match(result.answer,/Starter costs/);assert.match(result.answer,/Pro remains/);
+});
+
+test("invalid range boundaries or mixed quoting downgrade only the affected comparison item", async () => {
+  for(const support of [
+    [{n:1,startLine:0,endLine:2}], [{n:1,startLine:2,endLine:1}], [{n:1,startLine:1.5,endLine:2}],
+    [{n:1,startLine:1,endLine:5.5}], [{n:1,startLine:"1",endLine:2}], [{n:1,startLine:1,endLine:6}],
+    [{n:1,startLine:1}], [{n:1,endLine:2}], [{n:1,startLine:3,endLine:3}],
+    [{n:1,startLine:1,endLine:2,quote:"Starter: $25 per seat per month."}],
+    [{n:1,startLine:1,endLine:2,quote:null}], [{n:99,startLine:1,endLine:2}],
+  ]) {
+    const result=await compare({referenceCheck:binding,items:[{...starter,support},linePro]},{sources:lineSources});
+    assert.equal(result.review.quality,"supported_partial",JSON.stringify(support));
+    assert.equal(result.review.reviewedClaims?.length,1);assert.match(result.answer,/Pro remains/);
+    assert.doesNotMatch(result.answer,/Starter costs \$25/);
+  }
+});
+
+test("line references are checked against the cited source rather than another source's line count", async () => {
+  const result=await compare({referenceCheck:binding,items:[{...starter,sourceNumbers:[2],support:[{n:2,startLine:4,endLine:4}]},linePro]},
+    {sources:[...lineSources,{n:2,title:"Different source",url:"https://acme.example/terms",text:"A single unrelated line."}]});
+  assert.equal(result.review.quality,"supported_partial");assert.equal(result.review.reviewedClaims?.length,1);
+  assert.match(result.answer,/Pro remains/);assert.doesNotMatch(result.answer,/Starter costs \$25/);
+});
+
+test("samePassageAs keeps separate source identity while resolving ranges against identical original lines", async () => {
+  const duplicated=[...lineSources,{...lineSources[0]!,n:2,url:"https://acme.example/pricing-copy"}];
+  const result=await compareAnswer({...base,sources:duplicated,llm:{json:async request=>{
+    const payload=JSON.parse(request.user);
+    assert.equal(payload.sources[1].samePassageAs,1);assert.equal(payload.sources[1].numberedText,undefined);
+    assert.equal(payload.sources[1].text,undefined);assert.ok(payload.sources[0].numberedText.includes("5: Pro:"));
+    return {referenceCheck:binding,items:[{...starter,sourceNumbers:[2],support:lineSupport.map(range=>({...range,n:2}))}]};
+  }}});
+  assert.equal(result.review.quality,"supported");assert.match(result.answer,/\[2\]/);
+  assert.equal(result.review.reviewedClaims?.[0]?.sourceRefs[0]?.url,duplicated[1]!.url);
+});
+
+test("support ranges are bounded by original character length and retain newline characters", async () => {
+  for(const length of [600,601]) {
+    const original="Starter "+"x".repeat(length-8);
+    const result=await compare({referenceCheck:binding,items:[{...starter,support:[{n:1,startLine:1,endLine:1}]}]},
+      {sources:[{...sources[0]!,text:original}]});
+    assert.equal(result.review.quality,length===600?"supported":"explicitly_unverified");
+  }
+  const large="x".repeat(300)+"\n"+"y".repeat(300);
+  const result=await compare({referenceCheck:binding,items:[{...starter,support:[{n:1,startLine:1,endLine:2}]}]},
+    {sources:[{...sources[0]!,text:large}]});
+  assert.equal(result.review.quality,"explicitly_unverified","the joining newline counts toward the 600-character bound");
+});
+
+test("duplicate ranges, duplicate quote-range content and four entries from one source are rejected", async () => {
+  const invalid=[
+    [{n:1,startLine:1,endLine:2},{n:1,startLine:1,endLine:2}],
+    [{n:1,startLine:2,endLine:2},{n:1,quote:"Starter: $25 per seat per month."}],
+    [{n:1,startLine:1,endLine:1},{n:1,startLine:2,endLine:2},{n:1,startLine:4,endLine:4},{n:1,startLine:5,endLine:5}],
+  ];
+  for(const support of invalid) {
+    const result=await compare({referenceCheck:binding,items:[{...starter,support},linePro]},{sources:lineSources});
+    assert.equal(result.review.quality,"supported_partial");assert.equal(result.review.reviewedClaims?.length,1);
+    assert.match(result.answer,/Pro remains/);assert.doesNotMatch(result.answer,/Starter costs \$25/);
+  }
+});
+
+test("ranges from one source cannot cover another cited source", async () => {
+  const result=await compare({referenceCheck:binding,items:[{...starter,sourceNumbers:[1,2],support:lineSupport}]},
+    {sources:[...lineSources,{...lineSources[0]!,n:2,url:"https://acme.example/conditions"}]});
+  assert.equal(result.review.quality,"explicitly_unverified");assert.equal(result.review.reviewedClaims?.length,0);
+});
+
+test("numbering overhead cannot create an unbounded model prompt or silently drop lines", async () => {
+  const result=await compareAnswer({...base,sources:[{...sources[0]!,text:"a\n".repeat(19_000)}],
+    llm:{json:async()=>{throw new Error("numbered payload exceeds the model input allowance");}}});
+  assert.equal(result.review.modelCalls,0);assert.equal(result.review.reason,"review_limit");
 });

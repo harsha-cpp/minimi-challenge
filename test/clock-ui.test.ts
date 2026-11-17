@@ -692,6 +692,28 @@ test("durable reviewed findings appear before completion and are replaced by the
   } finally { ui.dom.window.close(); }
 });
 
+test("partial checks do not imply every fact was confirmed when extracted coverage is complete", async () => {
+  for (const quality of ["supported_partial", "supported"]) {
+    const ui = await mount({ chatEvents: [
+      { type: "text", delta: quality === "supported_partial" ? "The basic plan is free; the other original details could not be confirmed." : "The basic plan is free." },
+      { type: "done", episodeId: 23, quality, cited: [], claimCoverage: [{ claimId: "a", status: "supported" }], timings: { totalMs: 20 } },
+    ] });
+    try {
+      (ui.window.document.getElementById("input") as HTMLTextAreaElement).value = "Verify the plans";
+      ui.button("#send").click(); await flushChat();
+      const status = ui.window.document.querySelector(".answer-status")!.textContent!;
+      assert.match(status, /Saved to Ledger/);
+      if (quality === "supported_partial") {
+        assert.match(status, /Partly checked/);
+        assert.doesNotMatch(status, /This check:|0 could not confirm/);
+      } else {
+        assert.match(status, /1 confirmed, 0 changed, 0 could not confirm/);
+        assert.doesNotMatch(status, /Partly checked/);
+      }
+    } finally { ui.dom.window.close(); }
+  }
+});
+
 test("resume saved research sends the trusted predecessor id with a new request key", async () => {
   const ui = await mount({ chatReplies: [[{ type: "turn", turnId: "interrupted-1" }], clarificationDone],
     turnReplies: [{ turn: { id: "interrupted-1", status: "interrupted" }, checkpoint: { available: true, stage: "researched", expiresAt: Date.now() + 60_000, request: { sessionId: "original-session" } } }] });

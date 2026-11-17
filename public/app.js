@@ -673,7 +673,10 @@ function completeEntry(view, timings, cited) {
   if (Array.isArray(view.claimCoverage) && view.claimCoverage.length) {
     const counts = { supported: 0, changed: 0, unresolved: 0 };
     for (const claim of view.claimCoverage) if (Object.hasOwn(counts, claim.status)) counts[claim.status]++;
-    view.status.textContent += ` · This check: ${counts.supported} confirmed, ${counts.changed} changed, ${counts.unresolved} could not confirm`;
+    // Extracted claims may omit other unchecked facts from the original answer.
+    if (view.quality !== "supported_partial" || counts.unresolved > 0) {
+      view.status.textContent += ` · This check: ${counts.supported} confirmed, ${counts.changed} changed, ${counts.unresolved} could not confirm`;
+    }
   }
   view.status.classList.add("is-complete");
   showActions(view);

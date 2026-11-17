@@ -1,0 +1,33 @@
+{
+  "version": "machine-reference-checks-v1",
+  "capturedAt": "2026-11-17T12:56:00Z",
+  "status": "machine-reviewed-development-references",
+  "humanAdjudication": "pending",
+  "generationInput": false,
+  "notice": "These operator-side checks were read from official pages. They are proposed development expectations, not independent human labels or proof of production accuracy. Do not supply this file to answer generation. Revisit changing prices before scoring later runs.",
+  "cases": [
+    {
+      "id": "hosting-billing-qualification",
+      "sources": ["https://aws.amazon.com/lightsail/pricing/", "https://aws.amazon.com/lambda/pricing/"],
+      "requiredFacets": [
+        "The Lightsail public IPv4 Linux/Unix general-purpose table lists a USD5/month entry with 0.5GB memory and 20GB SSD.",
+        "The separate IPv6-only Linux/Unix table lists a USD3.50/month entry with 512MB memory and 20GB SSD.",
+        "A blanket minimum price needs the IPv4 versus IPv6 qualification; finding the number5 elsewhere is insufficient.",
+        "Lambda Event Functions use request and execution-duration charging. The page lists other Lambda offerings with different billing measures.",
+        "Advice that traditional hosting is best for a particular app depends on workload and operational preferences, rather than following objectively from these price tables."
+      ],
+      "acceptableUncertainty": "If retrieved passages omit a table or its configuration heading, identify the missing price/configuration instead of treating another product's price or an old example as confirmation.",
+      "observedFailure": "A prior development recheck confirmed Lambda billing but could not confirm the Lightsail entry. Targeted retrieval must retrieve the correct table and its qualification."
+    },
+    {
+      "id": "http-status-scope",
+      "sources": ["https://www.rfc-editor.org/rfc/rfc9110.html#name-404-not-found"],
+      "requiredFacets": [
+        "404 covers a missing current representation or unwillingness to disclose existence.",
+        "404 does not establish permanence.",
+        "410 is preferable when the server knows the condition is likely permanent."
+      ],
+      "acceptableUncertainty": "Do not interpret a missing page as proof it is permanently gone or drop the non-disclosure qualification."
+    }
+  ]
+}

@@ -25,6 +25,7 @@ import { providerConfigurationIssues } from "./runtime/provider-readiness.ts";
 import { POLICY_VERSION, finishTrace, newTrace, recordStage, recordUsage, serverEmission, withTrace, type TurnTrace } from "./runtime/telemetry.ts";
 import { summarizeTraces } from "./runtime/latency-report.ts";
 import { ResearchCheckpoints, RESEARCH_CHECKPOINT_TTL_MS, type ResearchCheckpoint, type ResearchRequest } from "./runtime/research-checkpoints.ts";
+import { optionalVisitStore } from "./runtime/visits.ts";
 import { executionPolicyFingerprint } from "./runtime/versions.ts";
 const root = fileURLToPath(new URL("..", import.meta.url));
 const STATIC: Record<string, [file: string, type: string]> = {
@@ -77,6 +78,8 @@ export function createApplication(options: { config?: Config; store?: MemoryStor
   const store = options.store ?? new MemoryStore(config.dbPath);
   const questions = options.questions ?? new QuestionStore(config.dbPath);
   const checkpoints = options.checkpoints ?? new ResearchCheckpoints(config.dbPath);
+  const visits = optionalVisitStore(config.dbPath);
+  if (!visits) console.warn(JSON.stringify({ event: "visit_logging_unavailable" }));
   store.recoverInterruptedTurns();
   store.purgeOperational(Date.now() - config.limits.traceRetentionDays * 86_400_000);
   const turns = new AdmissionPool({ maxActive: config.limits.activeTurns, maxQueued: config.limits.queuedTurns, foregroundReserve: 0 });
@@ -425,10 +428,13 @@ export function createApplication(options: { config?: Config; store?: MemoryStor
       ownerId = guest.ownerId;
       res.setHeader("set-cookie", guest.cookie);
     }
-    if (req.method === "GET" && STATIC[path]) { const [file, type] = STATIC[path]; res.writeHead(200, { "content-type": type, "cache-control": path === "/" ? "no-store" : "no-cache" }).end(await readFile(root + file)); return; }
+    if (req.method === "GET" && STATIC[path]) { const [file, type] = STATIC[path];
+      const content = await readFile(root + file);
+      if (path === "/") res.once("finish", () => { if (res.statusCode === 200) visits?.record(ownerId); });
+      res.writeHead(200, { "content-type": type, "cache-control": path === "/" ? "no-store" : "no-cache" }).end(content); return; }
     const sessionId = url.searchParams.get("sessionId");
     if (req.method === "GET" && path === "/api/state") return sendJson(res, 200, state(ownerId, validSession(sessionId) ? sessionId : undefined));
-    if (req.method === "GET" && path === "/api/metrics" && config.access.mode === "local") return sendJson(res, 200, { counters, turns: turns.stats, models: models.stats, quota: quota.stats, jobs: store.memoryJobCounts(), sqlite: store.metrics, eventLoop: { p95Ms: eventLoop.percentile(95) / 1e6, maxMs: eventLoop.max / 1e6 }, latency: summarizeTraces(store.recentTraces()) });
+    if (req.method === "GET" && path === "/api/metrics" && config.access.mode === "local") return sendJson(res, 200, { counters, turns: turns.stats, models: models.stats, quota: quota.stats, jobs: store.memoryJobCounts(), sqlite: store.metrics, visits: { enabled: Boolean(visits), ...visits?.stats }, eventLoop: { p95Ms: eventLoop.percentile(95) / 1e6, maxMs: eventLoop.max / 1e6 }, latency: summarizeTraces(store.recentTraces()) });
     const pendingMatch = /^\/api\/sessions\/([a-zA-Z0-9_-]{1,64})\/clarification$/.exec(path);
     if (req.method === "GET" && pendingMatch) return sendJson(res, 200, { card: questions.pending(pendingMatch[1]!, ownerId) });
     const sessionMatch = /^\/api\/sessions\/([a-zA-Z0-9_-]{1,64})$/.exec(path);
@@ -510,9 +516,9 @@ export function createApplication(options: { config?: Config; store?: MemoryStor
     models.close(); server.closeAllConnections();
     await Promise.race([Promise.allSettled([...activeRequests]), new Promise<void>(done => { timer = setTimeout(done, 1000); })]); clearTimeout(timer);
     if (worker) await worker.stop();
-    await closed; eventLoop.disable(); checkpoints.close(); store.checkpoint(); questions.close(); store.close();
+    await closed; eventLoop.disable(); visits?.close(); checkpoints.close(); store.checkpoint(); questions.close(); store.close();
   })();
-  return { server, store, questions, checkpoints, shutdown, state, counters, turns, models, missing };
+  return { server, store, questions, checkpoints, visits, shutdown, state, counters, turns, models, missing };
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

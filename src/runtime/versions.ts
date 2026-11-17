@@ -7,7 +7,7 @@ export const RETRIEVAL_POLICY_VERSION = "coverage-search-v2";
 export const MEMORY_POLICY_VERSION = "lexical-concepts-v1";
 
 const implementationFiles = [
-  "agent/run.ts", "agent/prompt.ts", "agent/prepare.ts", "agent/context.ts", "agent/evidence.ts",
+  "agent/run.ts", "agent/prompt.ts", "agent/prepare.ts", "agent/context.ts", "agent/followup.ts", "agent/evidence.ts",
   "agent/comparison.ts", "agent/simulation.ts", "agent/review-recovery.ts", "agent/recheck.ts", "agent/response-mode.ts",
   "agent/claims.ts", "memory/recall.ts", "memory/enrich.ts", "memory/store.ts", "memory/concepts.ts", "memory/questions.ts",
   "search/cache.ts", "search/exa.ts", "search/passages.ts", "search/validate.ts", "search/profiles.ts", "search/limit.ts",

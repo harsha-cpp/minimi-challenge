@@ -393,7 +393,7 @@ export function summarizeObservations(rows: HttpObservation[]) {
     return {
       samples: known.length,
       p50Ms: percentile(known, 0.5),
-      p95Ms: percentile(known, 0.95),
+      p95Ms: known.length >= 20 ? percentile(known, 0.95) : null,
       p99Ms: known.length >= 1000 ? percentile(known, 0.99) : null,
     };
   };
