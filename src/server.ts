@@ -122,16 +122,17 @@ export function createApplication(options: { config?: Config; store?: MemoryStor
     if (!issues.length) {
       const llm = createModelGateway(createLlm(config.llm, { spendPolicy: spendingPolicy }), { pool: models, quota, defaultBudget: { maxCalls: config.limits.turnModelCalls, maxTokens: config.limits.turnTokens, ...(prices ? { prices, maxSpendUsd: config.limits.maxTurnDollars } : {}) }, outputTokens: config.limits.maxOutputTokens, onCall: modelTrace });
       const verifier = createModelGateway(createLlm({ ...config.llm, fastModel: config.llm.model, maxJsonOutputTokens: 4000 }, { spendPolicy: spendingPolicy }), { pool: models, quota, defaultBudget: { maxCalls: config.limits.turnModelCalls, maxTokens: config.limits.turnTokens, ...(prices ? { prices, maxSpendUsd: config.limits.maxTurnDollars } : {}) }, onCall: modelTrace });
-      const fastLlm = config.llm.fastModel ? createModelGateway(createLlm({ ...config.llm, model: config.llm.fastModel, maxOutputTokens: FAST_LIMITS.outputTokens }, { spendPolicy: spendingPolicy }),
+      const fastLlm = config.llm.fastModel ? createModelGateway(createLlm({ ...config.llm, model: config.llm.fastModel, maxJsonOutputTokens: 4000, maxOutputTokens: FAST_LIMITS.outputTokens }, { spendPolicy: spendingPolicy }),
         { pool: models, quota, outputTokens: FAST_LIMITS.outputTokens, onCall: modelTrace }) : undefined;
       worker = new Enricher(llm, store);
-      deps = { llm, fastLlm, verifier, clock, store, search: withCache(withConcurrency(createExaSearch(config.exaApiKey, { spendPolicy: spendingPolicy, maxAttemptCostDollars: config.limits.searchAttemptDollars ?? null }), 4, 16)), enricher: worker, questions };
+      deps = { llm, fastLlm, verifier, comparisonVerifier: fastLlm ?? verifier, clock, store, search: withCache(withConcurrency(createExaSearch(config.exaApiKey, { spendPolicy: spendingPolicy, maxAttemptCostDollars: config.limits.searchAttemptDollars ?? null }), 4, 16)), enricher: worker, questions };
     }
   }
   if (options.deps) {
     const llm = createModelGateway(options.deps.llm, { pool: models, quota, defaultBudget: { maxCalls: config.limits.turnModelCalls, maxTokens: config.limits.turnTokens, ...(prices ? { prices, maxSpendUsd: config.limits.maxTurnDollars } : {}) }, outputTokens: config.limits.maxOutputTokens, onCall: modelTrace });
     const reviewer = options.deps.verifier ? { ...options.deps.llm, json: options.deps.verifier.json.bind(options.deps.verifier) } : options.deps.llm;
     deps = { ...options.deps, llm, verifier: createModelGateway(reviewer, { pool: models, quota, defaultBudget: { maxCalls: config.limits.turnModelCalls, maxTokens: config.limits.turnTokens, ...(prices ? { prices, maxSpendUsd: config.limits.maxTurnDollars } : {}) }, onCall: modelTrace }) };
+    if (options.deps.comparisonVerifier) deps.comparisonVerifier = createModelGateway({ ...options.deps.llm, json: options.deps.comparisonVerifier.json.bind(options.deps.comparisonVerifier) }, { pool: models, quota, onCall: modelTrace });
     if (options.deps.fastLlm) deps.fastLlm = createModelGateway(options.deps.fastLlm, { pool: models, quota, outputTokens: FAST_LIMITS.outputTokens, onCall: modelTrace });
   }
   const eventLoop = monitorEventLoopDelay({ resolution: 20 }); eventLoop.enable();

@@ -19,6 +19,7 @@ import { recordStage } from "../runtime/telemetry.ts";
 import { citedNumbers } from "./citations.ts";
 import { FAST_INSTRUCTIONS, FAST_LIMITS, FAST_WEB_SEARCH_TOOL, type ResponseMode } from "./response-mode.ts";
 import { recheckSourceQuery, RECHECK_RESEARCH_INSTRUCTIONS, completionReserveMs, lookupAllowanceMs } from "./recheck.ts";
+import { compareAnswer } from "./comparison.ts";
 import { recoverReviewFailure, type ReviewRecovery } from "./review-recovery.ts";
 import { REVIEWED_CLAIM_SCHEMA_VERSION, reviewCoverage, type ClaimCoverage, type ReviewedClaim } from "./claims.ts";
 import type { ResearchProgress } from "../runtime/research-checkpoints.ts";
@@ -42,6 +43,8 @@ export interface Deps {
   enricher: Pick<Enricher, "schedule">;
 
   verifier?: Pick<Llm, "json">;
+  /** Live rechecks use one structured comparison instead of draft/review/repair. */
+  comparisonVerifier?: Pick<Llm, "json">;
   repairLlm?: Pick<Llm, "stream">;
 
   questions?: ClarificationPort;
@@ -128,7 +131,7 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
     if (durable && durable.sessionId !== sessionId) throw new Error("Conversation context does not match this turn.");
     const prior = store.currentConversationHistory(sessionId, HISTORY_TURNS, input.ownerId, durable?.sequence);
     if (input.recheckEpisodeId !== undefined && input.memoryReferenceEpisodeId !== undefined) throw new Error("Select one saved answer reference.");
-    const memoryTarget = input.memoryReferenceEpisodeId === undefined ? undefined : store.episode(input.memoryReferenceEpisodeId, input.ownerId);
+    let memoryTarget = input.memoryReferenceEpisodeId === undefined ? undefined : store.episode(input.memoryReferenceEpisodeId, input.ownerId);
     if (input.memoryReferenceEpisodeId !== undefined && (!memoryTarget || memoryTarget.askedAt > now.getTime() || memoryTarget.sessionId === sessionId && durable && (memoryTarget.sequence ?? memoryTarget.id) >= durable.sequence)) throw new Error("The selected historical answer is unavailable at this viewpoint.");
     const target = input.recheckEpisodeId === undefined ? undefined : store.episode(input.recheckEpisodeId, input.ownerId);
     if (input.recheckEpisodeId !== undefined && (!target || target.sessionId !== sessionId
@@ -140,8 +143,30 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
       const original = store.episode(binding.anchorEpisodeId!, input.ownerId);
       return original ? [original] : [];
     });
-    const requestContext = resolveRequestContext({ message, sessionId, ownerId: input.ownerId, history: prior, referenceEpisodes, viewpointAt: now.getTime(),
+    let requestContext = resolveRequestContext({ message, sessionId, ownerId: input.ownerId, history: prior, referenceEpisodes, viewpointAt: now.getTime(),
       ...(memoryTarget ? { selectedMemoryEpisode: memoryTarget } : {}), ...(target ? { targetEpisode: target } : {}) });
+    let memoryChoice: string | undefined;
+    if (requestContext.memoryScope === "explicit_memory" && turnPolicy(message, simulated).intent === "verify" && !requestContext.anchor) {
+      const recalled = recall(store, message, now, tz, new Set(), input.ownerId, {
+        sessionId, allowCrossSession: !/\b(?:(?:this|current|same)\s+(?:chat|conversation|thread)|here)\b/i.test(message), allowRecent: true,
+      });
+      const records = recalled.refs.length ? recalled.refs.flatMap(ref => ref.hits.flatMap(hit => hit.episodes.map(item => item.episode)))
+        : recalled.related.map(item => item.episode);
+      let candidates = [...new Map(records.filter(episode => episode.quality !== "non_factual"
+        && episode.askedAt <= now.getTime() && episode.answer.trim()
+        && (store.sourcesFor(episode.id, input.ownerId).length > 0 || store.canonicalClaimsFor(episode.id, input.ownerId).length > 0))
+        .map(episode => [episode.id, episode])).values()];
+      const currentCandidates = candidates.filter(episode => episode.sessionId === sessionId);
+      if (!recalled.refs.length && currentCandidates.length) candidates = currentCandidates;
+      if (candidates.length === 1) {
+        memoryTarget = candidates[0]!;
+        requestContext = resolveRequestContext({message,sessionId,ownerId:input.ownerId,history:[],selectedMemoryEpisode:memoryTarget,viewpointAt:now.getTime()});
+      } else {
+        memoryChoice = candidates.length ? `Which earlier answer should I check? Select its topic or paste the answer here.\n\n${candidates.slice(0,4).map(episode => `- ${episode.question.slice(0,180)}`).join("\n")}`
+          : "I couldn't find a matching earlier answer to check. Select a saved topic or paste the answer here.";
+        requestContext = {kind:"missing_reference",memoryScope:"none"};
+      }
+    }
     const allReferenceClaims = requestContext.anchor ? store.canonicalClaimsFor(requestContext.anchor.episodeId,input.ownerId) : [];
     const retryUnfinished = Boolean(requestContext.anchor && (input.retryUnfinished || /\b(?:unfinished check|remaining claims|checking the rest)\b/i.test(message)));
     const unresolved = retryUnfinished ? new Set(store.latestClaimCoverageFor(requestContext.anchor!.episodeId,sessionId,input.ownerId,
@@ -151,7 +176,8 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
     policy = turnPolicy(message, simulated, requestContext);
     recordStage("request_policy", 0, { intent: policy.intent });
     buffered = policy.requireSimulationReview || policy.requireVerificationEvidence;
-    synthesisReserveMs = completionReserveMs(availableMs, buffered);
+    const directComparison = Boolean(deps.comparisonVerifier && requestContext.anchor && !simulated);
+    synthesisReserveMs = directComparison ? Math.min(22_000, Math.floor(availableMs / 2)) : completionReserveMs(availableMs, buffered);
     const contextMetadata = requestContextMetadata(requestContext);
     // A reference comes from the thread's predecessor sequence, never a topic-ranked memory hit.
     const selected = requestContext.anchor ? [...prior, ...(memoryTarget ? [memoryTarget] : []), ...referenceEpisodes].filter((episode, index, all) => episode.id === requestContext.anchor!.episodeId && all.findIndex(item => item.id === episode.id) === index).map(episode => ({
@@ -163,7 +189,7 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
       && !/\b(?:(?:this|current|same)\s+(?:chat|conversation|thread)|here)\b/i.test(message);
     recordStage("context_boundary", 0, { ...contextMetadata, historyTurns: history.ids.size, crossConversationMemory });
     if (requestContext.kind === "missing_reference") {
-      const answer = "Which claims should I verify? Paste the claims or point me to an answer in this conversation.";
+      const answer = memoryChoice ?? "Which answer should I check? Paste it here or select a saved topic.";
       const commitBegan = performance.now();
       const episodeId = store.saveEpisode({ sessionId, ownerId: input.ownerId, turnId: input.turnId,
         quality: "non_factual", createdAt: Date.parse(time.receivedAt), askedAt: now.getTime(), tz,
@@ -286,7 +312,17 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
     const originalSources = requestContext.anchor
       ? recheckSourceQuery(requestContext.anchor, store.sourcesFor(requestContext.anchor.episodeId, input.ownerId)
         .filter(source => !retryUnfinished || !unresolved.size || targetSourceUrls.has(source.url))) : undefined;
-    if (originalSources && !resumed) {
+    if (directComparison && !resumed) {
+      const focus = `${requestContext.anchor!.question} ${referenceClaims.slice(0, 6).map(claim => claim.text).join("; ")}`.slice(0, 950);
+      const queries = [...(originalSources ? [{...originalSources,query:focus}] : []), normalizeQuery({query: `${focus} official current updates`, freshness:"fresh", profile:"verification"})];
+      const calls: ToolCall[] = queries.map((query,index) => ({id:`comparison_search_${index}`,type:"function",function:{name:"web_search",arguments:JSON.stringify(query)}}));
+      const results = await Promise.all(calls.map(runSearch));
+      const contents = evidence.renderRound(results, numberFor);
+      messages.push({role:"assistant",content:null,tool_calls:calls});
+      calls.forEach((call,index) => messages.push({role:"tool",tool_call_id:call.id,content:contents[index]!}));
+      deps.onEvidence?.(structuredClone(sources));
+      checkpoint("researched");
+    } else if (originalSources && !resumed) {
       const call: ToolCall = { id: `recheck_sources_${requestContext.anchor!.episodeId}`, type: "function",
         function: { name: "web_search", arguments: JSON.stringify(originalSources) } };
       const began = performance.now();
@@ -301,7 +337,7 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
       checkpoint("researched");
     }
 
-    for (let round = researchRounds + 1; !answer; round++) {
+    for (let round = researchRounds + 1; !answer && !directComparison; round++) {
       let mustAnswer = round > (fast ? FAST_LIMITS.searchRounds + validationRetry : MAX_SEARCH_ROUNDS) || remainingMs() < synthesisReserveMs;
       let mayAsk = clarificationAllowed && round === 1 && !mustAnswer;
       const generate = () => {
@@ -382,8 +418,8 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
     }
 
     signal.throwIfAborted();
-    if (!answer.trim()) throw new Error("The model returned an empty answer.");
-    if (!resumed?.review) checkpoint("drafted",answer);
+    if (!answer.trim() && !directComparison) throw new Error("The model returned an empty answer.");
+    if (!resumed?.review && !directComparison) checkpoint("drafted",answer);
     let cited = citedNumbers(answer);
     const invalidCitations = () => cited.some(n => n < 1 || n > sources.length);
     if (invalidCitations() && !buffered) {
@@ -405,7 +441,29 @@ export async function runTurn(deps: Deps, input: TurnInput, emit: (event: AgentE
       quality = recovery.quality;
       reviewFailure = { ...recovery.failure, ...(requestContext.anchor ? requestContext.referenceScope === "selected_memory" ? { memoryReferenceEpisodeId: requestContext.anchor.episodeId } : { retryEpisodeId: requestContext.anchor.episodeId } : {}) };
     };
-    if (buffered) {
+    if (directComparison) {
+      emit({type:"verification",state:"running"});
+      const result = resumed?.review?.status === "approved" && resumed.draft
+        ? {answer:resumed.draft,review:{...resumed.review,ms:0,modelCalls:0}}
+        : await compareAnswer({llm:deps.comparisonVerifier!, question:message, reference:requestContext.anchor!, referenceClaims,
+        viewpoint:now, researchedAt:new Date(time.receivedAt), tz, sources, signal,
+        timeoutMs:Math.max(1,Math.min(22_000,remainingMs()-500)),kind:"verification"});
+      signal.throwIfAborted();
+      answer=result.answer; review=result.review; quality=review.quality ?? "explicitly_unverified";
+      if(referenceClaims.length < allReferenceClaims.length) {
+        if(quality === "supported") quality="supported_partial";
+        if(!answer.startsWith("This checks only the previously unfinished parts")) answer="This checks only the previously unfinished parts of the earlier answer.\n\n"+answer;
+      }
+      reviewMs=review.ms;reviewCalls=review.modelCalls;modelCalls+=reviewCalls;
+      recordStage("comparison",reviewMs,{status:review.status,reason:review.reason ?? null,calls:reviewCalls});
+      if (quality !== "supported") reviewFailure={reason:review.reason === "review_timeout" ? "review_timeout" : review.reason ? "review_unavailable" : "insufficient_evidence",
+        retryable:true,retryScope:quality === "supported_partial" ? "unfinished_claims" : "review",
+        ...(requestContext.referenceScope === "selected_memory" ? {memoryReferenceEpisodeId:requestContext.anchor!.episodeId} : {retryEpisodeId:requestContext.anchor!.episodeId})};
+      cited=citedNumbers(answer);
+      if(invalidCitations()) throw new Error("The comparison cited an unavailable source.");
+      checkpoint("reviewed",answer,review);
+      emit({type:"verification",state:quality === "supported" ? "done" : "partial",ms:reviewMs});
+    } else if (buffered) {
       emit({ type: "verification", state: "running" });
       const publishReviewed = (result: SimulationReview) => {
         if (deps.checkpoints && !result.reason && result.reviewedClaims?.length

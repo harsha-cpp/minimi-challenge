@@ -151,7 +151,7 @@ test("a deictic verification without a current-conversation answer asks what to 
     const repeatedDone = repeated.find(event => event.type === "done"); assert.ok(repeatedDone);
     assert.notEqual(repeatedDone.episodeId, done.episodeId);
     assert.equal(repeatedDone.quality, "non_factual");
-    assert.match(app.store.episode(repeatedDone.episodeId)!.answer, /Which claims should I verify/i);
+    assert.match(app.store.episode(repeatedDone.episodeId)!.answer, /Which answer should I check/i);
   } finally { await app.shutdown(); }
 });
 

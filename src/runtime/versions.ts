@@ -8,7 +8,7 @@ export const MEMORY_POLICY_VERSION = "lexical-concepts-v1";
 
 const implementationFiles = [
   "agent/run.ts", "agent/prompt.ts", "agent/prepare.ts", "agent/context.ts", "agent/evidence.ts",
-  "agent/simulation.ts", "agent/review-recovery.ts", "agent/recheck.ts", "agent/response-mode.ts",
+  "agent/comparison.ts", "agent/simulation.ts", "agent/review-recovery.ts", "agent/recheck.ts", "agent/response-mode.ts",
   "agent/claims.ts", "memory/recall.ts", "memory/enrich.ts", "memory/store.ts", "memory/concepts.ts", "memory/questions.ts",
   "search/cache.ts", "search/exa.ts", "search/passages.ts", "search/validate.ts", "search/profiles.ts", "search/limit.ts",
   "server.ts", "llm.ts", "llm/gateway.ts", "runtime/research-checkpoints.ts", "runtime/versions.ts",

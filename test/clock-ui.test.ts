@@ -191,7 +191,7 @@ test("obsolete capture failures never reappear as actionable website errors", as
     assert.doesNotMatch(answer.textContent!, /Snapshot|HTTP 403|access|quota/);
     const trace = ui.window.document.querySelector(".trace")!;
     assert.match(trace.textContent!, /lookup unsuccessful/);
-    assert.match(trace.textContent!, /review unavailable/);
+    assert.match(trace.textContent!, /check unavailable/);
     assert.doesNotMatch(trace.querySelector("li")!.getAttribute("title") ?? "", /Snapshot|HTTP 403|quota/);
   } finally { ui.dom.window.close(); }
 });
@@ -433,7 +433,7 @@ test("restored legacy answers omit only the leading generic preface from present
       const visible = ui.window.document.querySelector(".answer")!.textContent!;
       assert.equal(visible.includes(preface), false);
       assert.match(visible, /The route opened in 1947 \[1\]\. Its exact 1948 fare remains uncertain\./);
-      assert.match(ui.window.document.querySelector(".answer-status")!.textContent!, /Unverified/);
+      assert.match(ui.window.document.querySelector(".answer-status")!.textContent!, /Could not confirm/);
       [...ui.window.document.querySelectorAll<HTMLButtonElement>(".answer-actions button")].find(button => button.textContent === "Copy answer")!.click();
       await nextTurn();
       assert.deepEqual(copies, [`${answer}\n\nSources\n[1] Route history — https://example.com/route`]);
@@ -460,7 +460,7 @@ test("legacy preface cleanup preserves quoted text and fact-specific uncertainty
     try {
       const visible = ui.window.document.querySelector(".answer")!.textContent!;
       assert.ok(visible.includes(answer.includes(preface) ? preface : "I could not verify the exact 1948 railway fare."));
-      assert.match(ui.window.document.querySelector(".answer-status")!.textContent!, /Unverified/);
+      assert.match(ui.window.document.querySelector(".answer-status")!.textContent!, /Could not confirm/);
       [...ui.window.document.querySelectorAll<HTMLButtonElement>(".answer-actions button")].find(button => button.textContent === "Copy answer")!.click();
       await nextTurn();
       assert.deepEqual(copies, [answer]);
@@ -683,12 +683,12 @@ test("durable reviewed findings appear before completion and are replaced by the
     await flushChat();
     const findings = ui.window.document.querySelector<HTMLElement>(".checked-findings")!;
     assert.equal(findings.hidden, false); assert.match(findings.textContent!, /basic plan is free/);
-    assert.match(findings.textContent!, /remaining check is still running/);
+    assert.match(findings.textContent!, /rest is still being checked/);
     assert.equal(ui.window.document.querySelector(".answer")!.textContent, "");
     emit({ type: "text", delta: "The basic plan is free; paid pricing remains unresolved." });
     emit({ type: "done", episodeId: 22, quality: "supported_partial", cited: [], claimCoverage: [{ claimId: "a", status: "supported" }, { claimId: "b", status: "unresolved" }], timings: { recallMs: 0, searches: 1, modelCalls: 2, totalMs: 20 } }); controller.close(); await flushChat();
     assert.equal(findings.hidden, true);
-    assert.match(ui.window.document.querySelector(".answer-status")!.textContent!, /1 supported, 0 corrected, 1 unresolved/);
+    assert.match(ui.window.document.querySelector(".answer-status")!.textContent!, /1 confirmed, 0 changed, 1 could not confirm/);
   } finally { ui.dom.window.close(); }
 });
 
@@ -739,7 +739,7 @@ test("retrying unfinished evidence preserves the original reference, viewpoint a
     (ui.window.document.getElementById("input") as HTMLTextAreaElement).value = "Verify this: Acme pricing is $25 monthly";
     ui.button("#send").click(); await flushChat();
     selector.value = "standard";
-    [...ui.window.document.querySelectorAll<HTMLButtonElement>(".answer-actions button")].find(button => /Retry unfinished check/.test(button.textContent!))!.click(); await flushChat();
+    [...ui.window.document.querySelectorAll<HTMLButtonElement>(".answer-actions button")].find(button => /Try checking again/.test(button.textContent!))!.click(); await flushChat();
     assert.equal(ui.chatRequests.length, 2);
     assert.equal(ui.chatRequests[1]!.recheckEpisodeId, 9);
     assert.equal(ui.chatRequests[1]!.responseMode, "fast");
@@ -803,7 +803,7 @@ test("refresh recovers a saved request key without generation and does not dupli
   try {
     assert.equal(ui.chatRequests.length, 0); assert.equal(ui.window.document.querySelectorAll("#thread .entry").length, 1);
     assert.ok(ui.turnRequests.includes("/api/turns/by-key/original-key")); assert.equal(ui.window.sessionStorage.getItem("asof.pending.turn"), null);
-    assert.match(ui.window.document.querySelector(".answer-status")!.textContent!, /Unverified/);
+    assert.match(ui.window.document.querySelector(".answer-status")!.textContent!, /Could not confirm/);
   } finally { ui.dom.window.close(); }
 });
 
@@ -871,7 +871,7 @@ test("ambiguous previous discussion with no history shows guidance without a pai
     (ui.window.document.getElementById("input") as HTMLTextAreaElement).value = "What did we discuss earlier, and is it still correct?";
     ui.button("#send").click(); await flushChat();
     assert.equal(ui.chatRequests.length, 0); assert.equal(ui.window.document.querySelectorAll(".entry").length, 0);
-    assert.match(ui.window.document.querySelector("#history-chooser")!.textContent!, /Paste the claim/);
+    assert.match(ui.window.document.querySelector("#history-chooser")!.textContent!, /Paste the answer/);
     assert.equal(ui.button("#send").disabled, false);
   } finally { ui.dom.window.close(); }
 });
@@ -1001,7 +1001,7 @@ for (const retry of [false, true]) {
       (ui.window.document.getElementById("input") as HTMLTextAreaElement).value = "verify";
       ui.button("#send").click(); await flushChat();
       ui.button(".history-choice").click(); await flushChat();
-      const action = retry ? /Retry unfinished check/ : /Ask again/;
+      const action = retry ? /Try checking again/ : /Ask again/;
       [...ui.window.document.querySelectorAll<HTMLButtonElement>(".answer-actions button")].find(button => action.test(button.textContent!))!.click();
       await flushChat();
       assert.equal(ui.chatRequests.length, 2);
@@ -1015,3 +1015,26 @@ for (const retry of [false, true]) {
     } finally { ui.dom.window.close(); }
   });
 }
+
+
+test("live verification describes the current-source check and keeps uncertainty visible in plain language", async () => {
+  let controller!: ReadableStreamDefaultController<Uint8Array>;
+  const stream = new ReadableStream<Uint8Array>({ start(value) { controller = value; } });
+  const emit = (value: unknown) => controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(value)}\n\n`));
+  const ui = await mount({ chatStream: stream });
+  try {
+    (ui.window.document.getElementById("input") as HTMLTextAreaElement).value = "Verify this: Acme costs $25 monthly";
+    ui.button("#send").click(); await flushChat();
+    emit({ type: "verification", state: "running" }); await flushChat();
+    assert.match(ui.window.document.querySelector(".answer-status")!.textContent!, /Checking the answer against current sources/);
+    assert.doesNotMatch(ui.window.document.querySelector(".answer-steps")!.textContent!, /era|claim|evidence/i);
+    emit({ type: "text", delta: "I could not confirm Acme's current price." });
+    emit({ type: "done", episodeId: 101, quality: "explicitly_unverified", cited: [],
+      timings: { recallMs: 0, searches: 1, modelCalls: 2, totalMs: 20 },
+      reviewFailure: { reason: "insufficient_evidence", retryable: true, retryScope: "review" } });
+    controller.close(); await flushChat();
+    assert.match(ui.window.document.querySelector(".answer-status")!.textContent!, /Could not confirm/);
+    assert.match(ui.window.document.querySelector(".answer-actions")!.textContent!, /Try checking again/);
+    assert.doesNotMatch(ui.window.document.querySelector(".answer-status")!.textContent!, /Unverified|supported|claim|evidence/i);
+  } finally { ui.dom.window.close(); }
+});

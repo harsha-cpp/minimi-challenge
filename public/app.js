@@ -447,7 +447,7 @@ function displayError(message) {
 
 async function openSource(source, context = {}) {
   const requestId = ++sourceRequest;
-  $("source-number").textContent = `Evidence / ${String(source.n).padStart(2, "0")}`;
+  $("source-number").textContent = `Source / ${String(source.n).padStart(2, "0")}`;
   $("source-title").textContent = source.title;
   $("source-host").textContent = new URL(source.url).hostname.replace(/^www\./, "");
   $("source-host").href = sourceHref(source);
@@ -533,7 +533,7 @@ function addEntry(question, options = {}) {
   view.checkedFindings = el("section", "checked-findings"); view.checkedFindings.hidden = true;
   view.checkedFindings.setAttribute("aria-live", "polite");
   view.status.setAttribute("role", "status");
-  for (const [i, title] of ["Researching", "Checking era", "Preparing answer"].entries()) view.steps.append(el("li", "", `${String(i + 1).padStart(2, "0")} ${title}`));
+  for (const [i, title] of ["Searching", "Checking answer", "Preparing answer"].entries()) view.steps.append(el("li", "", `${String(i + 1).padStart(2, "0")} ${title}`));
   view.details.append(el("summary", "", "Research details"), view.trace, view.timings);
   view.sources.hidden = true; view.actions.hidden = true;
   body.append(el("h2", "question", question), view.clarification, view.steps, view.checkedFindings, view.answer, view.sources, view.status, view.actions, view.details);
@@ -552,7 +552,7 @@ function traceLine(list, kind, label) {
 function paintView(view) { renderAnswer(view.answer, view.text, view.dataSources, { at: view.at, episodeId: view.episodeId }); }
 function showCheckedFindings(view, claims) {
   if (!Array.isArray(claims) || !claims.length) return;
-  view.checkedFindings.replaceChildren(el("strong", "", "Checked so far"), el("p", "", "These findings passed review. The remaining check is still running."));
+  view.checkedFindings.replaceChildren(el("strong", "", "Checked so far"), el("p", "", "These details have been checked. The rest is still being checked."));
   const list = el("ul");
   for (const claim of claims.slice(0, 64)) if (claim.status === "supported" && typeof claim.text === "string") {
     const item = el("li");
@@ -638,7 +638,7 @@ function showActions(view, failed = false) {
     catch { notify("Copy is unavailable in this browser. Select the answer text to copy it."); }
   }));
   view.actions.append(buttonAction("Edit question", () => { $("input").value = view.question; $("compose-context").textContent = "Editing an earlier question · sends as a new entry"; $("compose-context").hidden = false; fitInput(); $("input").focus(); }));
-  if (!failed && view.reviewFailure?.retryable) view.actions.append(buttonAction("Retry unfinished check ↗", () => {
+  if (!failed && view.reviewFailure?.retryable) view.actions.append(buttonAction("Try checking again ↗", () => {
     if (inFlight) return notify("Finish or stop the current answer first.");
     const retry = addEntry(view.question, { at: view.at, simulated: view.isEra, responseMode: view.responseMode });
     send(view.question, { view: retry, recheckEpisodeId: view.reviewFailure.retryEpisodeId,
@@ -668,12 +668,12 @@ function completeEntry(view, timings, cited) {
   paintView(view);
   const sources = view.dataSources.filter(source => cited.includes(source.n));
   renderSources(view.sources, sources, { at: view.at, episodeId: view.episodeId });
-  view.status.textContent = `${sources.length} source${sources.length === 1 ? "" : "s"}${timings?.totalMs != null ? ` · ${seconds(timings.totalMs)}` : ""} · Saved to Ledger${view.quality === "explicitly_unverified" ? " · Unverified" : view.quality === "supported_partial" ? " · Partially supported" : ""}`;
+  view.status.textContent = `${sources.length} source${sources.length === 1 ? "" : "s"}${timings?.totalMs != null ? ` · ${seconds(timings.totalMs)}` : ""} · Saved to Ledger${view.quality === "explicitly_unverified" ? " · Could not confirm" : view.quality === "supported_partial" ? " · Partly checked" : ""}`;
   if (view.responseMode === "fast") view.status.textContent += " · Fast";
   if (Array.isArray(view.claimCoverage) && view.claimCoverage.length) {
     const counts = { supported: 0, changed: 0, unresolved: 0 };
     for (const claim of view.claimCoverage) if (Object.hasOwn(counts, claim.status)) counts[claim.status]++;
-    view.status.textContent += ` · This check: ${counts.supported} supported, ${counts.changed} corrected, ${counts.unresolved} unresolved`;
+    view.status.textContent += ` · This check: ${counts.supported} confirmed, ${counts.changed} changed, ${counts.unresolved} could not confirm`;
   }
   view.status.classList.add("is-complete");
   showActions(view);
@@ -722,7 +722,7 @@ async function checkSaved(view, signal) {
   } else view.status.textContent = result.turn.status === "cancelled" ? "Stopped. You can edit or retry your question."
     : "This attempt ended before an answer was saved. You can retry your question.";
   if (result.turn.status === "cancelled") view.checkedFindings.hidden = true;
-  else if (!view.checkedFindings.hidden) view.checkedFindings.querySelector("p").textContent = "These findings passed review before the interruption. The remaining check is unfinished.";
+  else if (!view.checkedFindings.hidden) view.checkedFindings.querySelector("p").textContent = "These details were checked before the interruption. The rest could not be checked.";
   view.answer.replaceChildren(el("p", "failure", view.status.textContent)); showActions(view, true);
 }
 async function restorePendingTurn() {
@@ -772,10 +772,10 @@ async function send(message, options = {}) {
       line.querySelector(".state").textContent = event.state === "running" ? "searching" : event.state === "failed" ? "lookup unsuccessful" : `${event.results} results · ${seconds(event.ms)}`;
       if (event.state === "running") stage(view, 0, view.isEra ? "Researching the world at your selected date…" : "Researching current sources…");
     } else if (event.type === "verification") {
-      reviewLine ??= traceLine(view.trace, "review", "Era and sources");
-      reviewLine.querySelector(".state").textContent = event.state === "running" ? "checking" : event.state === "unavailable" ? "review unavailable"
+      reviewLine ??= traceLine(view.trace, "check", view.isEra ? "Answer at the selected date" : "Answer against current sources");
+      reviewLine.querySelector(".state").textContent = event.state === "running" ? "checking" : event.state === "unavailable" ? "check unavailable"
         : event.state === "partial" ? `partially checked · ${seconds(event.ms)}` : event.state === "failed" ? "check unfinished" : `complete · ${seconds(event.ms)}`;
-      stage(view, event.state === "running" ? 1 : 2, event.state === "running" ? "Checking dates, source support, and historical perspective…" : "Preparing your answer…");
+      stage(view, event.state === "running" ? 1 : 2, event.state === "running" ? (view.isEra ? "Checking the answer at your selected date…" : "Checking the answer against current sources…") : "Preparing your answer…");
     } else if (event.type === "claim_review") showCheckedFindings(view, event.claims);
     else if (event.type === "sources") view.dataSources = event.sources;
     else if (event.type === "text") {
@@ -784,7 +784,7 @@ async function send(message, options = {}) {
     } else if (event.type === "retract") { view.text = ""; view.checkedFindings.hidden = true; paintView(view); }
     else if (event.type === "done") {
       completed = true; view.episodeId = event.episodeId; view.quality = event.quality; view.turnId = event.turnId ?? view.turnId;
-      view.timings.textContent = `Recall ${seconds(event.timings.recallMs)} · ${event.timings.searches} searches · ${event.timings.modelCalls} model calls${event.timings.verificationMs ? ` · review ${seconds(event.timings.verificationMs)}` : ""} · total ${seconds(event.timings.totalMs)}`;
+      view.timings.textContent = `Recall ${seconds(event.timings.recallMs)} · ${event.timings.searches} searches · ${event.timings.modelCalls} model calls${event.timings.verificationMs ? ` · checking ${seconds(event.timings.verificationMs)}` : ""} · total ${seconds(event.timings.totalMs)}`;
       view.reviewFailure = event.reviewFailure;
       view.claimCoverage = event.claimCoverage;
       completeEntry(view, event.timings, event.cited);
@@ -914,7 +914,7 @@ async function choosePriorAnswer(message) {
   panel.scrollIntoView({ behavior: "smooth", block: "start" });
   try {
     const response = await fetch("/api/memory?limit=100");
-    if (!response.ok) throw new Error("Your saved questions could not be loaded. Try again, or paste the claim you want checked.");
+    if (!response.ok) throw new Error("Your saved questions could not be loaded. Try again, or paste the answer you want checked.");
     const page = await response.json(); if (!current()) return;
     const topic = historyTopic(message), seen = new Set();
     const choices = (Array.isArray(page.episodes) ? page.episodes : []).filter(episode => {
@@ -925,7 +925,7 @@ async function choosePriorAnswer(message) {
       seen.add(key); return true;
     }).sort((a, b) => Number(b.sessionId === originSession) - Number(a.sessionId === originSession)).slice(0, 4);
     panel.replaceChildren(el("h2", "", "Which saved answer should I check?"));
-    if (!choices.length) panel.append(el("p", "", "No matching saved questions were found in your recent history for this date. Paste the claim you want checked, or open the Ledger to find an older answer."));
+    if (!choices.length) panel.append(el("p", "", "No matching saved questions were found in your recent history for this date. Paste the answer you want checked, or open the Ledger to find an older answer."));
     else {
       panel.append(el("p", "", "Choose a question. I’ll check that exact answer at your selected date."));
       const list = el("div", "history-choices");

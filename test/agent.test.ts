@@ -155,9 +155,10 @@ test("a model error surfaces as an error event and nothing is stored", async () 
 
 test("a week later: explicit memory recalls the old claim and retains the reviewed result without inventing a historical link", async () => {
   const store = new MemoryStore(":memory:");
+  const queries: SearchQuery[] = [];
   const search: SearchProvider = {
-    search: async query => [{ url: "https://neon.com/pricing", title: "Neon pricing", text: query.query === "neon pricing"
-      ? "Launch costs $19/month." : "Launch now costs $25/month; it previously cost $19/month." }],
+    search: async query => { queries.push(query); return [{ url: "https://neon.com/pricing", title: "Neon pricing", text: query.query === "neon pricing"
+      ? "Launch costs $19/month." : "Launch now costs $25/month; it previously cost $19/month." }]; },
   };
 
   const first = scriptedLlm(
@@ -185,11 +186,16 @@ test("a week later: explicit memory recalls the old claim and retains the review
     "new-chat",
   );
 
-  const memory = second.requests[0]!.messages.find(m => m.role === "user" && m.content.startsWith("UNTRUSTED MEMORY RECORDS"))!;
-  const context = JSON.parse((memory.content as string).split("\n").slice(1).join("\n")) as string;
-  assert.match(context, /"Last Tuesday" → Tue 3 Nov 2026\. \(It could also mean Tue 10 Nov 2026, but there are no conversations then\.\)/);
-  assert.match(context, /Neon: Launch plan price = \$19\/month/);
-  assert.match(context, /unverified extraction; not established fact/);
+  const context = JSON.stringify(second.requests[0]!.messages);
+  assert.match(context, /PINNED CONVERSATION REFERENCE/);
+  assert.match(context, /Neon Launch is \$19\/month/);
+  assert.match(context, /earlier answer is the object to check, not evidence|prior answer is the object to check, not evidence/);
+  assert.ok(!second.requests[0]!.messages.some(message => message.role === "user" && message.content.startsWith("UNTRUSTED MEMORY RECORDS")));
+  const saved = store.episode(2)!;
+  assert.equal(saved.sessionId, "new-chat"); assert.equal(saved.ownerId, "local");
+  assert.equal((saved.execution!.requestContext as {anchorEpisodeId:number}).anchorEpisodeId, 1);
+  assert.equal((saved.execution!.requestContext as {referenceScope:string}).referenceScope, "selected_memory");
+  assert.ok(queries.some(query => query.freshness === "fresh" && query.urls?.includes("https://neon.com/pricing")));
 
   assert.equal(second.jsonPrompts.length,0,"foreground-reviewed assertions are not independently re-extracted");
   assert.deepEqual(store.claimsFor(2),[]);

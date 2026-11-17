@@ -20,9 +20,9 @@ Starter questions change when you start a new chat, and **Refresh suggestions** 
 
 The date picker also supports **era simulation**: answer from a selected historical perspective while researching the live web. Modern sources can establish historical events, but later outcomes should not be presented as knowledge available in that era. This is a reconstructed perspective, not a frozen historical internet.
 
-Choose **Standard** for fuller research, or **Fast** for a shorter answer using the smaller configured model. Fast allows one model-planned search batch and at most four search-tool calls, with a ten-second deadline per lookup. A pinned re-check first reads up to four original cited URLs fresh, counting that batch against the same allowance. Explicit verification and factual era answers retain the main model's evidence review; rejected drafts also use the main model for correction and must pass review again. Those checks can still take longer. Fast trades research depth for speed; it is not a guaranteed response time or a provider priority tier.
+Choose **Standard** for fuller first-answer research, or **Fast** for a shorter answer using the smaller configured model. Live re-checks use a simpler path in both modes: read the original cited URLs and search for updates concurrently, then make one comparison call using the faster configured model. Results say what is **still correct**, **changed or corrected**, and **could not be confirmed**. Every confirmed item needs a cited source and matching supporting excerpt. Missing details stay specific instead of replacing the whole answer. Historical simulation retains its separate perspective checks. Provider response times still vary.
 
-Re-checks distinguish a review timeout from missing evidence. If a correction fails, only complete passages independently approved by the reviewer can remain in a partially supported answer. **Retry unfinished check** preserves the original answer reference, selected date and answer mode. When structured coverage is available for a recent check in the same context, it targets unresolved claims; older checks receive a fresh assessment. Claim coverage labels distinguish supported, corrected and unresolved assertions. Clarifications remain saved as waiting for input and can be restored after a dropped connection. Interrupted research offers **Resume saved research** for two minutes when the conversation and execution policy still match. It restores saved evidence and drafts while retaining cumulative usage limits. Independently approved findings can appear while the final answer is being completed.
+Re-checks keep the selected answer inside the current chat. A single matching earlier answer can be resolved automatically; ambiguous topics ask for a choice before research. **Try checking again** preserves the original reference, date and answer mode. Recent retries can target unfinished details. Interrupted research offers **Resume saved research** for two minutes when the conversation and execution policy still match, retaining cumulative usage limits. A source or comparison outage is described for the selected topic and never treated as proof that nothing changed.
 
 ## Architecture
 
@@ -33,7 +33,7 @@ The backend is one Node.js application with separate modules for orchestration, 
 1. **Accept the request.** The API validates the message, identifies its owner and conversation, pins the selected viewpoint, and admits the turn within queue and execution limits.
 2. **Prepare context.** Durable turn order preserves the current chat independently of the selected viewpoint. Follow-ups reference that chat; cross-conversation recall runs only for explicit personal-memory requests. Earlier answers and source passages are treated as reference material, not instructions or automatically verified facts.
 3. **Research.** The model decides what to search through the single `web_search` tool. Exa Search discovers pages; Exa Contents reads selected sources through the same tool. Validation, caching, concurrency limits and bounded evidence packing control the work.
-4. **Answer and review.** The model synthesizes numbered source passages. Explicit factual verification and factual era simulation receive evidence/perspective review; unresolved facts remain qualified. Ordinary responses can stream provisionally.
+4. **Answer and compare.** Live re-checks render a structured source comparison in one model call. Other explicit factual verification and historical simulation retain evidence/perspective review. Ordinary responses can stream provisionally.
 5. **Save and recover.** Accepted answers and cited evidence commit together in SQLite. Durable turn IDs support recovery after an interrupted connection. A completion event means the answer was saved; verification and factual simulation save before publishing their final prose.
 6. **Enrich memory.** Evidence review writes canonical claims with source hashes, viewpoint and review policy directly to memory. A background worker extracts ordinary answers as unverified records, using the same model gateway at lower priority. Exact matches and bounded concept aliases improve recall without weakening owner, conversation or date boundaries.
 
@@ -48,8 +48,8 @@ See the [backend capabilities](docs/architecture/README.md) and [conversation/me
 | Runtime | Node.js and TypeScript, executed with `tsx` |
 | Frontend | HTML, CSS and browser JavaScript |
 | Transport | HTTP/JSON requests and server-sent events (SSE) |
-| Answer generation, evidence review and repair | Azure Foundry deployment `gpt-6.1-sol-1` |
-| Fast answers and background memory extraction | Azure Foundry deployment `gpt-6-luna-1` |
+| Standard answers, historical review and repair | Azure Foundry deployment `gpt-6.1-sol-1` |
+| Fast answers, live comparisons and background memory extraction | Azure Foundry deployment `gpt-6-luna-1` |
 | Model protocol | Responses API in the current configuration; Chat Completions adapter also available |
 | Web retrieval | Exa Search and Contents |
 | Persistence | Native Node SQLite, WAL and full-text search |

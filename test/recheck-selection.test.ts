@@ -46,7 +46,7 @@ test("empty personal history and repeated attempts explain the gap without paid 
       const done = events.find(event => event.type === "done"); assert.ok(done && done.type === "done");
       assert.equal(done.quality, "non_factual"); assert.equal(done.timings.modelCalls, 0);
       const answer = store.episode(done.episodeId, "visitor")!.answer;
-      assert.match(answer, /matching earlier discussion/); assert.doesNotMatch(answer, /check remains unresolved|Private facts/);
+      assert.match(answer, /matching earlier answer/); assert.doesNotMatch(answer, /check remains unresolved|Private facts/);
     }
   } finally { store.close(); }
 });
