@@ -23,6 +23,25 @@ submit({ body: { questions: f, faceapi_attributes: {
 - Focus/fullscreen: `visibilitychange`, `window.blur`, `fullscreenchange` bump counters.
 - No webcam frames/recording appear to be streamed to the server for independent review.
 
+## Timing: proctoring is sent ONLY at the final submit
+The entire candidate flow makes just 5 API calls: `check-login-status`, `instructions`,
+`login`, `questions`, `submit`. The proctoring counters (`u.getState().proctoring`) are
+read and transmitted **only** in the final `POST /candidate/submit`. There is no mid-exam
+upload, heartbeat, per-question report, or webcam streaming — the counters live in browser
+memory for the whole exam and are never seen by the server until that one request.
+
+Consequences:
+- The candidate need not behave during the exam; nothing is observed in real time.
+- The `fetch` hook in Method 1 only has to be in place before that single submit. Because
+  the app is a SPA (client-side routing, no full page reloads), pasting it once on the
+  login/instructions screen persists through to submit.
+- That same final POST also carries every answer (`questions: f`), so one request body
+  controls answers AND the integrity report; it can be crafted directly with the cookie.
+
+Fix implication: moving `faceapi_attributes` to "before submit" or sending it continuously
+does NOT help — any client-sent value is forgeable. The verdict must be computed
+server-side from uploaded evidence (see remediation below).
+
 ## Attacker flow during an exam
 
 ### Method 1 — Forge the integrity report at submit (most reliable; defeats everything)
