@@ -1,0 +1,29 @@
+{
+  "version": "pipeline-regression-v3",
+  "fixtures": [
+    {
+      "id": "historical-price",
+      "sha256": "e2ced0a681bb3638a62848654486184de7694415c884cea999ab2c3ea45c7950"
+    },
+    {
+      "id": "completed-event-premise",
+      "sha256": "394c3e2cb793ea1ee985a15092ede2f0a1851daefce2d6f0217bf8032ed6a523"
+    },
+    {
+      "id": "future-outcome-repaired",
+      "sha256": "7527c924d713c0bc7f49710b97ccfc208fe9c11a049e749b93894e65dc672eec"
+    },
+    {
+      "id": "future-technology",
+      "sha256": "31329671455bada38ef96e1fef2590b97c22f140f2345ec7f3d70b879d7c30ba"
+    },
+    {
+      "id": "present-verification",
+      "sha256": "f23f67dc6ff86ef7705355b83caf3b17c40379e4f879f381f672f99569b0d00b"
+    },
+    {
+      "id": "memory-visibility",
+      "sha256": "4c0b257c65df7939fbb27b722262fed680a7253b17fa9557b92686c73af92c9e"
+    }
+  ]
+}

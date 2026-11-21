@@ -1,4 +1,6 @@
-// The whole interface: no framework and no build step, so `npm run dev` has nothing to compile.
+
+import { citationTextNodes } from "./citations.js";
+import { readTurn } from "./recovery.js";
 
 const $ = (id) => document.getElementById(id);
 const el = (tag, className, text) => {
@@ -9,29 +11,65 @@ const el = (tag, className, text) => {
 };
 
 const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-// A page load is a chat. Memory lives on the server and spans all of them.
-const sessionId = crypto.randomUUID();
+const isMacPlatform = /Mac|iPhone|iPad|iPod/.test(navigator.platform)
+  || navigator.userAgentData?.platform === "macOS";
+const composeShortcut = isMacPlatform
+  ? { label: "⌘E", aria: "Meta+E", title: "Command+E to focus" }
+  : { label: "Ctrl+E", aria: "Control+E", title: "Control+E to focus" };
+
+function savedSession() { try { return sessionStorage.getItem("asof.preview.session.v2"); } catch { return null; } }
+let sessionId = savedSession() || crypto.randomUUID();
+function rememberSession() { try { sessionStorage.setItem("asof.preview.session.v2", sessionId); } catch {} }
+rememberSession();
 let inFlight = null;
-// The agent's clock can differ from this machine's; keep the difference and tick locally.
+let chooserGeneration = 0;
+let choosingHistory = false;
+let starterOffset = Math.floor(Math.random() * 3) * 3;
+let starterEra;
+function dismissHistoryChooser() { chooserGeneration++; $("history-chooser")?.remove(); if ($("empty")) $("empty").hidden = false; }
+
+
 let clockOffset = 0;
 let simulated = false;
+let clockSaving = false;
+let clarificationsEnabled = false;
+let pendingView = null;
+let responseModeInitialized = false;
+function updateResponseMode() {
+  $("response-mode-hint").textContent = $("response-mode").value === "fast"
+    ? "Shorter answers, lighter research" : "More complete research";
+}
+$("response-mode").addEventListener("change", () => {
+  try { sessionStorage.setItem("asof.response-mode", $("response-mode").value); } catch {}
+  updateResponseMode();
+});
 
 const agentNow = () => new Date(Date.now() + clockOffset);
 const dayLabel = (date) => date.toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short", year: "numeric" });
 const timeLabel = (date) => date.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
 const seconds = (ms) => (ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)} s`);
 
-// ---- clock ----------------------------------------------------------------
-
+let latestState;
 function applyState(state) {
+  dismissHistoryChooser();
+  latestState = state;
   clockOffset = new Date(state.now).getTime() - Date.now();
   simulated = state.simulated;
+  clarificationsEnabled = Boolean(state.features?.clarifications);
+  $("response-mode").querySelector('[value="fast"]').disabled = !state.features?.fastMode;
+  if (!responseModeInitialized) {
+    try { if (state.features?.fastMode && sessionStorage.getItem("asof.response-mode") === "fast") $("response-mode").value = "fast"; } catch {}
+  }
+  responseModeInitialized = true;
+  if (!state.features?.fastMode) $("response-mode").value = "standard";
+  updateResponseMode();
   const notice = $("notice");
   notice.hidden = state.missing.length === 0;
   notice.textContent = state.missing.length
     ? `Not configured: ${state.missing.join(", ")}. Copy .env.example to .env, fill it in and restart.`
     : "";
   drawStamp();
+  updateEra();
 }
 
 function drawStamp() {
@@ -42,44 +80,87 @@ function drawStamp() {
   stamp.classList.toggle("simulated", simulated);
 }
 
-/** Redraws the stamp on each second of the agent's clock, re-aiming every time so it never drifts or skips. */
 function tick() {
   drawStamp();
   setTimeout(tick, 1000 - ((Date.now() + clockOffset) % 1000));
 }
 
-async function setClock(now) {
-  const response = await fetch("/api/clock", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ now }),
-  });
-  if (response.ok) applyState(await response.json());
-  toggleClock(false);
+async function setClock(now, isCurrent = () => true) {
+  if (clockSaving) return;
+  if (now !== null && new Date(now).getTime() > Date.now()) {
+    showClockError("Choose a date and time in the past, or return to now.");
+    return false;
+  }
+  clockSaving = true;
+  showClockError("");
+  $("clock").setAttribute("aria-busy", "true");
+  for (const control of $("clock").querySelectorAll("button, input")) control.disabled = true;
+  try {
+    const response = await fetch("/api/clock", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ now, sessionId }),
+    });
+    const state = await response.json();
+    if (!isCurrent()) return false;
+    if (!response.ok) throw new Error(state.error || "The date could not be changed. Please try again.");
+    applyState(state);
+    toggleClock(false);
+    return true;
+  } catch (error) {
+    showClockError(`Could not change the date. ${error instanceof TypeError ? "Check your connection and try again." : error.message}`);
+    return false;
+  } finally {
+    clockSaving = false;
+    $("clock").removeAttribute("aria-busy");
+    for (const control of $("clock").querySelectorAll("button, input")) control.disabled = false;
+    drawCalendar();
+    showCalendarView(calendarView);
+  }
 }
 
-// The calendar in the clock popover. `picked` is the chosen day; `shown` is the month on screen.
+function showClockError(message) {
+  $("clock-error").textContent = message;
+  $("clock-error").hidden = !message;
+}
+
 let picked = new Date();
 let shown = new Date();
+let calendarView = "days";
+let firstYear = 1900;
+
+function calendarDate(year, month, day = 1, hour = 0, minute = 0) {
+  const date = new Date(0);
+  date.setFullYear(year, month, day);
+  date.setHours(hour, minute, 0, 0);
+  return date;
+}
+
+const monthNames = Array.from({ length: 12 }, (_, month) => calendarDate(2000, month).toLocaleDateString("en-GB", { month: "long" }));
 
 const sameDay = (a, b) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
 
 function drawCalendar() {
   const year = shown.getFullYear();
   const month = shown.getMonth();
-  $("cal-title").textContent = shown.toLocaleDateString("en-GB", { month: "long", year: "numeric" });
+  $("cal-month").textContent = monthNames[month];
+  $("cal-month").setAttribute("aria-label", `Choose month, ${monthNames[month]}`);
+  $("cal-year").textContent = String(year);
+  $("cal-year").setAttribute("aria-label", `Choose year, ${year}`);
 
-  // Weeks start on Monday, matching how the agent reads "last week".
   const cells = ["M", "T", "W", "T", "F", "S", "S"].map((letter) => el("span", "", letter));
-  const blanks = (new Date(year, month, 1).getDay() + 6) % 7;
+  const blanks = (calendarDate(year, month).getDay() + 6) % 7;
   for (let i = 0; i < blanks; i++) cells.push(el("span"));
 
   const today = new Date();
-  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  $("cal-next").disabled = calendarDate(year, month + 1) > today;
+  $("cal-prev").disabled = year === 1 && month === 0;
+  const daysInMonth = calendarDate(year, month + 1, 0).getDate();
   for (let d = 1; d <= daysInMonth; d++) {
-    const date = new Date(year, month, d);
+    const date = calendarDate(year, month, d);
     const button = el("button", [sameDay(date, picked) && "selected", sameDay(date, today) && "today"].filter(Boolean).join(" "), String(d));
     button.type = "button";
+    button.disabled = date > today;
     button.setAttribute("aria-label", dayLabel(date));
     button.setAttribute("aria-pressed", String(sameDay(date, picked)));
     button.addEventListener("click", () => {
@@ -92,18 +173,67 @@ function drawCalendar() {
   $("clock-summary").textContent = dayLabel(picked);
 }
 
-function shiftMonth(by) {
-  shown = new Date(shown.getFullYear(), shown.getMonth() + by, 1);
+function choosePeriod(year, month) {
+  const next = calendarDate(year, month);
+  if (next.getFullYear() < 1 || next.getFullYear() > 9999 || next > new Date()) return;
+  shown = next;
+
+  const today = new Date();
+  const lastDay = shown.getFullYear() === today.getFullYear() && shown.getMonth() === today.getMonth()
+    ? today.getDate() : calendarDate(shown.getFullYear(), shown.getMonth() + 1, 0).getDate();
+  picked = calendarDate(shown.getFullYear(), shown.getMonth(), Math.min(picked.getDate(), lastDay));
+  showClockError("");
   drawCalendar();
 }
 
-// The time of day in the clock popover, as minutes since midnight. One number
-// means stepping past :55 carries into the next hour with no special cases.
+function showCalendarView(view, focus = false) {
+  calendarView = view;
+  const months = view === "months";
+  const years = view === "years";
+  $("cal-grid").hidden = view !== "days";
+  $("cal-options").hidden = view === "days";
+  $("cal-month").setAttribute("aria-expanded", String(months));
+  $("cal-year").setAttribute("aria-expanded", String(years));
+  $("cal-help").textContent = months ? "Choose a month." : years ? "Choose a year. Scroll for more." : "Choose a day, or open the month and year above.";
+  for (const id of ["cal-prev", "cal-next"]) $(id).style.visibility = view === "days" ? "" : "hidden";
+  $("cal-earlier").hidden = !years || firstYear === 1;
+  if (view !== "days") {
+    const year = shown.getFullYear();
+    const today = new Date();
+    const lastYear = Math.min(9999, today.getFullYear());
+    firstYear = Math.min(firstYear, year);
+    const values = months ? monthNames.map((_, month) => month) : Array.from({ length: lastYear - firstYear + 1 }, (_, i) => lastYear - i);
+    $("cal-options").classList.toggle("years", years);
+    $("cal-options").setAttribute("aria-label", months ? "Months" : "Years");
+    $("cal-options").replaceChildren(...values.map(value => {
+      const selected = months ? value === shown.getMonth() : value === year;
+      const option = el("button", selected ? "selected" : "", months ? monthNames[value] : String(value));
+      option.type = "button";
+      option.disabled = months && calendarDate(year, value) > today;
+      option.dataset.value = String(value);
+      option.setAttribute("aria-pressed", String(selected));
+      option.addEventListener("click", () => {
+        choosePeriod(months ? shown.getFullYear() : value, months ? value : Math.min(shown.getMonth(), value === today.getFullYear() ? today.getMonth() : 11));
+        showCalendarView(months ? "days" : "months", true);
+      });
+      return option;
+    }));
+  }
+  if (focus) {
+    const selected = $(view === "days" ? "cal-grid" : "cal-options").querySelector('[aria-pressed="true"]');
+    selected?.focus({ preventScroll: true });
+    selected?.scrollIntoView?.({ block: "nearest" });
+  }
+}
+
+function shiftMonth(by) {
+  choosePeriod(shown.getFullYear(), shown.getMonth() + by);
+}
+
 let pickedMinutes = 0;
 const DAY_MINUTES = 24 * 60;
 const twoDigits = (n) => String(n).padStart(2, "0");
 
-/** `keepTyping` leaves the fields alone while someone is mid-keystroke in one of them. */
 function drawTime(keepTyping = false) {
   const hour = twoDigits(Math.floor(pickedMinutes / 60));
   const minute = twoDigits(pickedMinutes % 60);
@@ -116,7 +246,6 @@ function drawTime(keepTyping = false) {
   }
 }
 
-/** The arrows move an hour, or to the next five-minute mark; `fine` (the arrow keys) moves one minute. */
 function stepTime(unit, direction, fine = false) {
   let next = pickedMinutes + direction * (unit === "hour" ? 60 : 1);
   if (unit === "minute" && !fine) {
@@ -137,17 +266,17 @@ for (const spin of document.querySelectorAll(".spin")) {
     input.value = digits;
     if (!digits) return;
     const value = Math.min(Number(digits), highest);
-    // Out-of-range input is corrected as it is typed: "75" minutes shows as "59" straight away.
+
     if (Number(digits) > highest) input.value = String(highest);
     pickedMinutes = unit === "hour" ? value * 60 + (pickedMinutes % 60) : Math.floor(pickedMinutes / 60) * 60 + value;
     drawTime(true);
-    // The hour is complete after two digits, or after one that cannot begin a longer hour ("7"): move on to minutes.
+
     if (unit === "hour" && (digits.length === 2 || value > 2)) {
       input.value = twoDigits(value);
       $("clock-minute").focus();
     }
   });
-  // Leaving a field pads it: "7" becomes "07".
+
   input.addEventListener("blur", () => drawTime());
   input.addEventListener("keydown", (event) => {
     if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
@@ -158,7 +287,7 @@ for (const spin of document.querySelectorAll(".spin")) {
 
   for (const arrow of spin.querySelectorAll("button")) {
     const step = () => stepTime(unit, Number(arrow.dataset.step));
-    // Press to step once; keep holding to run.
+
     let pressed = false;
     arrow.addEventListener("pointerdown", () => {
       pressed = true;
@@ -170,13 +299,13 @@ for (const spin of document.querySelectorAll(".spin")) {
         clearInterval(repeat);
         arrow.removeEventListener("pointerup", stop);
         arrow.removeEventListener("pointerleave", stop);
-        // Sliding off the arrow cancels the press, so no click will follow to clear the flag.
+
         if (event.type === "pointerleave") pressed = false;
       };
       arrow.addEventListener("pointerup", stop);
       arrow.addEventListener("pointerleave", stop);
     });
-    // A click that no press already handled is the keyboard (Enter or Space on the focused arrow).
+
     arrow.addEventListener("click", () => {
       if (!pressed) step();
       pressed = false;
@@ -196,283 +325,768 @@ function toggleClock(open) {
   $("clock").hidden = !open;
   $("stamp").setAttribute("aria-expanded", String(open));
   if (open) {
-    picked = agentNow();
-    shown = new Date(picked.getFullYear(), picked.getMonth(), 1);
+    showClockError("");
+    picked = new Date(Math.min(agentNow().getTime(), Date.now()));
+    shown = calendarDate(picked.getFullYear(), picked.getMonth());
+    firstYear = Math.max(1, Math.min(1900, picked.getFullYear() - 10));
     pickedMinutes = picked.getHours() * 60 + picked.getMinutes();
     drawCalendar();
+    showCalendarView("days");
     drawTime();
-  }
+    $("cal-grid").querySelector("[aria-pressed=true]")?.focus({ preventScroll: true });
+  } else { $("stamp").focus({ preventScroll: true }); }
 }
 
 $("stamp").addEventListener("click", () => toggleClock($("clock").hidden));
 $("cal-prev").addEventListener("click", () => shiftMonth(-1));
 $("cal-next").addEventListener("click", () => shiftMonth(1));
+$("cal-month").addEventListener("click", () => showCalendarView(calendarView === "months" ? "days" : "months", true));
+$("cal-year").addEventListener("click", () => showCalendarView(calendarView === "years" ? "days" : "years", true));
+$("cal-earlier").addEventListener("click", () => {
+  firstYear = Math.max(1, firstYear - 100);
+  const scroll = $("cal-options").scrollTop;
+  showCalendarView("years");
+  $("cal-options").scrollTop = scroll;
+});
+$("cal-options").addEventListener("keydown", (event) => {
+  const buttons = [...$("cal-options").querySelectorAll("button:not(:disabled)")];
+  const index = buttons.indexOf(document.activeElement);
+  const columns = calendarView === "years" ? 4 : 3;
+  const delta = { ArrowLeft: -1, ArrowRight: 1, ArrowUp: -columns, ArrowDown: columns }[event.key];
+  if (index < 0 || (delta === undefined && event.key !== "Home" && event.key !== "End")) return;
+  event.preventDefault();
+  const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1 : Math.max(0, Math.min(buttons.length - 1, index + delta));
+  buttons[next].focus({ preventScroll: true });
+  buttons[next].scrollIntoView?.({ block: "nearest" });
+});
 $("clock").addEventListener("submit", (event) => {
   event.preventDefault();
-  const target = new Date(picked.getFullYear(), picked.getMonth(), picked.getDate(), Math.floor(pickedMinutes / 60), pickedMinutes % 60);
+  const target = calendarDate(picked.getFullYear(), picked.getMonth(), picked.getDate(), Math.floor(pickedMinutes / 60), pickedMinutes % 60);
   setClock(target.toISOString());
 });
 $("clock-reset").addEventListener("click", () => setClock(null));
 
-// ---- rendering an answer --------------------------------------------------
+const emptyTemplate = $("empty").cloneNode(true);
+const entries = [];
+let lastEra = null;
+let ledgerEpisodes = [];
+let ledgerYearOnly = false;
+let toastTimer;
+let sourceRequest = 0;
 
-DOMPurify.addHook("afterSanitizeAttributes", (node) => {
-  if (node.tagName === "A") {
-    node.setAttribute("target", "_blank");
-    node.setAttribute("rel", "noopener noreferrer");
+function notify(message) {
+  clearTimeout(toastTimer);
+  $("toast").textContent = message;
+  $("toast").hidden = false;
+  toastTimer = setTimeout(() => { $("toast").hidden = true; }, 3500);
+}
+
+function updateEra() {
+  const date = agentNow();
+  $("header-now").hidden = !simulated;
+  const composerBar = $("composer-era-bar");
+  composerBar.hidden = !simulated;
+  $("composer-now").hidden = !simulated;
+  if (simulated) {
+    $("composer-era").textContent = `Era simulation · ${dayLabel(date)}`;
+    $("composer-era").classList.add("is-simulated");
+    $("composer-era-note").textContent = "Live research. Historical perspective.";
   }
+  if ($("edition-year")) {
+    $("edition-year").textContent = date.getFullYear();
+    $("edition-date").textContent = date.toLocaleDateString("en-GB", { day: "numeric", month: "long" });
+    const note = simulated ? "The answer takes this date’s perspective. Later outcomes are still unknown." : "";
+    $("edition-note").textContent = note;
+    $("edition-note").hidden = !note;
+    $("starter-context").textContent = simulated ? `Questions for ${date.getFullYear()}` : "Research, remember, revisit";
+    const eraKey = simulated ? date.getFullYear() : "live";
+    if (starterEra !== eraKey) { starterEra = eraKey; starterOffset += 3; }
+    const pool = simulated ? [
+      "What are the biggest world events this month?", "Who is leading India at this date?", "What transport options are available for a long journey?",
+      "What major scientific discoveries are known at this date?", "What is happening in space exploration?", "How do people usually communicate over long distances?",
+      "What are the main sources of electricity?", "Which films have been released recently?", "What did we discuss earlier, and is it still correct?",
+    ] : [
+      "What changed in AI this week?", "Compare managed Postgres hosting for a small SaaS", "What did we discuss earlier, and is it still correct?",
+      "Compare CRM tools for a 20-person sales team", "What changed in browser technology this month?", "Find recent progress in battery recycling",
+      "What should I consider when choosing a password manager?", "Compare serverless and traditional hosting for a small app", "Which major space missions are happening this month?",
+    ];
+    const questions = Array.from({ length: 3 }, (_, index) => pool[(starterOffset + index) % pool.length]);
+    document.querySelectorAll("[data-starter]").forEach((button, i) => {
+      button.dataset.question = questions[i];
+      button.replaceChildren(el("span", "starter-number", `0${i + 1}`), el("span", "starter-question", questions[i]), el("span", "starter-arrow", "↗"));
+    });
+  }
+}
+
+function showDialog(dialog) {
+  dialog.hidden = false;
+  if (!dialog.open && typeof dialog.showModal === "function") dialog.showModal();
+}
+function closeDialog(dialog) {
+  if (dialog.open && typeof dialog.close === "function") dialog.close();
+  dialog.hidden = true;
+}
+
+function sourceHref(source) {
+  const value = source.archive?.captureUrl ?? (source.temporal?.provenanceKind === "archive" ? source.temporal.provenanceUrl : source.url);
+  try { const url = new URL(value); return /^(https?|http):$/.test(url.protocol) ? url.href : "#"; } catch { return "#"; }
+}
+function displayAnswer(text) {
+  // Presentation compatibility only: leave the saved record and fact-specific uncertainty intact.
+  const legacyPreface = "I could not verify this answer against the available evidence. Treat the following as unverified.";
+  for (const separator of ["\n\n", "\r\n\r\n"]) {
+    if (text.startsWith(legacyPreface + separator)) { text = text.slice(legacyPreface.length + separator.length); break; }
+  }
+  return /^\s*I could not verify this as of \S+\.[\s\S]*(?:Exa Snapshot|preserved evidence|cited historical evidence|fully verified answer)/i.test(text)
+    ? "This older answer used a retired simulation mode. Re-check it to research this date again." : text;
+}
+function displayError(message) {
+  return /Exa Snapshot|snapshot_access_denied|matching preserved evidence/i.test(message)
+    ? "This older answer needs a fresh lookup. You can retry it here." : message;
+}
+
+async function openSource(source, context = {}) {
+  const requestId = ++sourceRequest;
+  $("source-number").textContent = `Source / ${String(source.n).padStart(2, "0")}`;
+  $("source-title").textContent = source.title;
+  $("source-host").textContent = new URL(source.url).hostname.replace(/^www\./, "");
+  $("source-host").href = sourceHref(source);
+  $("source-original").href = sourceHref(source);
+  $("source-context").textContent = context.at ? `Used in an answer as of ${dayLabel(new Date(context.at))}.` : "Supporting source for this answer.";
+  $("source-dates").replaceChildren();
+  for (const [label, value] of [["Published", source.publishedDate], ["Researched", source.retrievedAt?.slice(0, 10)]]) {
+    if (value) { const cell = el("div"); cell.append(el("span", "eyebrow", label), el("span", "", value)); $("source-dates").append(cell); }
+  }
+  $("source-passage").textContent = source.text || (context.episodeId ? "Loading the saved passage…" : "A passage was not saved with this older entry. Read the original source for the full context.");
+  showDialog($("source-dialog"));
+  if (!source.text && context.episodeId) {
+    try {
+      const response = await fetch(`/api/episodes/${context.episodeId}`);
+      if (!response.ok) throw new Error();
+      const detail = await response.json();
+      const saved = detail.sources.find(item => item.n === source.n);
+      if (!$("source-dialog").hidden && requestId === sourceRequest) {
+        $("source-passage").textContent = saved?.text || "A passage was not saved with this older entry. Read the original source for the full context.";
+      }
+    } catch { if (requestId === sourceRequest) $("source-passage").textContent = "The saved passage could not be loaded. You can still read the original source."; }
+  }
+}
+
+DOMPurify.addHook("afterSanitizeAttributes", node => {
+  if (node.tagName === "A") { node.setAttribute("target", "_blank"); node.setAttribute("rel", "noopener noreferrer"); }
 });
-
-/** Markdown to safe HTML, with [n] turned into links to the numbered sources. */
-function renderAnswer(container, markdown, sources) {
-  container.innerHTML = DOMPurify.sanitize(marked.parse(markdown, { gfm: true }));
-  const byNumber = new Map(sources.map((s) => [s.n, s]));
-  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
-  const textNodes = [];
-  while (walker.nextNode()) {
-    if (!walker.currentNode.parentElement.closest("code, pre, a")) textNodes.push(walker.currentNode);
-  }
-  for (const node of textNodes) {
+function renderAnswer(container, markdown, sources, context = {}) {
+  container.innerHTML = DOMPurify.sanitize(marked.parse(displayAnswer(markdown), { gfm: true }));
+  const byNumber = new Map(sources.map(source => [source.n, source]));
+  for (const node of citationTextNodes(container)) {
     const parts = node.textContent.split(/(\[\d+(?:\s*,\s*\d+)*\])/);
     if (parts.length === 1) continue;
     const fragment = document.createDocumentFragment();
     for (const part of parts) {
       const numbers = /^\[[\d,\s]+\]$/.test(part) ? part.slice(1, -1).split(",").map(Number) : [];
-      if (!numbers.length || !numbers.every((n) => byNumber.has(n))) {
-        fragment.append(part);
-        continue;
-      }
+      if (!numbers.length || !numbers.every(n => byNumber.has(n))) { fragment.append(part); continue; }
       for (const n of numbers) {
+        const source = byNumber.get(n);
         const link = el("a", "cite", `[${n}]`);
-        link.href = byNumber.get(n).url;
-        link.title = byNumber.get(n).title;
-        link.target = "_blank";
-        link.rel = "noopener noreferrer";
+        link.href = sourceHref(source);
+        link.title = `Inspect source ${n}: ${source.title}`;
+        link.setAttribute("aria-haspopup", "dialog");
+        link.addEventListener("click", event => { if (!event.metaKey && !event.ctrlKey && !event.shiftKey) { event.preventDefault(); openSource(source, context); } });
         fragment.append(link);
       }
     }
     node.replaceWith(fragment);
   }
+  for (const table of container.querySelectorAll("table")) {
+    const wrap = el("div", "table-scroll"); wrap.tabIndex = 0; wrap.setAttribute("role", "region"); wrap.setAttribute("aria-label", "Answer table, scroll horizontally if needed");
+    table.replaceWith(wrap); wrap.append(table);
+  }
+}
+function renderSources(list, sources, context = {}) {
+  list.replaceChildren(...sources.map(source => {
+    const item = el("li");
+    const button = el("button", "source-chip"); button.type = "button"; button.setAttribute("aria-haspopup", "dialog");
+    button.append(el("span", "n", String(source.n)), el("span", "host", new URL(source.url).hostname.replace(/^www\./, "")), el("span", "source-chevron", "↗"));
+    button.title = source.title; button.addEventListener("click", () => openSource(source, context)); item.append(button); return item;
+  }));
+  list.hidden = !sources.length;
 }
 
-function renderSources(list, sources) {
-  list.replaceChildren(
-    ...sources.map((s) => {
-      const item = el("li");
-      const link = el("a");
-      link.href = s.url;
-      link.target = "_blank";
-      link.rel = "noopener noreferrer";
-      link.append(el("span", "host", new URL(s.url).hostname.replace(/^www\./, "")), ` — ${s.title}`);
-      item.append(el("span", "n", String(s.n)), link);
-      if (s.publishedDate) item.append(el("span", "date", s.publishedDate));
-      return item;
-    }),
-  );
-  list.hidden = sources.length === 0;
+function buttonAction(label, action, className = "text-action") {
+  const button = el("button", className, label); button.type = "button"; button.addEventListener("click", action); return button;
 }
-
-// ---- one turn -------------------------------------------------------------
-
-function addEntry(question) {
+function addEntry(question, options = {}) {
   $("empty")?.remove();
-  const now = agentNow();
+  const now = new Date(options.at ?? agentNow());
+  const isEra = options.simulated ?? simulated;
+  const eraKey = `${isEra}:${now.toLocaleDateString("en-CA")}`;
+  if (lastEra && lastEra !== eraKey) {
+    const divider = el("div", "era-divider"); divider.append(el("span", "", isEra ? `Viewpoint changed · ${dayLabel(now)}` : "Returned to the present")); $("thread").append(divider);
+  }
+  lastEra = eraKey;
   const entry = el("article", "entry");
-  const gutter = el("div", "gutter");
-  gutter.append(el("time", "", timeLabel(now)), el("span", "", dayLabel(now)));
+  const gutter = el("div", "gutter"); gutter.append(el("time", "", timeLabel(now)), el("span", "", dayLabel(now)), el("span", "entry-mode", isEra ? "SIMULATION" : "LIVE"));
   const body = el("div", "body");
-  const view = {
-    trace: el("ul", "trace"),
-    answer: el("div", "answer"),
-    sources: el("ol", "sources"),
-    timings: el("div", "timings"),
-  };
-  view.sources.hidden = true;
-  body.append(el("h2", "question", question), view.trace, view.answer, view.sources, view.timings);
-  entry.append(gutter, body);
-  $("thread").append(entry);
-  entry.scrollIntoView({ block: "start", behavior: "smooth" });
+  const view = { entry, at: now.toISOString(), isEra, question, trace: el("ul", "trace"), answer: el("div", "answer"), sources: el("ol", "sources"), timings: el("div", "timings"), status: el("div", "answer-status"), steps: el("ol", "answer-steps"), actions: el("div", "answer-actions"), details: el("details", "answer-details"), text: "", dataSources: [], episodeId: options.episodeId };
+  view.responseMode = options.responseMode ?? (options.restored ? "standard" : $("response-mode").value);
+  view.clarification = el("div", "clarification-slot");
+  view.checkedFindings = el("section", "checked-findings"); view.checkedFindings.hidden = true;
+  view.checkedFindings.setAttribute("aria-live", "polite");
+  view.status.setAttribute("role", "status");
+  for (const [i, title] of ["Searching", "Checking answer", "Preparing answer"].entries()) view.steps.append(el("li", "", `${String(i + 1).padStart(2, "0")} ${title}`));
+  view.details.append(el("summary", "", "Research details"), view.trace, view.timings);
+  view.sources.hidden = true; view.actions.hidden = true;
+  body.append(el("h2", "question", question), view.clarification, view.steps, view.checkedFindings, view.answer, view.sources, view.status, view.actions, view.details);
+  entry.append(gutter, body); $("thread").append(entry); entries.push(view);
+  if (!options.restored) entry.scrollIntoView({ block: "start", behavior: "smooth" });
   return view;
 }
-
-function traceLine(list, kind, label, state = "", className = "") {
-  const item = el("li", className);
-  item.append(el("span", "kind", kind), el("span", "label", label), el("span", "state", state));
-  list.append(item);
-  return item;
+function stage(view, index, label) {
+  view.steps.hidden = false;
+  [...view.steps.children].forEach((item, i) => { item.classList.toggle("active", i === index); item.classList.toggle("complete", i < index); });
+  view.status.textContent = label;
+}
+function traceLine(list, kind, label) {
+  const item = el("li"); item.append(el("span", "kind", kind), el("span", "label", label), el("span", "state")); list.append(item); return item;
+}
+function paintView(view) { renderAnswer(view.answer, view.text, view.dataSources, { at: view.at, episodeId: view.episodeId }); }
+function showCheckedFindings(view, claims) {
+  if (!Array.isArray(claims) || !claims.length) return;
+  view.checkedFindings.replaceChildren(el("strong", "", "Checked so far"), el("p", "", "These details have been checked. The rest is still being checked."));
+  const list = el("ul");
+  for (const claim of claims.slice(0, 64)) if (claim.status === "supported" && typeof claim.text === "string") {
+    const item = el("li");
+    const refs = Array.isArray(claim.sourceRefs) ? claim.sourceRefs.map(ref => ({ ...ref, title: ref.url })) : [];
+    const text = /\[\d+\]/.test(claim.text) ? claim.text : `${claim.text} ${refs.map(ref => `[${ref.n}]`).join(" ")}`;
+    renderAnswer(item, text, refs, { at: view.at }); list.append(item);
+  }
+  view.checkedFindings.append(list); view.checkedFindings.hidden = !list.children.length;
 }
 
-async function send(message) {
+function choiceSummary(view, answer) {
+  view.clarification.replaceChildren();
+  const summary = el("div", "clarification-summary");
+  summary.append(el("span", "eyebrow", answer.skipped ? "Using reasonable assumptions" : "Your direction"), el("p", "", answer.answer));
+  view.clarification.append(summary);
+}
+function updatePendingComposer() {
+  input.placeholder = pendingView?.card.selection ? "Use saved choice above" : pendingView ? "Your own detail…" : "Ask anything";
+  if (pendingView) {
+    $("compose-context").hidden = false;
+    $("compose-context").textContent = `Clarifying: ${pendingView.question}`;
+  } else $("compose-context").hidden = true;
+}
+function selectionFor(answer) {
+  return answer.skipped ? { skip: true } : answer.optionId ? { optionId: answer.optionId } : { text: answer.answer };
+}
+function showClarification(view, card) {
+  view.responseMode = card.responseMode ?? view.responseMode;
+  view.clarificationId = card.id;
+  view.card = card;
+  view.awaitingClarification = true;
+  pendingView = view;
+  view.steps.hidden = true; view.actions.hidden = true; view.details.hidden = true;
+  view.clarification.replaceChildren();
+  const section = el("section", "clarification-card");
+  const heading = el("h3", "", card.question); heading.id = `clarification-${card.id}`; heading.tabIndex = -1;
+  section.setAttribute("aria-labelledby", heading.id);
+  section.append(el("span", "eyebrow", "One detail will help"), heading, el("p", "clarification-why", card.why));
+  const options = el("div", "clarification-options"); options.setAttribute("role", "group"); options.setAttribute("aria-label", card.question);
+  for (const option of card.options) {
+    const button = buttonAction("", () => submitClarification(view, { optionId: option.id }), "clarification-option");
+    const content = el("span", "option-content"); content.append(el("strong", "", option.label), el("span", "option-detail", option.detail));
+    button.append(el("span", "option-letter", option.id.toUpperCase()), content, el("span", "option-arrow", "↗")); options.append(button);
+  }
+  section.append(options);
+  const form = el("form", "clarification-custom");
+  const label = el("label", "", "Or add your own detail");
+  const field = el("input"); field.type = "text"; field.maxLength = 1000; field.placeholder = "Tell me what matters to you…"; field.id = `detail-${card.id}`; label.htmlFor = field.id;
+  const row = el("div", "custom-detail-row"); const submit = el("button", "", "Use this detail ↗"); submit.type = "submit"; row.append(field, submit);
+  form.append(label, row); form.addEventListener("submit", event => {
+    event.preventDefault();
+    if (!field.value.trim()) { error.textContent = "Choose an option or add a short detail."; field.focus(); return; }
+    submitClarification(view, { text: field.value.trim() });
+  });
+  const error = el("p", "clarification-error"); error.setAttribute("role", "alert");
+  section.append(form, error, buttonAction("Use your best judgment instead ↗", () => submitClarification(view, { skip: true }), "text-action clarification-skip"));
+  if (view.isEra) section.append(el("p", "clarification-date", `This answer stays set to ${dayLabel(new Date(view.at))}.`));
+  view.clarification.append(section);
+  view.status.textContent = "Waiting for your direction. No research is running.";
+  if (card.selection) {
+    view.submittedSelection = selectionFor(card.selection);
+    choiceSummary(view, card.selection);
+    const resume = buttonAction("Continue with this choice ↗", () => submitClarification(view, view.submittedSelection), "text-action clarification-resume");
+    view.clarification.append(resume);
+    view.status.textContent = "Your choice is saved. Continue above to finish the answer.";
+  }
+  updatePendingComposer();
+}
+function submitClarification(view, selection) {
+  if (inFlight) return;
+  view.idempotencyKey = null; view.turnId = null; view.turnStatus = null; view.requestBody = null;
+  view.awaitingClarification = false; view.submittedSelection = selection; pendingView = null;
+  const option = "optionId" in selection ? view.card.options.find(option => option.id === selection.optionId) : null;
+  const answer = { answer: option ? `${option.label}: ${option.detail}` : "text" in selection ? selection.text : "Use your best judgment and state reasonable assumptions.", skipped: Boolean(selection.skip) };
+  choiceSummary(view, answer); updatePendingComposer();
+  send(view.question, { view, clarification: { id: view.clarificationId, selection } });
+}
+function showActions(view, failed = false) {
+  view.actions.replaceChildren(); view.actions.hidden = false;
+  if (!failed) view.actions.append(buttonAction("Copy answer", async () => {
+    const citations = view.dataSources.filter(source => view.cited?.includes(source.n)).map(source => `[${source.n}] ${source.title} — ${sourceHref(source)}`).join("\n");
+    try { await navigator.clipboard.writeText(`${displayAnswer(view.text)}${citations ? `\n\nSources\n${citations}` : ""}`); notify("Answer and source links copied."); }
+    catch { notify("Copy is unavailable in this browser. Select the answer text to copy it."); }
+  }));
+  view.actions.append(buttonAction("Edit question", () => { $("input").value = view.question; $("compose-context").textContent = "Editing an earlier question · sends as a new entry"; $("compose-context").hidden = false; fitInput(); $("input").focus(); }));
+  if (!failed && view.reviewFailure?.retryable) view.actions.append(buttonAction("Try checking again ↗", () => {
+    if (inFlight) return notify("Finish or stop the current answer first.");
+    const retry = addEntry(view.question, { at: view.at, simulated: view.isEra, responseMode: view.responseMode });
+    send(view.question, { view: retry, recheckEpisodeId: view.reviewFailure.retryEpisodeId,
+      memoryReferenceEpisodeId: view.reviewFailure.memoryReferenceEpisodeId ?? view.memoryReferenceEpisodeId,
+      retryUnfinished: Boolean((view.reviewFailure.retryEpisodeId || view.reviewFailure.memoryReferenceEpisodeId || view.memoryReferenceEpisodeId) && view.reviewFailure.retryScope === "unfinished_claims") });
+  }));
+  if (failed && view.checkpoint?.available && view.turnStatus !== "cancelled") view.actions.append(buttonAction("Resume saved research ↗", () => {
+    if (inFlight) return notify("Finish or stop the current answer first.");
+    const priorTurnId = view.turnId;
+    view.idempotencyKey = null; view.turnId = null; view.turnStatus = null;
+    view.requestBody = { resumeTurnId: priorTurnId, sessionId: view.checkpoint.request?.sessionId ?? sessionId };
+    send(view.question, { view });
+  }));
+  view.actions.append(buttonAction(failed ? "Retry question ↗" : "Ask again", () => { if (inFlight) return notify("Finish or stop the current answer first.");
+    if (failed && view.turnId && !["failed", "cancelled", "interrupted", "missing", "waiting_input"].includes(view.turnStatus)) return checkSaved(view).catch(error => notify(error.message));
+    if (failed && ["failed", "cancelled", "interrupted", "waiting_input"].includes(view.turnStatus)) { view.idempotencyKey = null; view.turnId = null; view.requestBody = null; }
+    if (failed && view.clarificationExpired) return send(view.question);
+    if (failed && view.clarificationId && view.submittedSelection) return send(view.question, { view, clarification: { id: view.clarificationId, selection: view.submittedSelection } });
+    send(view.question, failed ? { view } : { memoryReferenceEpisodeId: view.memoryReferenceEpisodeId }); }));
+  if (!failed && view.isEra) view.actions.append(buttonAction("Re-check now ↗", () => recheck(view.episodeId)));
+}
+function completeEntry(view, timings, cited) {
+  view.cited = cited; view.turnStatus = "completed"; clearPendingTurn(view);
+  view.checkedFindings.hidden = true; view.checkedFindings.replaceChildren();
+  view.details.open = false;
+  view.steps.hidden = true;
+  paintView(view);
+  const sources = view.dataSources.filter(source => cited.includes(source.n));
+  renderSources(view.sources, sources, { at: view.at, episodeId: view.episodeId });
+  view.status.textContent = `${sources.length} source${sources.length === 1 ? "" : "s"}${timings?.totalMs != null ? ` · ${seconds(timings.totalMs)}` : ""} · Saved to Ledger${view.quality === "explicitly_unverified" ? " · Could not confirm" : view.quality === "supported_partial" ? " · Partly checked" : ""}`;
+  if (view.responseMode === "fast") view.status.textContent += " · Fast";
+  if (Array.isArray(view.claimCoverage) && view.claimCoverage.length) {
+    const counts = { supported: 0, changed: 0, unresolved: 0 };
+    for (const claim of view.claimCoverage) if (Object.hasOwn(counts, claim.status)) counts[claim.status]++;
+    // Extracted claims may omit other unchecked facts from the original answer.
+    if (view.quality !== "supported_partial" || counts.unresolved > 0) {
+      view.status.textContent += ` · This check: ${counts.supported} confirmed, ${counts.changed} changed, ${counts.unresolved} could not confirm`;
+    }
+  }
+  view.status.classList.add("is-complete");
+  showActions(view);
+}
+
+function rememberPendingTurn(view) {
+  try { sessionStorage.setItem("asof.pending.turn", JSON.stringify({ sessionId: view.requestBody?.sessionId ?? sessionId, requestBody: view.requestBody, turnId: view.turnId, question: view.question, at: view.at, isEra: view.isEra, idempotencyKey: view.idempotencyKey })); } catch {}
+}
+function clearPendingTurn(view) {
+  try { const saved = JSON.parse(sessionStorage.getItem("asof.pending.turn") || "null"); if (saved && (view.idempotencyKey && saved.idempotencyKey === view.idempotencyKey || view.turnId && saved.turnId === view.turnId)) sessionStorage.removeItem("asof.pending.turn"); } catch {}
+}
+async function checkSaved(view, signal) {
+  const result = await readTurn(view.turnId ?? { idempotencyKey: view.idempotencyKey }, fetch, signal);
+  if (!result.turn) {
+    view.turnStatus = "missing"; view.steps.hidden = true;
+    view.status.textContent = "No saved answer was found. Retry will use the same request key.";
+    view.answer.replaceChildren(el("p", "failure", view.status.textContent)); showActions(view, true); return;
+  }
+  view.turnId = result.turn.id; rememberPendingTurn(view);
+  view.turnStatus = result.turn.status;
+  view.checkpoint = result.checkpoint;
+  view.steps.hidden = true;
+  if (result.turn.status === "completed") {
+    const existing = entries.find(item => item !== view && item.episodeId === result.episode.id);
+    if (existing) { view.entry.remove(); entries.splice(entries.indexOf(view), 1); clearPendingTurn(view); return; }
+    view.episodeId = result.episode.id; view.text = result.episode.answer; view.quality = result.episode.quality;
+    view.responseMode = result.episode.execution?.responseMode ?? "standard";
+    view.reviewFailure = result.episode.execution?.reviewFailure;
+    view.memoryReferenceEpisodeId = result.episode.execution?.memoryReferenceEpisodeId ?? view.memoryReferenceEpisodeId;
+    view.claimCoverage = result.claimCoverage ?? result.episode.execution?.claimCoverage;
+    view.dataSources = result.sources ?? []; paintView(view); completeEntry(view, null, view.dataSources.map(source => source.n)); return;
+  }
+  if (result.turn.status === "running") {
+    view.status.textContent = "Your answer is still running. Check its saved status below.";
+    view.actions.replaceChildren(buttonAction("Check saved answer ↗", () => checkSaved(view).catch(error => notify(error.message)))); view.actions.hidden = false; return;
+  }
+  clearPendingTurn(view);
+  if (result.turn.status === "waiting_input") {
+    if (result.clarification) {
+      const existing = entries.find(item => item !== view && item.clarificationId === result.clarification.id);
+      if (existing) { view.entry.remove(); entries.splice(entries.indexOf(view), 1); showClarification(existing, result.clarification); return; }
+      showClarification(view, result.clarification); return;
+    }
+    view.clarificationExpired = true;
+    view.status.textContent = "This clarification has expired or was already answered. You can ask the question again.";
+  } else view.status.textContent = result.turn.status === "cancelled" ? "Stopped. You can edit or retry your question."
+    : "This attempt ended before an answer was saved. You can retry your question.";
+  if (result.turn.status === "cancelled") view.checkedFindings.hidden = true;
+  else if (!view.checkedFindings.hidden) view.checkedFindings.querySelector("p").textContent = "These details were checked before the interruption. The rest could not be checked.";
+  view.answer.replaceChildren(el("p", "failure", view.status.textContent)); showActions(view, true);
+}
+async function restorePendingTurn() {
+  let saved; try { saved = JSON.parse(sessionStorage.getItem("asof.pending.turn") || "null"); } catch { return; }
+  if (!saved || saved.sessionId !== sessionId) return;
+  const view = addEntry(saved.question, { at: saved.at, simulated: saved.isEra, restored: true, responseMode: saved.requestBody?.responseMode });
+  view.memoryReferenceEpisodeId = saved.requestBody?.memoryReferenceEpisodeId;
+  view.turnId = saved.turnId; view.idempotencyKey = saved.idempotencyKey; view.requestBody = saved.requestBody;
+  try { await checkSaved(view); } catch (error) { view.status.textContent = error.message; view.turnStatus = "running"; showActions(view, true); }
+}
+async function send(message, options = {}) {
   if (inFlight || !message.trim()) return;
-  const view = addEntry(message.trim());
-  const abort = new AbortController();
-  inFlight = abort;
-  setBusy(true);
-
-  let text = "";
-  let sources = [];
-  let frame = 0;
-  const searches = new Map();
-  // Tokens arrive faster than the eye reads: re-render once per animation frame at most.
-  const paint = () => {
-    frame ||= requestAnimationFrame(() => {
-      frame = 0;
-      renderAnswer(view.answer, text, sources);
-    });
+  dismissHistoryChooser();
+  const view = options.view ?? addEntry(message.trim());
+  view.memoryReferenceEpisodeId ??= options.memoryReferenceEpisodeId ?? view.requestBody?.memoryReferenceEpisodeId;
+  view.text = ""; view.dataSources = []; view.reviewFailure = null; view.claimCoverage = null;
+  view.checkedFindings.hidden = true; view.checkedFindings.replaceChildren(); view.answer.replaceChildren(); view.actions.hidden = true;
+  view.details.hidden = false;
+  view.details.open = true;
+  view.status.classList.remove("is-complete", "is-interrupted");
+  const requestStarted = performance.now();
+  const noteRender = () => {
+    if (!view.text || view.firstRenderMs != null) return; view.firstRenderMs = Math.round(performance.now() - requestStarted);
+    if (view.turnId) fetch(`/api/turns/${encodeURIComponent(view.turnId)}/render`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ firstRenderMs: view.firstRenderMs }) }).catch(() => {});
   };
-
-  const handle = (event) => {
-    if (event.type === "recall") {
-      for (const note of event.notes) traceLine(view.trace, "memory", note);
-    } else if (event.type === "search") {
-      const label = event.publishedAfter ? `${event.query} (after ${event.publishedAfter})` : event.query;
-      const line = searches.get(event.id) ?? traceLine(view.trace, "search", label);
-      searches.set(event.id, line);
-      line.className = event.state;
-      line.querySelector(".state").textContent =
-        event.state === "running"
-          ? ""
-          : event.state === "failed"
-            ? "failed"
-            : `${event.results} result${event.results === 1 ? "" : "s"} · ${seconds(event.ms)}`;
-    } else if (event.type === "sources") {
-      sources = event.sources;
-    } else if (event.type === "text") {
-      text += event.delta;
-      paint();
-    } else if (event.type === "retract") {
-      text = "";
-      paint();
-    } else if (event.type === "done") {
-      renderAnswer(view.answer, text, sources);
-      renderSources(view.sources, sources.filter((s) => event.cited.includes(s.n)));
-      const t = event.timings;
-      view.timings.textContent = [
-        `recall ${seconds(t.recallMs)}`,
-        `${t.searches} search${t.searches === 1 ? "" : "es"}`,
-        t.firstTokenMs === null ? null : `first word ${seconds(t.firstTokenMs)}`,
-        `total ${seconds(t.totalMs)}`,
-      ]
-        .filter(Boolean)
-        .join(" · ");
-    } else if (event.type === "error") {
-      view.answer.replaceChildren(el("p", "failure", event.message));
-    }
+  view.firstRenderMs = null;
+  const abort = new AbortController(); inFlight = abort; setBusy(true);
+  const asOf = view.isEra ? new Date(view.at).toISOString() : undefined;
+  view.idempotencyKey ??= crypto.randomUUID();
+  view.requestBody ??= { sessionId, message: message.trim(), tz, mode: view.isEra ? "era" : "live", asOf,
+    ...(view.responseMode === "fast" ? { responseMode: "fast" } : {}),
+    ...(options.recheckEpisodeId ? { recheckEpisodeId: options.recheckEpisodeId } : {}),
+    ...(view.memoryReferenceEpisodeId ? { memoryReferenceEpisodeId: view.memoryReferenceEpisodeId } : {}),
+    ...(options.retryUnfinished ? { retryUnfinished: true } : {}),
+    ...(options.clarification ? { clarification: options.clarification } : {}) };
+  rememberPendingTurn(view);
+  $("compose-context").hidden = true;
+  let frame = 0, completed = false, reader;
+  const searches = new Map(); let reviewLine;
+  stage(view, 0, "Finding the sources behind your answer…");
+  const handle = event => {
+    if (event.type === "turn") { view.turnId = event.turnId; view.turnStatus = "running"; rememberPendingTurn(view); }
+    else if (event.type === "clarification") { clearPendingTurn(view); showClarification(view, event.card); }
+    else if (event.type === "recall") for (const note of event.notes) traceLine(view.trace, "memory", note);
+    else if (event.type === "search") {
+      const line = searches.get(event.id) ?? traceLine(view.trace, "search", event.query); searches.set(event.id, line); line.className = event.state;
+      line.querySelector(".state").textContent = event.state === "running" ? "searching" : event.state === "failed" ? "lookup unsuccessful" : `${event.results} results · ${seconds(event.ms)}`;
+      if (event.state === "running") stage(view, 0, view.isEra ? "Researching the world at your selected date…" : "Researching current sources…");
+    } else if (event.type === "verification") {
+      reviewLine ??= traceLine(view.trace, "check", view.isEra ? "Answer at the selected date" : "Answer against current sources");
+      reviewLine.querySelector(".state").textContent = event.state === "running" ? "checking" : event.state === "unavailable" ? "check unavailable"
+        : event.state === "partial" ? `partially checked · ${seconds(event.ms)}` : event.state === "failed" ? "check unfinished" : `complete · ${seconds(event.ms)}`;
+      stage(view, event.state === "running" ? 1 : 2, event.state === "running" ? (view.isEra ? "Checking the answer at your selected date…" : "Checking the answer against current sources…") : "Preparing your answer…");
+    } else if (event.type === "claim_review") showCheckedFindings(view, event.claims);
+    else if (event.type === "sources") view.dataSources = event.sources;
+    else if (event.type === "text") {
+      stage(view, 2, "Preparing your answer…"); view.text += event.delta;
+      frame ||= requestAnimationFrame(() => { frame = 0; paintView(view); noteRender(); });
+    } else if (event.type === "retract") { view.text = ""; view.checkedFindings.hidden = true; paintView(view); }
+    else if (event.type === "done") {
+      completed = true; view.episodeId = event.episodeId; view.quality = event.quality; view.turnId = event.turnId ?? view.turnId;
+      view.timings.textContent = `Recall ${seconds(event.timings.recallMs)} · ${event.timings.searches} searches · ${event.timings.modelCalls} model calls${event.timings.verificationMs ? ` · checking ${seconds(event.timings.verificationMs)}` : ""} · total ${seconds(event.timings.totalMs)}`;
+      view.reviewFailure = event.reviewFailure;
+      view.claimCoverage = event.claimCoverage;
+      completeEntry(view, event.timings, event.cited);
+    } else if (event.type === "error") throw new Error(displayError(event.message));
   };
-
   try {
-    const response = await fetch("/api/chat", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ sessionId, message, tz }),
-      signal: abort.signal,
-    });
-    if (!response.ok) throw new Error((await response.json()).error ?? `Request failed (${response.status})`);
-
-    // Server-sent events over a POST: each event is one "data: {json}" line followed by a blank line.
-    const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
-    let buffer = "";
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buffer += value;
-      const events = buffer.split("\n\n");
-      buffer = events.pop();
-      for (const raw of events) {
-        if (raw.startsWith("data: ")) handle(JSON.parse(raw.slice(6)));
-      }
+    const response = await fetch("/api/chat", { method: "POST", headers: { "content-type": "application/json", "idempotency-key": view.idempotencyKey }, body: JSON.stringify(view.requestBody), signal: abort.signal });
+    const durableId = response.headers.get("x-turn-id");
+    if (durableId) { view.turnId = durableId; view.turnStatus = "running"; rememberPendingTurn(view); }
+    if (response.status === 202) {
+      await checkSaved(view, abort.signal); completed = view.turnStatus === "completed"; return;
     }
+    if (!response.ok) {
+      const failure = await response.json();
+      if (failure.code === "clarification_unavailable") {
+        view.clarificationId = null; view.submittedSelection = null; view.clarificationExpired = true;
+        view.clarification.replaceChildren();
+      }
+      throw new Error(failure.error ?? "The request could not be completed.");
+    }
+    reader = response.body.pipeThrough(new TextDecoderStream()).getReader(); let buffer = "";
+    for (;;) {
+      const { value, done } = await reader.read(); if (done) break; buffer += value;
+      if (buffer.length > 262_144) throw new Error("The answer stream exceeded its buffer limit. Check the saved answer.");
+      const batches = buffer.split("\n\n"); buffer = batches.pop();
+      for (const raw of batches) if (raw.startsWith("data: ")) handle(JSON.parse(raw.slice(6)));
+    }
+    if (!completed && !view.awaitingClarification && !abort.signal.aborted) throw new Error("The connection ended before the answer was saved. You can retry your question.");
   } catch (error) {
-    if (abort.signal.aborted) view.timings.textContent = "stopped";
-    else handle({ type: "error", message: error.message });
+    cancelAnimationFrame(frame); frame = 0;
+    if (view.turnId || view.idempotencyKey) {
+      if (view.turnId && abort.signal.aborted) { try { await fetch(`/api/turns/${encodeURIComponent(view.turnId)}`, { method: "POST" }); } catch {} }
+      try { await checkSaved(view); if (view.turnStatus === "completed") { completed = true; return; } if (["running", "waiting_input", "cancelled", "missing", "failed", "interrupted"].includes(view.turnStatus)) return; } catch {}
+    }
+    view.steps.hidden = true;
+    view.status.classList.remove("is-complete"); view.status.classList.add("is-interrupted");
+    view.status.textContent = abort.signal.aborted ? "Stopped. You can edit or retry your question." : "The answer was interrupted. Your question is still here.";
+    if (!abort.signal.aborted) view.answer.replaceChildren(el("p", "failure", displayError(error.message)));
+    showActions(view, true);
   } finally {
+    await reader?.cancel().catch(() => {});
     cancelAnimationFrame(frame);
-    if (text && !view.answer.querySelector(".failure")) renderAnswer(view.answer, text, sources);
-    inFlight = null;
-    setBusy(false);
+    if (completed) { paintView(view); requestAnimationFrame(noteRender); }
+    else if (view.turnStatus !== "running") view.details.open = false;
+    if (inFlight === abort) { inFlight = null; setBusy(false);
+      if (view.awaitingClarification) view.clarification.querySelector("h3")?.focus({ preventScroll: true });
+    }
   }
 }
-
-// ---- composer -------------------------------------------------------------
 
 const input = $("input");
-
 function setBusy(busy) {
-  $("send").textContent = busy ? "Stop" : "Send";
-  if (!busy) input.focus();
+  $("response-mode").disabled = busy;
+  $("send").textContent = busy ? "Stop" : pendingView?.card.selection ? "Continue ↗" : pendingView ? "Add detail ↗" : "Send ↗";
+  $("send").setAttribute("aria-label", busy ? "Stop answer" : pendingView?.card.selection ? "Continue with saved choice" : pendingView ? "Submit clarification detail" : "Send message");
+  if (!busy) (pendingView?.clarification.querySelector("h3, .clarification-resume") ?? input).focus({ preventScroll: true });
 }
-
-function fitInput() {
-  input.style.height = "auto";
-  input.style.height = `${input.scrollHeight}px`;
-}
-
-$("composer").addEventListener("submit", (event) => {
-  event.preventDefault();
-  if (inFlight) return inFlight.abort();
-  const message = input.value;
-  input.value = "";
-  fitInput();
-  send(message);
-});
-
+function fitInput() { input.style.height = "auto"; input.style.height = `${Math.min(input.scrollHeight, 180)}px`; }
+$("composer").addEventListener("submit", event => { event.preventDefault(); if (inFlight) return inFlight.abort();
+  if (pendingView?.card.selection) return submitClarification(pendingView, pendingView.submittedSelection);
+  const message = input.value; if (!message.trim()) return;
+  if (pendingView && message.trim().length > 1000) return notify("Keep this detail under 1000 characters, or start a new chat.");
+  input.value = ""; fitInput();
+  if (pendingView) submitClarification(pendingView, { text: message.trim() });
+  else submitQuestion(message); });
 input.addEventListener("input", fitInput);
-input.addEventListener("keydown", (event) => {
-  if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
-    event.preventDefault();
-    $("composer").requestSubmit();
-  }
+input.addEventListener("keydown", event => { if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); $("composer").requestSubmit(); } });
+$("thread").addEventListener("click", event => {
+  if (event.target.closest("[data-refresh-starters]")) { starterOffset += 3; updateEra(); return; }
+  const starter = event.target.closest("[data-question]"); if (starter) submitQuestion(starter.dataset.question);
 });
-
-for (const starter of document.querySelectorAll(".starters button")) {
-  starter.addEventListener("click", () => send(starter.textContent));
+function resetThread() { $("thread").replaceChildren(); entries.length = 0; lastEra = null; pendingView = null; }
+function newChat() {
+  dismissHistoryChooser(); choosingHistory = false; starterOffset += 3;
+  clearTimeout(toastTimer); $("toast").hidden = true;
+  inFlight?.abort(); inFlight = null; sessionId = crypto.randomUUID(); rememberSession(); resetThread(); setBusy(false);
+  $("thread").append(emptyTemplate.cloneNode(true)); updateEra(); input.value = ""; fitInput(); $("compose-context").hidden = true;
+  updatePendingComposer();
 }
-
-$("new-chat").addEventListener("click", () => location.reload());
-
-// ---- ledger ---------------------------------------------------------------
-
-async function openLedger() {
-  const { episodes } = await (await fetch("/api/memory")).json();
-  const body = $("ledger-body");
-  body.replaceChildren();
-  if (!episodes.length) body.append(el("p", "ledger-empty", "Nothing yet. Ask something."));
-
-  const claimsById = new Map(episodes.flatMap((e) => e.claims).map((c) => [c.id, c]));
-  let currentDay = "";
-  for (const episode of episodes) {
-    const when = new Date(episode.askedAt);
-    if (dayLabel(when) !== currentDay) {
-      currentDay = dayLabel(when);
-      body.append(el("h3", "", currentDay));
-    }
-    const item = el("div", "ledger-item");
-    item.append(el("div", "when", timeLabel(when)), el("p", "asked", episode.question));
-    if (episode.claims.length) {
-      const list = el("ul", "claims");
-      for (const claim of episode.claims) {
-        const row = el("li", claim.verdict);
-        const value = el("span", "value");
-        const prior = claim.verdict === "changed" ? claimsById.get(claim.priorClaimId) : null;
-        if (prior) value.append(el("span", "was", prior.value));
-        value.append(claim.verdict === "unchanged" ? `${claim.value} ✓` : claim.value);
-        row.append(el("span", "what", `${claim.entity} · ${claim.attribute}`), value);
-        list.append(row);
+$("new-chat").addEventListener("click", newChat);
+document.querySelector(".wordmark").addEventListener("click", event => { event.preventDefault(); newChat(); });
+$("composer-era").addEventListener("click", () => toggleClock($("clock").hidden));
+for (const id of ["header-now", "composer-now"]) $(id).addEventListener("click", () => setClock(null));
+// A topic-only memory request needs a selected saved answer, not a paid guess.
+function priorAnswerRequest(message) {
+  const text = message.trim().replace(/[?.!]+$/, "").trim();
+  if (/\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|january|february|march|april|may|june|july|august|september|october|november|december|yesterday|last week)\b|\b\d{4}-\d{2}-\d{2}\b/i.test(text)) return false;
+  if (text.length > 240 || /https?:\/\/|["“”]|\b(?:verify|check|confirm)\s+(?:this|that)\s*:|\b(?:claim|statement)\s*:/i.test(text)) return false;
+  if (/^(?:please\s+)?(?:verify|re-?check|check again)(?:\s+(?:now|please|it|that|this|the answer|your answer))?$/i.test(text)) return true;
+  if (/^what did (?:we|i|you) (?:discuss|ask|talk about)(?: earlier| before| last time)?(?:,? and (?:is|was) (?:it|that|your answer) still (?:correct|accurate|true))$/i.test(text)) return true;
+  if (/^(?:please\s+)?(?:verify|re-?check|check|review)\s+(?:your|the|our|my)\s+(?:previous|earlier|last|prior)\s+[\p{L}\p{N} _-]{1,80}\s+(?:answer|response|recommendations?|discussion)(?:\s+(?:now|again))?$/iu.test(text)) return true;
+  return /^(?:please\s+)?(?:verify|re-?check|check|review)\s+(?:your|the|our|my)\s+(?:previous|earlier|last|prior)\s+(?:answer|response|recommendations?|discussion)(?:\s+(?:about|on|regarding)\s+[\p{L}\p{N} _-]{1,80})?(?:\s+(?:now|again))?$/iu.test(text)
+    || /^(?:is|was)\s+(?:your|the)\s+(?:previous|earlier|last|prior)\s+(?:answer|response)(?:\s+(?:about|on)\s+[\p{L}\p{N} _-]{1,80})?\s+still\s+(?:correct|accurate|true)$/iu.test(text);
+}
+function historyTopic(message) {
+  const before = message.match(/\b(?:previous|earlier|last|prior)\s+([\p{L}\p{N} _-]{1,80}?)\s+(?:answer|response|recommendations?|discussion)(?:\s+(?:now|again))?[?.!]*$/iu)?.[1];
+  if (before) return before.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
+  return message.match(/\b(?:about|on|regarding)\s+(.+?)(?:\s+still\s+(?:correct|accurate|true)|\s+(?:now|again))?[?.!]*$/i)?.[1]?.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
+}
+function submitQuestion(message) {
+  if (inFlight || choosingHistory) return notify("Finish the current action first.");
+  if (priorAnswerRequest(message)) return choosePriorAnswer(message);
+  return send(message);
+}
+function usefulHistoryEpisode(episode) {
+  if (episode.quality === "non_factual" || ["conversation", "creative", "transform", "recall"].includes(episode.execution?.intent)) return false;
+  const question = episode.question.trim();
+  if (priorAnswerRequest(question)
+    || /^(?:(?:hey|hi|hello)[,! ]*)?(?:thanks?(?: you)?|thank you|thx|ok(?:ay)?|got it|great|cool|bye)[.! ]*$/i.test(question)
+    || /^(?:hey|hi|hello)[!. ]*$/i.test(question)
+    || /^(?:hey[,! ]+)?what updates? (?:do )?(?:you|u) have[?!. ]*$/i.test(question)
+    || /\b(?:hardest|best|difficult|challenging) questions?\b.{0,60}\b(?:check|test|evaluate)\b.{0,40}\b(?:search engine|chatbot|agent)\b/i.test(question)
+    || /^re[- ]?check your (?:previous|earlier|last|prior) answer\b/i.test(question)) return false;
+  // A saved chat message is not automatically a research topic. Keep provisional factual
+  // answers, but require a source or extracted assertion rather than a failed search attempt.
+  return [episode.sources, episode.claims, episode.verifiedStatements].some(items => Array.isArray(items) && items.length > 0);
+}
+async function choosePriorAnswer(message) {
+  dismissHistoryChooser();
+  const generation = chooserGeneration, originSession = sessionId, era = simulated, cutoff = agentNow().getTime();
+  const current = () => generation === chooserGeneration && sessionId === originSession && !inFlight;
+  if ($("empty")) $("empty").hidden = true;
+  const panel = el("section", "history-chooser"); panel.id = "history-chooser";
+  panel.setAttribute("aria-label", "Choose a saved answer to check");
+  panel.append(el("h2", "", "Which saved answer should I check?"), el("p", "", "Loading your saved questions…"));
+  $("thread").append(panel);
+  panel.scrollIntoView({ behavior: "smooth", block: "start" });
+  try {
+    const response = await fetch("/api/memory?limit=100");
+    if (!response.ok) throw new Error("Your saved questions could not be loaded. Try again, or paste the answer you want checked.");
+    const page = await response.json(); if (!current()) return;
+    const topic = historyTopic(message), seen = new Set();
+    const choices = (Array.isArray(page.episodes) ? page.episodes : []).filter(episode => {
+      if (!Number.isSafeInteger(episode.id) || !episode.sessionId || typeof episode.question !== "string" || !episode.answer?.trim()
+        || !Number.isFinite(episode.askedAt) || (era && episode.askedAt > cutoff) || !usefulHistoryEpisode(episode)) return false;
+      const key = episode.question.toLowerCase().replace(/\s+/g, " ").trim();
+      if (seen.has(key) || (topic.length && !topic.every(term => key.includes(term)))) return false;
+      seen.add(key); return true;
+    }).sort((a, b) => Number(b.sessionId === originSession) - Number(a.sessionId === originSession)).slice(0, 4);
+    panel.replaceChildren(el("h2", "", "Which saved answer should I check?"));
+    if (!choices.length) panel.append(el("p", "", "No matching saved questions were found in your recent history for this date. Paste the answer you want checked, or open the Ledger to find an older answer."));
+    else {
+      panel.append(el("p", "", "Choose a question. I’ll check that exact answer at your selected date."));
+      const list = el("div", "history-choices");
+      for (const episode of choices) {
+        const button = buttonAction("", async () => {
+          if (!current() || choosingHistory) return;
+          const selection = {}; choosingHistory = selection;
+          for (const option of list.querySelectorAll("button")) option.disabled = true;
+          try {
+            // The selected record is server-loaded context for a fresh run in this chat.
+            // Never reopen its conversation, import its transcript, or rewrite the user's question.
+            await send(message, { memoryReferenceEpisodeId: episode.id });
+          } catch (error) { if (choosingHistory === selection) notify(error.message); }
+          finally { if (choosingHistory === selection) choosingHistory = false; }
+        }, "history-choice");
+        button.title = episode.question;
+        button.append(el("span", "", episode.question), el("small", "", dayLabel(new Date(episode.askedAt)))); list.append(button);
       }
-      item.append(list);
+      panel.append(list);
     }
-    body.append(item);
-  }
-  $("ledger").hidden = false;
+    panel.append(buttonAction("Keep writing", () => { dismissHistoryChooser(); input.focus(); }, "text-action"));
+    panel.scrollIntoView({ behavior: "smooth", block: "start" });
+  } catch (error) { if (current()) panel.replaceChildren(el("p", "", error.message), buttonAction("Keep writing", () => { dismissHistoryChooser(); input.focus(); }, "text-action")); }
 }
 
-$("open-ledger").addEventListener("click", openLedger);
-$("close-ledger").addEventListener("click", () => ($("ledger").hidden = true));
-document.addEventListener("keydown", (event) => {
-  if (event.key !== "Escape") return;
-  $("ledger").hidden = true;
-  toggleClock(false);
-});
+async function recheck(episodeId) {
+  dismissHistoryChooser();
+  if (inFlight) return notify("Finish or stop the current answer first.");
+  try {
+    const response = await fetch(`/api/episodes/${episodeId}`);
+    if (!response.ok) throw new Error("The saved answer could not be loaded. Open its conversation and try again.");
+    const { episode } = await response.json();
+    if (!episode || !Number.isSafeInteger(episode.id)) throw new Error("The saved answer could not be loaded.");
+    if (sessionId !== episode.sessionId && !await restoreSession(episode.sessionId, true)) throw new Error("The saved conversation could not be loaded.");
+    closeDialog($("ledger"));
+    if (!await setClock(null)) return notify("The date could not be updated. Try again.");
+    send(`Re-check your answer to “${episode.question}” from ${dayLabel(new Date(episode.askedAt))} using current sources. What is still correct, and what has changed?`, { recheckEpisodeId: episode.id });
+  } catch (error) { notify(error.message); }
+}
 
-applyState(await (await fetch("/api/state")).json());
-tick();
+async function restoreSession(id, scroll = false, options = {}) {
+  const response = await fetch(`/api/sessions/${encodeURIComponent(id)}`);
+  if (!response.ok) throw new Error("This saved conversation could not be loaded.");
+  const { episodes, conversation } = await response.json();
+  if (options.isCurrent && !options.isCurrent()) return false;
+  if (conversation && !options.preserveViewpoint) applyState({ ...latestState, now: new Date(conversation.viewpointAt ?? Date.now()).toISOString(), simulated: conversation.viewpointAt !== null });
+  if (!episodes.length) return false;
+  resetThread(); sessionId = id; rememberSession();
+  for (const item of episodes) {
+    const { episode, sources } = item;
+    const view = addEntry(episode.question, { at: episode.askedAt, simulated: Boolean(episode.execution?.time?.simulated ?? episode.execution?.simulation), episodeId: episode.id, restored: true, responseMode: episode.execution?.responseMode });
+    view.text = episode.answer; view.dataSources = sources; view.quality = episode.quality;
+    view.reviewFailure = episode.execution?.reviewFailure;
+    view.memoryReferenceEpisodeId = episode.execution?.memoryReferenceEpisodeId;
+    view.claimCoverage = item.claimCoverage ?? episode.execution?.claimCoverage;
+    if (episode.execution?.clarification) choiceSummary(view, episode.execution.clarification);
+    completeEntry(view, null, sources.map(source => source.n));
+    view.details.hidden = true;
+  }
+  if (scroll) entries.at(-1)?.entry.scrollIntoView({ behavior: "smooth", block: "start" });
+  return true;
+}
+async function restorePending(id) {
+  if (!clarificationsEnabled) return;
+  const response = await fetch(`/api/sessions/${encodeURIComponent(id)}/clarification`);
+  if (!response.ok) return;
+  const { card } = await response.json();
+  if (!card) return;
+  const view = addEntry(card.message, { at: card.time.effectiveAt, simulated: card.time.simulated, restored: true, responseMode: card.responseMode });
+  showClarification(view, card);
+}
+async function openConversation(episode) {
+  dismissHistoryChooser();
+  if (inFlight) return notify("Finish or stop the current answer first.");
+  try { await restoreSession(episode.sessionId, true); await restorePending(episode.sessionId); updatePendingComposer(); setBusy(false); closeDialog($("ledger")); notify("Conversation reopened. Continue below."); }
+  catch (error) { notify(error.message); }
+}
+function drawLedger() {
+  const term = $("ledger-search").value.trim().toLowerCase();
+  const year = agentNow().getFullYear();
+  const filtered = ledgerEpisodes.filter(episode => (!ledgerYearOnly || new Date(episode.askedAt).getFullYear() === year)
+    && `${episode.question} ${episode.summary || ""} ${episode.answer || ""} ${dayLabel(new Date(episode.askedAt))} ${new Date(episode.askedAt).toISOString().slice(0, 10)}`.toLowerCase().includes(term));
+  $("ledger-count").textContent = `${filtered.length} ${filtered.length === 1 ? "entry" : "entries"}`;
+  const body = $("ledger-body"); body.replaceChildren();
+  if (!filtered.length) body.append(el("p", "ledger-empty", ledgerEpisodes.length ? "No matching entries. Try another topic or date." : "Your first answer will start the record."));
+  let currentDay = "";
+  for (const episode of filtered) {
+    const date = new Date(episode.askedAt); const label = dayLabel(date);
+    if (label !== currentDay) { currentDay = label; body.append(el("h3", "ledger-day", label)); }
+    const item = el("div", "ledger-item");
+    item.append(el("div", "when", `${timeLabel(date)} · ${episode.execution?.simulation?.mode === "era" ? "Era simulation" : "Live research"}`));
+    item.append(buttonAction(episode.question, () => openConversation(episode), "ledger-question"));
+    if (episode.summary) item.append(el("p", "ledger-summary", episode.summary));
+    const actions = el("div", "ledger-entry-actions");
+    actions.append(buttonAction("Open conversation ↗", () => openConversation(episode)), buttonAction("Re-check now", () => recheck(episode.id))); item.append(actions); body.append(item);
+  }
+}
+async function openLedger() {
+  showDialog($("ledger")); $("ledger-body").replaceChildren(el("p", "ledger-empty", "Opening your record…"));
+  try { const response = await fetch("/api/memory"); if (!response.ok) throw new Error(); const page = await response.json(); ledgerEpisodes = page.episodes; drawLedger(); addLedgerPage(page.nextCursor); }
+  catch { $("ledger-body").replaceChildren(el("p", "ledger-empty", "The Ledger could not be loaded. Close it and try again.")); }
+}
+function addLedgerPage(cursor) {
+  if (!cursor) return;
+  const more = buttonAction("Load more entries", async () => {
+    more.disabled = true;
+    try { const response = await fetch(`/api/memory?cursor=${cursor}`); if (!response.ok) throw new Error(); const page = await response.json(); ledgerEpisodes.push(...page.episodes); drawLedger(); addLedgerPage(page.nextCursor); }
+    catch { more.disabled = false; notify("More entries could not be loaded."); }
+  }); $("ledger-body").append(more);
+}
+$("open-ledger").addEventListener("click", openLedger);
+$("close-ledger").addEventListener("click", () => closeDialog($("ledger")));
+$("ledger-search").addEventListener("input", drawLedger);
+$("ledger-era").addEventListener("click", () => { ledgerYearOnly = !ledgerYearOnly; $("ledger-era").setAttribute("aria-pressed", String(ledgerYearOnly)); drawLedger(); });
+$("source-close").addEventListener("click", () => closeDialog($("source-dialog")));
+for (const dialog of [$("ledger"), $("source-dialog")]) {
+  dialog.addEventListener("cancel", event => { event.preventDefault(); closeDialog(dialog); });
+  dialog.addEventListener("click", event => { if (event.target !== dialog) return; const r = dialog.getBoundingClientRect(); if (event.clientX < r.left || event.clientX > r.right || event.clientY < r.top || event.clientY > r.bottom) closeDialog(dialog); });
+}
+function typingTarget(target) {
+  return target instanceof Element && !!target.closest("input, textarea, select, [contenteditable='true']");
+}
+
+function composeShortcutPressed(event) {
+  if (typingTarget(event.target) || !$("clock").hidden || $("ledger").open || $("source-dialog").open) return false;
+  const key = event.key.toLowerCase();
+  if (isMacPlatform) {
+    return key === "e" && event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey;
+  }
+  return key === "e" && event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey;
+}
+
+function paintComposeShortcut() {
+  const hint = $("compose-shortcut");
+  if (!hint) return;
+  hint.textContent = composeShortcut.label;
+  input.setAttribute("aria-keyshortcuts", composeShortcut.aria);
+  input.title = composeShortcut.title;
+}
+
+document.addEventListener("keydown", event => {
+  if (composeShortcutPressed(event)) {
+    event.preventDefault();
+    input.focus({ preventScroll: true });
+    return;
+  }
+  if (event.key !== "Escape") return;
+  if (!$("source-dialog").hidden && $("source-dialog").open) { event.preventDefault(); closeDialog($("source-dialog")); }
+  else if (!$("ledger").hidden) { event.preventDefault(); closeDialog($("ledger")); }
+  else if (!$("clock").hidden) {
+    event.preventDefault();
+    if (calendarView !== "days") { const trigger = calendarView === "years" ? "cal-year" : "cal-month"; showCalendarView("days"); $(trigger).focus(); }
+    else toggleClock(false);
+  }
+});
+document.addEventListener("pointerdown", event => { if (!$("clock").hidden && !event.target.closest("#clock, #stamp, #composer-era-bar")) toggleClock(false); });
+
+paintComposeShortcut();
+applyState(await (await fetch(`/api/state?sessionId=${encodeURIComponent(sessionId)}`)).json());
+try { await restoreSession(sessionId); await restorePending(sessionId); await restorePendingTurn(); } catch { notify("Saved conversation could not be restored. Your Ledger is still available."); }
+setBusy(false); tick();

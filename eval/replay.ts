@@ -1,18 +1,5 @@
-/**
- * Replays the three questions from the brief against a history built on the
- * right days, by moving the clock instead of waiting a week.
- *
- *   Tue 3 Nov   ask about Postgres hosting
- *   Mon 9 Nov   ask for a CRM shortlist
- *   Wed 11 Nov  ask the three follow-ups from the brief
- *
- * It uses the real model and real search (so it needs the keys in .env), a
- * throwaway database, and prints each answer with its trace and timings. The
- * checks at the end are about recall, which is deterministic; the answers are
- * for a person to read.
- *
- *   npm run eval
- */
+
+
 import { rmSync } from "node:fs";
 import { type AgentEvent, type Timings, runTurn } from "../src/agent/run.ts";
 import { SystemClock } from "../src/clock.ts";
@@ -20,7 +7,7 @@ import { loadConfig } from "../src/config.ts";
 import { createLlm } from "../src/llm.ts";
 import { Enricher } from "../src/memory/enrich.ts";
 import { MemoryStore } from "../src/memory/store.ts";
-import { createExaSearch, withCache } from "../src/search.ts";
+import { createExaSearch, withCache, withConcurrency } from "../src/search.ts";
 
 const TZ = "Asia/Kolkata";
 const DB = "data/eval.db";
@@ -36,7 +23,7 @@ const store = new MemoryStore(DB);
 const clock = new SystemClock();
 const llm = createLlm(config.llm);
 const enricher = new Enricher(llm, store);
-const deps = { llm, store, clock, enricher, search: withCache(createExaSearch(config.exaApiKey)) };
+const deps = { llm, store, clock, enricher, search: withCache(withConcurrency(createExaSearch(config.exaApiKey))) };
 
 interface Outcome {
   notes: string[];
@@ -57,7 +44,7 @@ async function ask(at: string, message: string): Promise<Outcome> {
     else if (e.type === "done") outcome.timings = e.timings;
     else if (e.type === "error") outcome.error = e.message;
   };
-  // Each question is its own chat, so anything remembered comes from memory, not from chat history.
+
   await runTurn(deps, { sessionId: crypto.randomUUID(), message, tz: TZ }, onEvent);
   await enricher.idle();
 

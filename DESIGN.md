@@ -1,42 +1,27 @@
 # Design
 
-## The idea
+**asof answers a question twice: when you first ask, and when you return to ask whether it is still true.** It has one external tool, web search, and a dated memory of its answers.
 
-The brief's sample questions share one shape: find a past conversation by its date, look at the web again, and say what changed. A chat log can answer "what did I ask". It cannot answer "is it still correct", because it never recorded what was claimed or where the claim came from.
+![asof architecture: Node.js backend, request admission, agent orchestration, model gateway, Exa search, SQLite storage and memory worker](docs/assets/asof-architecture-dark.png)
 
-So an answer is stored as dated claims, not just as a message. "Neon Launch plan: $19/month, from neon.com/pricing, observed Tue 3 Nov" is one row. A follow-up a week later becomes: load the rows for that date, re-check each one, report then against now.
+## How it works
 
-## How a turn works
+For “Last Tuesday I asked about Postgres hosting. Has pricing changed?”, code resolves Tuesday in the user's timezone and retrieves the relevant answer. Missing or ambiguous history stays explicit. Other conversations enter context only through an explicit memory request or selected saved answer. Selection starts a fresh verification run inside the current chat without displaying the old transcript. Bounded follow-ups such as “what about pricing?” and “check the second option” retain that reference. Ordinal checks require an unambiguous numbered list or table; their excerpt keeps the full answer's hash and is labelled as a partial check.
 
-1. **Resolve dates in code.** `time/resolve.ts` turns "last Tuesday" or "3 November" into calendar days in the user's timezone, against an injectable clock. No model call.
-2. **Recall by date, then topic.** `memory/recall.ts` loads the conversations on those days from SQLite, with their claims. An ambiguous phrase returns every reading and the one that has a matching conversation wins. An empty date falls back to topic words and reports the nearest conversations.
-3. **One model, one tool.** The model gets the current time and the recalled memory as context, and may call `web_search` several times in parallel, for at most three rounds.
-4. **Stream the answer** with numbered citations.
-5. **Enrich afterwards.** The exchange is saved at once. A background call then extracts a summary, topic words and claims, and links each re-checked claim to the one it replaces.
+One TypeScript/Node service owns dates, context boundaries, admission and persistence. Exa Search and Contents share one `web_search` tool. First answers use model-directed research. Live re-checks use deterministic, concurrent retrieval: source-specific reads retain the original amounts, dates and conditions, while discovery searches look for updates. Up to four lookups cover at most five target groups; one discovery query remains unrestricted. Previously saved page text never becomes fresh evidence.
 
-## Why this shape
+One comparison call reports what is still correct, corrected or not confirmed. It considers the full original answer, including facts absent from background extraction. Confirmed items need valid source references and exact supporting passages. Numbered line ranges avoid fragile model-copied quotations. Missing or invalid items do not erase useful results. An unchanged announcement page cannot establish an unchanged current price, and matching a quote does not prove that the interpretation is correct.
 
-- **Fast.** Nothing sits in front of the model. Recall is a few milliseconds of SQL, so a plain message costs one model call and a searched answer usually two. A round's searches run concurrently, and Exa returns page passages with its results, so there is no fetch-and-scrape step. Memory is written after the response.
-- **Right.** Dates are computed, not guessed. Memory tells the model exactly what was found, including "nothing on that day", and the prompt forbids inventing a past conversation. Re-checks start from a list of exact claims with sources, and "could not verify" is an allowed result.
-- **Testable.** The clock is injected, so a test or a reviewer can ask on one day and follow up on another. `npm test` covers date resolution, recall and the agent loop without a network. `npm run eval` replays the brief's questions end to end.
+## Speed and recovery
 
-## Considered and rejected
+Standard permits fuller first-answer research; Fast uses a smaller configured deployment. Both use the faster configured model for live comparisons, without a draft/review/repair loop. Shared deadlines, concurrency and usage limits bound the work. Historical simulation retains a separate perspective check. Ordinary prose streams provisionally; checked answers commit before publication.
 
-- **Memory as a second tool.** The brief says one tool, and it would spend a model round trip on what SQL does in milliseconds.
-- **A router or planner call before the main model.** It adds latency to every turn. Code does that work here, exactly and for free.
-- **Embeddings and a vector store.** Once a date narrows the log to a few conversations there is little left to rank. Full-text search over model-written topic words handles different wording ("Postgres hosting" finds a question that said "managed database") with no extra key or network call.
-- **The model providers' built-in web search.** It cannot filter by date and hides the sources the ledger needs.
-- **Letting the model parse dates.** Not reliable, and not unit-testable.
-- **An agent framework.** The loop is about a hundred lines. Owning it keeps every decision visible.
-- **A native SQLite module or a database server.** `node:sqlite` ships with Node, so `npm install` has nothing to compile.
+SQLite stores answers, source hashes and per-item outcomes atomically. Background extraction remains unverified. A recent retry can target unfinished details. Durable request keys recover lost completions; interrupted research can resume for two minutes only when owner, context and execution policy still match. Saved usage survives restart, and cancellation never resumes automatically.
 
-## Limits today
+## Choices and next steps
 
-Date phrases are English only, there is one user, and topic recall is lexical.
+A modular service and SQLite keep transactions understandable. I rejected mandatory planning agents, provider federation and microservices before measurements justified more calls and failure paths. The tradeoffs are a single host, bounded lexical recall and provider latency. Multiple instances would need shared storage and coordination.
 
-## With another week
+The Azure demo uses HTTPS, managed-identity credentials, private backups and signed visitor cookies. Best-effort page-load records are separate from chats, retain pseudonymous identifiers for at most 14 days, and allow operator-labelled tests. They cannot identify a reviewer or establish unique-person counts.
 
-- **Nudges.** A background job that re-checks volatile claims and tells you when one changes, before you ask.
-- **True then-versus-now diffs,** by reading the archived version of a page as of the original date instead of relying on the stored claim alone.
-- **A shelf life per claim,** so prices are re-checked eagerly and stable facts are left alone.
-- **Graded evals.** A larger question set with answer scoring, and latency budgets enforced in CI.
+With another week, I would independently label the 25-conversation review queue and run paired real-provider quality and five-user latency trials. Deterministic HTTP diagnostics exercise behavior and contention; they do not measure model accuracy or production latency. Human factual labels remain pending. Reports retain failure counts and sample sizes, with p95 withheld below 20 samples.

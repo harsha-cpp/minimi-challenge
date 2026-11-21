@@ -1,62 +1,220 @@
 # asof
 
-A chat agent with one tool, web search, that remembers what it told you and when, so you can ask later whether it is still true.
+A chat agent with one tool, **web search**, and a memory of what it told you and when.
 
-The design is explained in [DESIGN.md](DESIGN.md).
+asof connects the current conversation to fresh web research. Ask a question, come back later, and check whether the answer still holds. Follow-ups stay anchored to the current chat, even when the viewpoint changes. Other conversations enter context only when you explicitly ask for personal memory or select a saved answer; their contents are reference records rather than fresh evidence.
 
-## Run it
+**Live demo:** [click here to open live demo](https://asof-f2gl2x6yvy64q.centralindia.cloudapp.azure.com/). No sign-in required. Each browser has its own chat history; return in the same browser to revisit earlier answers.
 
-Needs Node 22.13 or newer.
+[Design decisions](DESIGN.md) · [Architecture](docs/architecture/README.md) · [Evaluation](docs/evaluation.md)
+
+## What you can ask
+
+- “On Monday we shortlisted 5 CRM tools for a 20-person sales team. Have any of them shipped major updates since?”
+- “What did I ask you on 3 November? Is your answer still correct today?”
+- “Last Tuesday I asked you about Postgres hosting. Have any features changed since then?”
+
+These questions need an existing conversation history. A fresh installation starts with an empty memory; the agent should identify that gap rather than invent an earlier discussion. Ambiguous dates remain separate, and an empty requested date does not substitute a nearby or topic-matched conversation.
+
+Starter questions change when you start a new chat, and **Refresh suggestions** offers another set. For an ambiguous request such as “What did we discuss earlier, and is it still correct?”, the website offers matching saved questions with dates before starting research. Choosing one pins that exact answer inside the current chat without importing its transcript. Follow-ups such as “what about pricing?” retain the current subject. “Check the second option” can select an unambiguous numbered-list item or table row; the response identifies that limited scope. If the reference is ambiguous or recent history has no match, the agent asks before researching.
+
+The date picker also supports **era simulation**: answer from a selected historical perspective while researching the live web. Modern sources can establish historical events, but later outcomes should not be presented as knowledge available in that era. This is a reconstructed perspective, not a frozen historical internet.
+
+Choose **Standard** for fuller first-answer research, or **Fast** for a shorter answer using the smaller configured model. Live re-checks use a simpler path in both modes: up to four concurrent lookups, then one comparison call using the faster configured model. Source-specific reads focus on original prices, dates and conditions; update searches cover up to five target groups, with unrestricted discovery retained for moved or conflicting pages. A single sourced topic usually needs two lookups. The comparison also checks material facts in the full answer that background extraction may have missed. Results say what is **still correct**, **changed or corrected**, and **could not be confirmed**. Every confirmed item needs a cited source and matching supporting passage, selected through validated line ranges or exact quotations. Missing details stay specific instead of replacing the whole answer. Historical simulation retains its separate perspective checks. Provider response times still vary.
+
+Re-checks keep the selected answer inside the current chat. A single matching earlier answer can be resolved automatically; ambiguous topics ask for a choice before research. **Try checking again** preserves the original reference, date and answer mode. Recent retries can target unfinished details. Interrupted research offers **Resume saved research** for two minutes when the conversation and execution policy still match, retaining cumulative usage limits. A source or comparison outage is described for the selected topic and never treated as proof that nothing changed.
+
+## Architecture
+
+![asof architecture: browser, Node.js and TypeScript backend, model gateway, Exa search, SQLite, and background memory worker](docs/assets/asof-architecture-dark.png)
+
+The backend is one Node.js application with separate modules for orchestration, retrieval, memory and execution limits. [Claim coverage and recovery](docs/architecture/claim-coverage-recovery.md) describes the durable contracts behind re-check, retry and resume.
+
+1. **Accept the request.** The API validates the message, identifies its owner and conversation, pins the selected viewpoint, and admits the turn within queue and execution limits.
+2. **Prepare context.** Durable turn order preserves the current chat independently of the viewpoint. Follow-ups remain bound to an exact saved answer, owner and hash. Bounded ordinal or facet requests can narrow its scope without switching chats. Cross-conversation recall requires an explicit memory request or saved-answer selection. Earlier answers and source passages are untrusted data.
+3. **Research.** First answers use model-directed `web_search` calls. Live re-checks plan focused source reads and update searches in code, avoiding a planning-model round trip. Exa Search discovers pages; Exa Contents reads selected sources through the same tool. Validation, freshness, concurrency limits and bounded evidence packing control the work.
+4. **Answer and compare.** Live re-checks render a structured source comparison in one model call. Other explicit factual verification and historical simulation retain evidence/perspective review. Ordinary responses can stream provisionally.
+5. **Save and recover.** Accepted answers and cited evidence commit together in SQLite. Durable turn IDs support recovery after an interrupted connection. A completion event means the answer was saved; verification and factual simulation save before publishing their final prose.
+6. **Enrich memory.** Evidence review writes canonical claims with source hashes, viewpoint and review policy directly to memory. A background worker extracts ordinary answers as unverified records, using the same model gateway at lower priority. Exact matches and bounded concept aliases improve recall without weakening owner, conversation or date boundaries.
+
+Model requests share concurrency and token limits. Source passages, citation references and review outcomes make answers inspectable; model review still does not guarantee factual correctness.
+
+See the [backend capabilities](docs/architecture/README.md) and [conversation/memory boundaries](docs/architecture/context-memory-boundaries.md) for the detailed contracts.
+
+## Stack and models
+
+| Component | Implementation |
+| --- | --- |
+| Runtime | Node.js and TypeScript, executed with `tsx` |
+| Frontend | HTML, CSS and browser JavaScript |
+| Transport | HTTP/JSON requests and server-sent events (SSE) |
+| Standard answers, historical review and repair | Azure Foundry deployment `gpt-6.1-sol-1` |
+| Fast answers, live comparisons and background memory extraction | Azure Foundry deployment `gpt-6-luna-1` |
+| Model protocol | Responses API in the current configuration; Chat Completions adapter also available |
+| Web retrieval | Exa Search and Contents |
+| Persistence | Native Node SQLite, WAL and full-text search |
+| Answer rendering | Markdown with HTML sanitization |
+
+The model names above are this project's **configured Azure deployment names**. Set `LLM_MODEL` and `LLM_FAST_MODEL` to deployments available in your own account. They are not hardcoded requirements. If `LLM_FAST_MODEL` is empty, Fast mode is unavailable and extraction uses the main model. The fast deployment must support tool calling as well as JSON output. The current configuration uses `LLM_REASONING_EFFORT=low`.
+
+## Folder structure
+
+```text
+asof/
+├── src/
+│   ├── server.ts           # HTTP routes, streaming and application composition
+│   ├── config.ts           # Environment configuration and validation
+│   ├── clock.ts            # Real time and pinned viewpoints
+│   ├── agent/              # Context, prompts, research loop, evidence and review
+│   ├── llm.ts              # Model interface and Chat Completions adapter
+│   ├── llm/                # Responses adapter and shared model gateway
+│   ├── search.ts           # Public search interface
+│   ├── search/             # Exa adapter, cache, limits and retrieval profiles
+│   ├── memory/             # SQLite storage, recall, claims and durable jobs
+│   ├── runtime/            # Access policy, SSE and telemetry
+│   ├── time/               # Date parsing, calendar resolution and timezones
+│   └── temporal/           # Legacy temporal research utilities; outside live chat
+├── public/                 # Chat UI, citations and connection recovery
+├── test/                   # Network-free regression tests
+├── eval/                   # Frozen benchmarks and opt-in live evaluation
+├── scripts/                # History import and database operations
+├── docs/
+│   ├── assets/             # Architecture diagrams
+│   ├── architecture/       # Architecture, implementation and boundary documents
+│   ├── evaluation.md       # Quality methodology and remaining evidence gaps
+│   ├── operations.md       # Hosting, backups, restore and maintenance
+│   └── submission.md       # Setup and submission checks
+├── .github/                # CI configuration
+├── .env.example            # Public configuration template; no credentials
+├── .nvmrc                  # Pinned Node runtime
+├── DESIGN.md               # Concise design rationale and tradeoffs
+├── package.json            # Dependencies and commands
+└── data/                   # Local databases created at runtime; gitignored
+```
+
+## Setup
+
+### 1. Install dependencies
+
+From the repository root, use the Node version pinned in `.nvmrc` and `.node-version` (currently **24.22.3**). With nvm:
 
 ```sh
-cp .env.example .env   # fill in the two keys below
+nvm install
+nvm use
 npm install
-npm run dev            # http://localhost:3000
 ```
 
-| Variable | What it is |
+If you do not use nvm, install the pinned Node version with your preferred version manager. CI and reproducible installs can use `npm ci` with the committed lockfile. The package engine range also permits compatible Node 22 and 24 versions; the pinned version is the project's development/deployment baseline.
+
+### 2. Create your private configuration
+
+On a fresh checkout:
+
+```sh
+cp .env.example .env
+```
+
+Edit `.env` locally. Keep `.env.example` as a blank public template. **Do not commit your Foundry or Exa keys, put them in browser code, or share them with the repository.** Reviewers running their own copy supply their own credentials.
+
+### 3. Configure API keys and deployments
+
+Two provider keys are needed for live answers:
+
+| Variable | What to supply |
 | --- | --- |
-| `LLM_API_KEY`, `LLM_MODEL` | Any OpenAI-compatible Chat Completions model. Set `LLM_BASE_URL` for hosts other than OpenAI (Azure Foundry, Fireworks, ...). |
-| `EXA_API_KEY` | Web search, from [dashboard.exa.ai](https://dashboard.exa.ai/api-keys). |
+| `LLM_API_KEY` | Your Azure Foundry model endpoint key |
+| `EXA_API_KEY` | Your Exa API key |
+| `LLM_BASE_URL` | The OpenAI-compatible base URL for your Foundry resource |
+| `LLM_MODEL` | Your answer/review deployment name |
+| `LLM_FAST_MODEL` | Optional Fast-mode and memory-extraction deployment name |
+| `LLM_API_MODE` | `responses` for this project's current configuration, or `chat_completions` for a compatible host |
+| `LLM_REASONING_EFFORT` | Optional reasoning setting supported by your deployment; current configuration is `low` |
 
-The optional variables are described in `.env.example`.
+For example, replace the key and endpoint placeholders in your private `.env`:
 
-## Trying the date questions
+```dotenv
+LLM_API_KEY=YOUR_FOUNDRY_KEY
+LLM_BASE_URL=YOUR_FOUNDRY_OPENAI_COMPATIBLE_BASE_URL
+LLM_MODEL=gpt-6.1-sol-1
+LLM_FAST_MODEL=gpt-6-luna-1
+LLM_API_MODE=responses
+LLM_REASONING_EFFORT=low
 
-Questions like "what did I ask you on 3 November?" need a history, and a fresh clone has none. Three ways to get one:
-
-- **Move the clock.** Click the date stamp at the top right, travel to a past day, ask something, then return to now and ask about it. Starting the server with `AGENT_NOW=2026-11-03T10:00:00+05:30` does the same from the command line.
-- **Replay the brief.** `npm run eval` builds a history on 3 and 9 November, then asks the three questions from the brief on 11 November and prints each answer with its trace and timings.
-- **Import a history.** `npm run import -- history.json` loads a JSON array of `{ "at", "question", "answer" }`.
-
-**Ledger**, at the top right, shows everything the agent remembers: each conversation, the claims it made, and which of them were later re-checked.
-
-## Commands
-
-| | |
-| --- | --- |
-| `npm run dev` | Start the server and the page. |
-| `npm test` | Unit tests. They use no network and need no keys. |
-| `npm run typecheck` | Type-check with `tsc`. |
-| `npm run eval` | Replay the brief's questions against the real model and search. |
-| `npm run import -- file.json` | Load past conversations into memory. |
-
-## Layout
-
+EXA_API_KEY=YOUR_EXA_KEY
 ```
-src/
-  clock.ts            the one source of "now"; can be moved
-  time/resolve.ts     "last Tuesday" → calendar days, in code
-  time/zone.ts        calendar-day arithmetic in the user's timezone
-  memory/store.ts     SQLite: conversations, sources, claims
-  memory/recall.ts    finds the past conversations a message refers to
-  memory/enrich.ts    background step: summary, topics, claims
-  search.ts           the web_search tool (Exa)
-  llm.ts              the model (OpenAI-compatible)
-  agent/prompt.ts     system prompt and tool definition
-  agent/run.ts        one turn, start to finish
-  server.ts           HTTP, server-sent events, static page
-public/               the page: plain HTML, CSS and JS
-test/                 unit tests
-eval/replay.ts        the brief's questions, replayed with a moved clock
+
+Use your own deployment names if they differ. No separate OpenAI API key is needed when using the Foundry endpoint. Credentials are loaded by the Node backend.
+
+### 4. Complete the server configuration
+
+The connection settings above are only part of the required configuration. Complete all required settings in [.env.example](.env.example), following the [setup guide](docs/submission.md), before enabling live answers. Keep those values in your private `.env`. The server reports incomplete configuration rather than enabling an unconfigured provider.
+
+### 5. Run the app
+
+```sh
+npm run dev
 ```
+
+Open **http://localhost:3000**. Local mode binds to loopback. `PORT` changes the port, and `DB_PATH` selects the conversation database (default: `data/asof.db`).
+
+You can start the interface with credential fields left blank. It reports what is missing and cannot generate live answers until configuration is complete. `/healthz` reports liveness; `/readyz` reports configuration readiness, not a successful provider authentication test.
+
+## Build and validation
+
+There is no separate `npm run build` step in this project. `npm run dev` executes TypeScript with `tsx`, and the frontend is served directly from `public/`. No frontend bundler or separate database server is required.
+
+To validate the code with mock providers and frozen evidence:
+
+```sh
+npm run typecheck
+npm test
+npm run eval:benchmark
+npm run eval:comparison -- --users 5 --turns 25
+npm run eval:quality -- --validate-seed
+```
+
+The tests use temporary databases and mocked providers. The frozen benchmark checks pipeline behavior. The comparison diagnostic exercises the real HTTP path with deterministic providers and five concurrent users; its timings are application diagnostics, not live model or search latency. Seed validation checks the evaluation protocol. None of these commands establishes factual accuracy.
+
+## Useful commands
+
+| Command | Purpose | Live provider requests? |
+| --- | --- | --- |
+| `npm run dev` | Start the server and chat interface | When configured and used for chat/background extraction |
+| `npm run typecheck` | Check TypeScript | No |
+| `npm test` | Run regression tests | No |
+| `npm run eval:benchmark` | Run the frozen pipeline benchmark | No |
+| `npm run eval:comparison -- --users 5 --turns 25` | Run comparison regressions and a deterministic HTTP workload | No |
+| `npm run eval:quality -- --validate-seed` | Validate the quality seed/protocol | No |
+| `npm run eval` | Replay dated conversations with live providers | Yes |
+| `npm run eval:search` | Run Exa retrieval diagnostics | Yes |
+| `npm run eval:benchmark -- --live` | Run live end-to-end samples | Yes |
+| `npm run eval:simulation -- --live` | Evaluate historical-perspective answers | Yes |
+| `npm run eval:models` | Compare configured model deployments | Yes |
+| `npm run import -- history.json` | Import dated conversations and enrich their memory | Yes, for model extraction |
+| `npm run db:check -- data/asof.db` | Check application database integrity under current migrations | No |
+| `node --import tsx scripts/latency-report.ts --db data/asof.db` | Read aggregate timing, outcome and quality counts from retained traces | No |
+| `node --import tsx scripts/activity.ts report data/asof.db --tz Asia/Kolkata` | Read recorded page loads and chat activity separately | No |
+
+Imported history is a JSON array of objects with `at` (an ISO timestamp), `question`, and `answer`. See [operations](docs/operations.md) for backup, restore and retention commands, and [evaluation](docs/evaluation.md) for live-run protocols and their limitations.
+
+The focused [25-conversation review set](eval/quality/review-cases.json) covers follow-up references, date and pricing mistakes, full-answer coverage, ordinal selection and partial failures. Its routing assertions are automated; all factual labels remain pending independent human review. See [evaluation commands and limits](eval/README.md) for the separate regression, reference-review and live-provider tracks. Latency reports separate Standard/Fast, request intent, cancellations, waiting for input and provider failures. They report p95 only with at least 20 measured samples and do not treat a completed unverified answer as verified.
+
+## Hosting
+
+Run one service process on one host with local SQLite storage. For hosting, keep provider credentials in server-side secrets, terminate HTTPS at a proxy that supports unbuffered SSE, and configure `DEPLOYMENT_MODE=hosted`, exact `ALLOWED_ORIGINS`, and distinct private `OWNER_TOKENS`. To open the demo without sign-in, enable `PUBLIC_DEMO=1` with a random `PUBLIC_SESSION_SECRET`. Each browser receives its own signed history cookie. Clearing that cookie or using another browser starts a separate history. Private owner login remains available at `/login`.
+
+Successful page loads are recorded separately from chat turns using a salted visitor pseudonym. Records retain at most 14 days or 20,000 page loads and support operator-labelled test traffic. No IP address, user agent, cookie, URL parameters or question text is added to these visit records. Reloads and bots count as page requests; the report cannot identify a Minimi reviewer or establish unique-person counts. Recording is best effort and drops telemetry on database contention instead of delaying answers. See [website activity reporting](deploy/azure/README.md#website-activity) for commands and limits.
+
+Follow the [operations guide](docs/operations.md) before exposing the service.
+
+## Design and evaluation notes
+
+The architecture keeps deterministic work, including dates, memory visibility, validation and persistence, in code, and uses models for language understanding, research decisions and synthesis. SQLite and explicit interfaces keep the implementation small and testable. [DESIGN.md](DESIGN.md) explains the tradeoffs and alternatives considered.
+
+Current checks establish software behavior and development observations. They do not establish parity with commercial search assistants or independently verified factual accuracy. Human reference labeling, calibrated judging and representative latency/quality evaluation remain separate work. Automatic task-specific retrieval profiles are opt-in until paired evaluation supports enabling them; required verification and historical policies remain active.
+
+- [Architecture and active capabilities](docs/architecture/README.md)
+- [Implementation record](docs/architecture/backend-search-implementation.md)
+- [Evaluation methodology](docs/evaluation.md)
+- [Workload measurements and limits](docs/evaluation-workload.md)
+- [Submission guide](docs/submission.md)

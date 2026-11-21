@@ -1,6 +1,15 @@
 node_modules/
 data/
-.env
+.env*
+!.env.example
 .DS_Store
 research_notes/
 reports/
+
+.context/
+.playwright-cli/
+output/playwright/
+*.log
+*.db
+*.db-shm
+*.db-wal

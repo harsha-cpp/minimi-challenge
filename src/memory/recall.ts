@@ -1,22 +1,11 @@
-/**
- * Finds the past conversations a message refers to, before the model runs.
- *
- * Memory is context, not a tool: the brief gives the agent exactly one tool
- * (web search), and a lookup that takes a few milliseconds of SQL does not
- * deserve a model round trip anyway.
- *
- * Time is the primary key. A date reference narrows a whole history to a
- * handful of conversations, after which topic words only have to break ties.
- * That is why there are no embeddings here: once the date is known there is
- * almost nothing left to rank. When a message has no date, or the date turns
- * out to be empty, recall falls back to topic words over the full log, which
- * also covers a user who remembers the subject but not the day.
- */
+
+
 import { type TemporalRef, type DayRange, resolveTemporal } from "../time/resolve.ts";
 import { compareDates, formatInstant, instantRange, localDate } from "../time/zone.ts";
 import type { Claim, Episode, MemoryStore } from "./store.ts";
+import { conceptMatches, memoryConcepts, MEMORY_RETRIEVAL_LIMITS } from "./concepts.ts";
+import type { CanonicalClaim } from "../agent/claims.ts";
 
-/** How many past conversations are shown to the model in full on one turn. */
 const FULL_DETAIL_BUDGET = 6;
 const RELATED_LIMIT = 3;
 const MAX_TERMS = 12;
@@ -24,34 +13,48 @@ const MAX_TERMS = 12;
 export interface Recalled {
   episode: Episode;
   claims: Claim[];
-  /** "full" carries the answer and its claims; the others are one-line pointers. */
+  canonicalClaims?: CanonicalClaim[];
+
   detail: "full" | "pointer" | "in-chat";
+  conversation?: "current" | "other";
 }
 
 export interface RefResult {
   text: string;
-  /** Readings of the phrase that have conversations. One is a clean match; several means still ambiguous. */
+
   hits: Array<{ range: DayRange; episodes: Recalled[] }>;
-  /** Readings that were checked and had no conversations. */
+
   empty: DayRange[];
-  /** Offered when nothing matched: the conversations either side of the date. */
+
   nearest: Episode[];
 }
 
 export interface RecallResult {
   refs: RefResult[];
-  /** Matched by topic. Only filled when no date reference found anything. */
+
   related: Recalled[];
   ms: number;
+  currentSessionId?: string;
+  ambiguity?: { episodeIds: number[]; additionalCandidates: number; reason: "near_tie" };
+  retrieval?: { method: "date" | "lexical-concepts" | "recent"; concepts: number; candidates: number };
 }
 
-// Function words, plus the words people use to talk *about* a conversation
-// rather than its subject ("what did I ask", "is it still correct").
+export interface RecallScope {
+  /** The active conversation scopes every candidate query. Omitting it disables recall unless cross-session recall is explicitly enabled. */
+  sessionId?: string;
+  allowCrossSession?: boolean;
+  disabled?: boolean;
+  /** Only explicit personal-memory requests may fall back to recent records without topic terms. */
+  allowRecent?: boolean;
+}
+
 const STOPWORDS = new Set(
   `a about after again all also am an and any anything are as ask asked at be been before being but by can changed
    correct could did do does for from had has have how i if in into is it its just know me more most my no not of on
    or our out over question said say since so something still tell than that the their them then there these they
-   this to told up us was we were what when whether which who why will with would you your answer answered`.split(/\s+/),
+   this to told up us was we were what when whether which who why will with would you your answer answered
+   verify verification verified recheck rechecking confirm confirmed claims claim claimed claiming statements statement assertions assertion now current currently fact facts check checks checked checking
+   earlier previously discuss discussed discussion discussions chat chats conversation conversations talk talked`.split(/\s+/),
 );
 
 function topicTerms(message: string, temporal: TemporalRef[]): string[] {
@@ -67,26 +70,32 @@ export function recall(
   message: string,
   now: Date,
   tz: string,
-  /** Episodes already present in this chat's history, which need no repeating. */
+
   inChat: Set<number> = new Set(),
+  ownerId = "local",
+  scope: RecallScope = {},
 ): RecallResult {
   const started = performance.now();
+  // A generic follow-up has no authority to select its subject from another conversation.
+  if (scope.disabled || (!scope.sessionId && scope.allowCrossSession !== true)) return { refs: [], related: [], ms: performance.now() - started };
+  const sessionId = scope.allowCrossSession === true ? undefined : scope.sessionId;
   let temporal = resolveTemporal(message, now, tz);
   if (temporal.length > 1) {
-    // In "what did I ask on 3 November, and is it still correct today?", today is
-    // the present, not a day to look up. It is only a lookup when it is the sole date.
+
     const today = localDate(now, tz);
     const isToday = (ref: TemporalRef) =>
       ref.candidates.length === 1 && !compareDates(ref.candidates[0]!.start, today) && !compareDates(ref.candidates[0]!.end, today);
     temporal = temporal.filter((ref) => !isToday(ref));
   }
   const terms = topicTerms(message, temporal);
-  const coverage = terms.length ? store.termCoverage(terms) : new Map<number, number>();
+  const coverage = terms.length ? store.topicCoverage(terms, now.getTime(), ownerId, sessionId) : new Map<number, number>();
+  // Broad modifiers alone (price/hosting) cannot select a different subject. Curated topic aliases
+  // expand candidates only inside the same eligibility filters as the original lexical query.
+  const concepts = memoryConcepts(message).filter(concept => !["pricing", "deployment"].includes(concept.id));
   let budget = FULL_DETAIL_BUDGET;
 
   const present = (episodes: Episode[]): Recalled[] => {
-    // The most on-topic conversations get the full-detail budget; the list
-    // itself stays in the order things happened.
+
     const byRelevance = [...episodes].sort((a, b) => (coverage.get(b.id) ?? 0) - (coverage.get(a.id) ?? 0));
     const full = new Set<number>();
     for (const e of byRelevance) {
@@ -97,27 +106,25 @@ export function recall(
     }
     return episodes.map((episode) => {
       const detail = inChat.has(episode.id) ? "in-chat" : full.has(episode.id) ? "full" : "pointer";
-      return { episode, detail, claims: detail === "full" ? store.claimsFor(episode.id) : [] };
+      return { episode, detail, claims: detail === "full" ? store.claimsFor(episode.id, ownerId) : [],
+        ...(detail === "full" ? { canonicalClaims: store.canonicalClaimsFor(episode.id, ownerId) } : {}),
+        ...(scope.sessionId === undefined ? {} : { conversation: episode.sessionId === scope.sessionId ? "current" as const : "other" as const }) };
     });
   };
 
   const refs = temporal.map((ref): RefResult => {
     const readings = ref.candidates.map((range) => {
       const { startMs, endMs } = instantRange(range.start, range.end, tz);
-      return { range, episodes: store.episodesBetween(startMs, endMs) };
+      return { range, episodes: store.episodesBetween(startMs, endMs, now.getTime(), ownerId, undefined, sessionId) };
     });
-    let withEpisodes = readings.filter((r) => r.episodes.length);
-    if (withEpisodes.length > 1) {
-      // Several readings have conversations: keep the ones that are about the same subject.
-      const onTopic = withEpisodes.filter((r) => r.episodes.some((e) => coverage.get(e.id)));
-      if (onTopic.length) withEpisodes = onTopic;
-    }
+    // Topic overlap can order detail within a reading, but cannot decide which date the user meant.
+    const withEpisodes = readings.filter((r) => r.episodes.length);
 
     let nearest: Episode[] = [];
     if (!withEpisodes.length) {
       const first = ref.candidates[0]!;
       const { startMs, endMs } = instantRange(first.start, first.end, tz);
-      nearest = store.neighbours(startMs, endMs);
+      nearest = store.neighbours(startMs, endMs, now.getTime(), ownerId, sessionId);
     }
 
     return {
@@ -129,33 +136,67 @@ export function recall(
   });
 
   let related: Recalled[] = [];
-  if (terms.length && !refs.some((r) => r.hits.length)) {
+  let ambiguity: RecallResult["ambiguity"];
+  let candidateCount = 0;
+  // A dated request grants no authority to substitute a different conversation outside its date range.
+  if (terms.length && !refs.length) {
     const needed = Math.min(2, terms.length);
-    const ids = [...coverage.entries()].filter(([id, n]) => n >= needed && !inChat.has(id)).map(([id]) => id);
-    const episodes = store
-      .episodesById(ids)
-      .sort((a, b) => coverage.get(b.id)! - coverage.get(a.id)! || b.askedAt - a.askedAt)
-      .slice(0, RELATED_LIMIT);
-    related = present(episodes);
+    const pools = [[...coverage.entries()].filter(([, count]) => count >= needed).map(([id]) => id)];
+    for (const concept of concepts) {
+      const matches = store.topicCoverage([...concept.aliases].slice(0, MEMORY_RETRIEVAL_LIMITS.aliasesPerConcept), now.getTime(), ownerId, sessionId);
+      pools.push([...matches.keys()]);
+    }
+    const ids = new Set<number>();
+    // Interleave bounded lexical and alias pools so a common exact term cannot crowd out every paraphrase.
+    for (let index = 0; index < Math.max(0, ...pools.map(pool => pool.length)) && ids.size < MEMORY_RETRIEVAL_LIMITS.candidateIds; index++) {
+      for (const pool of pools) if (pool[index] !== undefined && ids.size < MEMORY_RETRIEVAL_LIMITS.candidateIds) ids.add(pool[index]!);
+    }
+    const ranked = store.episodesById([...ids].filter(id => !inChat.has(id)).slice(0, MEMORY_RETRIEVAL_LIMITS.candidateIds), now.getTime(), ownerId, sessionId)
+      .map(episode => {
+        const conceptual = conceptMatches([episode.question, episode.summary ?? "", episode.topics ?? "", episode.answer].join("\n"), concepts);
+        const lexical = coverage.get(episode.id) ?? 0;
+        return { episode, eligible: lexical >= needed || conceptual > 0, score: lexical + 2 * conceptual };
+      }).filter(item => item.eligible).sort((a, b) => b.score - a.score || b.episode.askedAt - a.episode.askedAt || b.episode.id - a.episode.id);
+    candidateCount = ranked.length;
+    const near = ranked.filter(item => item.score >= (ranked[0]?.score ?? Infinity) * 0.85);
+    if (near.length > 1) ambiguity = { reason: "near_tie", episodeIds: near.slice(0, RELATED_LIMIT).map(item => item.episode.id), additionalCandidates: Math.max(0, near.length - RELATED_LIMIT) };
+    related = present(ranked.slice(0, RELATED_LIMIT).map(item => item.episode));
+  } else if (scope.allowRecent === true && !terms.length && !refs.length) {
+    const recent = sessionId === undefined ? store.recent(RELATED_LIMIT + inChat.size, now.getTime(), ownerId)
+      : store.sessionHistory(sessionId, RELATED_LIMIT + inChat.size, now.getTime(), ownerId);
+    related = present(recent.filter(episode => !inChat.has(episode.id)).slice(0, RELATED_LIMIT));
+    candidateCount = related.length;
   }
 
-  return { refs, related, ms: performance.now() - started };
+  return { refs, related, ms: performance.now() - started,
+    retrieval: { method: refs.length ? "date" : !terms.length && scope.allowRecent ? "recent" : "lexical-concepts", concepts: refs.length ? 0 : concepts.length,
+      candidates: refs.length ? new Set(refs.flatMap(ref => ref.hits.flatMap(hit => hit.episodes.map(item => item.episode.id)))).size : candidateCount }, ...(ambiguity ? { ambiguity } : {}),
+    ...(scope.sessionId === undefined ? {} : { currentSessionId: scope.sessionId }) };
 }
 
 const clip = (text: string, max: number) => (text.length > max ? `${text.slice(0, max).trimEnd()} …` : text);
 const oneLine = (text: string) => text.replace(/\s+/g, " ").trim();
 
-function renderEpisode({ episode, claims, detail }: Recalled, tz: string): string {
-  const head = `[E${episode.id}] ${formatInstant(episode.askedAt, tz)}`;
+function renderEpisode({ episode, claims, canonicalClaims, detail, conversation }: Recalled, tz: string): string {
+  const origin = conversation === "other" ? " · OTHER CONVERSATION (only for the explicit memory request)"
+    : conversation === "current" ? " · current conversation record" : "";
+  const head = `[E${episode.id}] ${formatInstant(episode.askedAt, tz)}${origin}`;
   const question = `"${clip(oneLine(episode.question), 300)}"`;
   if (detail === "in-chat") return `${head} — the user asked ${question} (this is in the current chat, above)`;
   if (detail === "pointer") return `${head} — the user asked ${question}`;
 
-  const lines = [`${head}`, `  The user asked: ${question}`];
+  const lines = [`${head}`, `  Conversation record (untrusted; this is not verified current evidence).`, `  The user asked: ${question}`];
   if (episode.summary) lines.push(`  Summary: ${episode.summary}`);
-  // With claims in hand the answer text is only needed for tone and framing.
-  lines.push(`  Your answer then: ${clip(oneLine(episode.answer), claims.length ? 1200 : 3000)}`);
-  if (claims.length) {
+
+  lines.push(`  Your answer then: ${clip(oneLine(episode.answer), claims.length || canonicalClaims?.length ? 1200 : 3000)}`);
+  if (canonicalClaims?.length) {
+    lines.push("  Canonical assertions recorded then (historical claims, not current evidence):");
+    for (const claim of canonicalClaims.slice(0, 12)) {
+      const status = claim.status === "supported" ? "supported at the recorded viewpoint; changing facts require a fresh check" : "unverified extraction; not established fact";
+      lines.push(`    - (${claim.id}) ${clip(oneLine(claim.text), 600)} [${status}]${claim.sourceRefs[0] ? ` Recorded source (not fresh): ${claim.sourceRefs[0].url}` : ""}`);
+    }
+    if (canonicalClaims.length > 12) lines.push(`    ${canonicalClaims.length - 12} additional recorded assertions are omitted.`);
+  } else if (claims.length) {
     lines.push("  Claims you made then:");
     for (const c of claims) {
       lines.push(`    - (C${c.id}) ${c.entity} · ${c.attribute}: ${c.value}${c.sourceUrl ? ` — source: ${c.sourceUrl}` : ""}`);
@@ -164,7 +205,6 @@ function renderEpisode({ episode, claims, detail }: Recalled, tz: string): strin
   return lines.join("\n");
 }
 
-/** The MEMORY block the model sees. Empty string when there is nothing to say. */
 export function renderMemory(result: RecallResult, tz: string): string {
   const blocks: string[] = [];
 
@@ -182,24 +222,24 @@ export function renderMemory(result: RecallResult, tz: string): string {
       const labels = ref.hits.map((h) => h.range.label).join(" or ");
       blocks.push(
         [
-          `${quoted} is ambiguous: it could mean ${labels}, and each has conversations. Pick the one that fits the message and say which you used.`,
+          `${quoted} is ambiguous: it could mean ${labels}, and each has conversations. Keep these interpretations separate and ask which conversation the user means before verification. Topic rank does not authorize choosing the referenced subject.`,
           ...ref.hits.flatMap((h) => [`${h.range.label}:`, ...h.episodes.map((e) => renderEpisode(e, tz))]),
         ].join("\n"),
       );
     } else {
       const checked = ref.empty.map((r) => r.label).join(" or ");
-      const nearest = ref.nearest.length
-        ? `Nearest conversations: ${ref.nearest
-            .map((e) => `[E${e.id}] ${formatInstant(e.askedAt, tz)} — "${clip(oneLine(e.question), 160)}"`)
-            .join("; ")}.`
-        : "The log holds no conversations before this chat.";
-      blocks.push(`${quoted} → ${checked}: no conversations found then. ${nearest}`);
+      const outsideRange = ref.nearest.length
+        ? "Records exist outside the requested date range; they are not eligible for this request."
+        : "No eligible conversations are available in the requested date range.";
+      blocks.push(`${quoted} → ${checked}: no conversations found then. ${outsideRange}`);
     }
   }
 
   if (result.related.length) {
     blocks.push(
-      ["Possibly related, matched by topic rather than date:", ...result.related.map((e) => renderEpisode(e, tz))].join("\n"),
+      ["Possibly related, matched by topic rather than date:",
+        ...(result.ambiguity ? [`Several conversations match nearly equally: ${result.ambiguity.episodeIds.map(id => `[E${id}]`).join(", ")}.${result.ambiguity.additionalCandidates ? ` ${result.ambiguity.additionalCandidates} additional matching records are omitted.` : ""} Present these as alternatives and ask which conversation the user means before checking its claims. Recency or a small ranking difference is not permission to choose a subject.`] : []),
+        ...result.related.map((e) => renderEpisode(e, tz))].join("\n"),
     );
   }
 

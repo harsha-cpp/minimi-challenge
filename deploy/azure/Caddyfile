@@ -1,0 +1,6 @@
+# Set ASOF_DOMAIN in the Caddy service environment to the deployment hostname.
+{$ASOF_DOMAIN} {
+    reverse_proxy 127.0.0.1:3000 {
+        flush_interval -1
+    }
+}
