@@ -31,6 +31,26 @@ The `/candidate/submit` body sends `faceapi_attributes` (no-face, multiple-faces
 tab-switching) computed in the browser, so they can be forged. Do real proctoring and
 grading server-side.
 
+## 5. No anonymous access to questions (auth gate holds) — key-leak scope
+All candidate data endpoints enforce an access-token cookie and return
+`401 "Access token not found"` without it (`/candidate/questions`,
+`/candidate/instructions`, `/candidate/check-login-status`). So the private-key
+leak (1) does **not** let an anonymous attacker read the question bank: the key is
+only useful once the encrypted `token`s are obtained, which requires a candidate
+session. Exploit paths are therefore (a) any valid candidate session, or (b)
+capturing a specific candidate's ciphertext (e.g. via the `console.log` dumps or
+Sentry error payloads).
+
+## 6. API documentation is publicly exposed (info leak)
+`/docs` (Swagger UI) and `/primehire/api/v1/openapi.json` return 200 to anyone,
+exposing the full API surface — including back-office routes such as `/assessment`,
+`/interview`, `/interview/{id}/report`, `/partner/*` (add / enable / disable /
+credential reset), `/partner/{id}/credits/*` (credit system), and
+`/response/{id}/generate-report`. These routes require auth, but publishing the map
+aids targeting. Disable or authenticate the docs/openapi endpoints in production.
+CORS was checked and is correctly allow-listed (origin not reflected); `/health` is
+open and benign.
+
 ## Files in this folder
 - `ALL_URLS.txt` — the 56 openly-fetchable media URLs referenced by the frontend.
 - `MANIFEST.csv` — each URL with HTTP status, byte size, and detected file type.
