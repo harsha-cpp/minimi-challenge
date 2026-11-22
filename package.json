@@ -32,7 +32,7 @@
     "dompurify": "^3.4.17",
     "jsdom": "^27.4.0",
     "marked": "^18.2.0",
-    "openai": "^7.55.0",
+    "openai": "^7.60.0",
     "tsx": "^4.23.15"
   },
   "devDependencies": {
